@@ -1,0 +1,722 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=0.9in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{multirow}
+\usepackage{tabularx}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  pdftitle={On The Porch Architecture Comparison},
+  pdfauthor={On The Porch Team}
+}
+
+\definecolor{currentbg}{RGB}{255,245,235}
+\definecolor{proposedbg}{RGB}{235,245,255}
+\definecolor{codebg}{RGB}{245,245,245}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\newcommand{\current}[1]{\colorbox{currentbg}{\parbox{\dimexpr\linewidth-2\fboxsep}{#1}}}
+\newcommand{\proposed}[1]{\colorbox{proposedbg}{\parbox{\dimexpr\linewidth-2\fboxsep}{#1}}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textsc{On The Porch}}
+\fancyhead[R]{\textsc{Architecture Comparison}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\textbf{On The Porch}\\[0.4em]
+\Large Current vs.\ Proposed Architecture\\
+\large A Beginner-Friendly, Systematic Comparison}
+\author{Technical Design Document}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+This document compares two ways to build \textbf{On The Porch}, a Dorchester community chatbot: the \textbf{current implementation} in this repository and a \textbf{proposed greenfield design} optimized for 130,000 residents, sub-5-second responses, and production reliability. It is written for readers who are new to the project. We explain key concepts first, then describe each architecture separately, then compare feature-by-feature with clear tables and plain language. Finally, we explain \emph{why} the current system underperforms in specific areas and how it can be improved.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\part{Foundations for Beginners}
+%=============================================================================
+
+\section{What Is This App?}
+
+\textbf{On The Porch} is a website where Dorchester residents ask questions in plain English and receive answers grounded in local data: neighborhood news, 311 service requests, 911/crime statistics, community events, policy documents, and more.
+
+Think of it as three things working together:
+\begin{enumerate}[noitemsep]
+  \item A \textbf{website} (buttons, chat box, events sidebar) that users see in the browser.
+  \item A \textbf{backend API} (a program running on a server) that receives questions, looks up data, and calls an AI model.
+  \item A \textbf{data layer} (databases and search indexes) that stores civic data and documents, kept fresh by scheduled \textbf{ingestion jobs}.
+\end{enumerate}
+
+\section{Glossary of Terms}
+
+\begin{description}[style=nextline, leftmargin=2.5cm]
+  \item[Frontend] The code that runs in the user's browser: HTML, CSS, JavaScript. Files live in \texttt{public/}.
+  \item[Backend / API] The server program that handles login, chat, events, and admin. Here: \texttt{api/api\_v2.py} (Flask).
+  \item[LLM] Large Language Model --- the AI (e.g.\ Gemini) that reads context and writes natural-language answers.
+  \item[MySQL] A relational database for structured data: users, chat threads, 311 rows, events tables.
+  \item[Vector database] A search index for \emph{meaning} --- finds document chunks similar to a question even if words differ. Current project uses \textbf{ChromaDB} (SQLite file on disk).
+  \item[RAG] Retrieval-Augmented Generation --- fetch relevant documents first, then ask the LLM to answer using only those documents.
+  \item[SQL path] Answer by running a database query (counts, lists, trends) instead of searching documents.
+  \item[Hybrid] Run both SQL and RAG, then merge results with another LLM call.
+  \item[Ingestion] Background jobs that download/sync data from Boston Open Data, RSS, Google Drive, etc., into MySQL and the vector store.
+  \item[SSE / Streaming] Server-Sent Events --- the server sends answer tokens one-by-one so the user sees text appear progressively.
+  \item[Redis] An in-memory cache server shared across multiple API workers (sessions, rate limits, optional answer cache).
+  \item[Gunicorn] A production web server that runs multiple copies (workers) of the Flask app for concurrency.
+  \item[Guest session] A temporary user identity stored in the browser tab --- no password required.
+\end{description}
+
+\section{How to Read This Document}
+
+\begin{itemize}[noitemsep]
+  \item \current{Orange-tinted boxes} summarize the \textbf{current} project.
+  \item \proposed{Blue-tinted boxes} summarize the \textbf{proposed} design.
+  \item Comparison tables use \textbf{Current} and \textbf{Proposed} columns.
+  \item ``LLM calls'' means round-trips to Gemini --- each adds roughly 0.5--3 seconds of latency and costs money.
+\end{itemize}
+
+%=============================================================================
+\part{Current Project Architecture}
+%=============================================================================
+
+\section{High-Level Picture (Current)}
+
+\current{
+\textbf{Stack:} Vanilla JS frontend $\rightarrow$ Flask API (\texttt{api\_v2.py}) $\rightarrow$ \texttt{unified\_chatbot.py} $\rightarrow$ MySQL + ChromaDB + Gemini API.
+
+\textbf{Deployment:} Can run as Flask dev server or Gunicorn (\texttt{start\_api.sh}). Optional local Redis (\texttt{start\_redis.sh}). Static frontend via \texttt{python -m http.server}.
+
+\textbf{Repo layout:} \texttt{public/} (UI), \texttt{api/} (Flask), \texttt{on\_the\_porch/unified\_chatbot.py} (brain), \texttt{sql\_chat/app4.py} (SQL), \texttt{rag stuff/retrieval.py} (vectors), \texttt{data\_ingestion/} (cron).
+}
+
+\subsection{Request Flow (Current Chat)}
+
+When a user sends a message, this is the typical path:
+
+\begin{enumerate}
+  \item Browser calls \texttt{POST /conversations/\{id\}/messages/stream} (SSE) or non-streaming POST.
+  \item Flask authenticates (cookie session or guest Bearer token), checks CSRF, rate limits.
+  \item API loads thread history from MySQL, releases DB connection.
+  \item \texttt{unified\_chatbot} runs:
+  \begin{enumerate}
+    \item Small-talk check (instant, no LLM) --- or continue.
+    \item Optional semantic cache hit (embedding similarity) --- or continue.
+    \item If follow-up: \textbf{LLM call \#1} --- ``does this need new data?'' (\texttt{\_check\_if\_needs\_new\_data})
+    \item If can use cache/history: \textbf{LLM call} --- answer from history --- done.
+    \item Else: \textbf{LLM call \#2} --- route to sql/rag/hybrid (\texttt{\_route\_question})
+    \item Execute mode:
+    \begin{itemize}
+      \item \textbf{SQL:} pick tables (LLM) $\rightarrow$ generate SQL (LLM) $\rightarrow$ run MySQL $\rightarrow$ summarize (LLM). Events fast-path skips some steps for generic calendar questions.
+      \item \textbf{RAG:} parallel retrieval from 4 sources $\rightarrow$ compose answer (LLM, streamed).
+      \item \textbf{Hybrid:} SQL + RAG in parallel $\rightarrow$ merge (LLM).
+    \end{itemize}
+    \item Non-streaming: Boston.gov fallback may add scrape + classifier + regeneration.
+    \item Streaming: fallback runs \emph{after} stream via \texttt{correction} event (recent improvement).
+  \end{enumerate}
+  \item API saves messages to MySQL, logs interaction, returns response.
+\end{enumerate}
+
+\textbf{Typical LLM count:} 3--6 calls per non-trivial question. \textbf{Typical latency:} 5--30+ seconds for complex hybrid questions; 1--3s for chitchat or cache hits.
+
+\begin{verbatim}
+Browser -> api_v2.py -> unified_chatbot.py
+              |              |-- is_small_talk? (0 LLM)
+              |              |-- semantic cache? (0-1 embed)
+              |              |-- needs_new_data? (1 LLM)
+              |              |-- route_question (1 LLM)
+              |              |-- sql / rag / hybrid (1-3 LLM)
+              |              |-- boston.gov fallback (0-2 LLM, non-stream)
+              v
+         MySQL + ChromaDB + Gemini
+\end{verbatim}
+
+\section{Current: Frontend}
+
+\begin{itemize}
+  \item \textbf{Technology:} Plain HTML/CSS/JS --- no React framework.
+  \item \textbf{Files:} \texttt{public/app.js} (UI logic), \texttt{public/api.js} (HTTP client), \texttt{public/config.js}.
+  \item \textbf{Guest-by-default:} On load, \texttt{ensureSession()} creates guest via \texttt{POST /auth/guest}; stores Bearer token in \texttt{sessionStorage}.
+  \item \textbf{Registered users:} HttpOnly cookies + CSRF header on mutations.
+  \item \textbf{Streaming:} Enabled by default; SSE with 120s client timeout (recent addition).
+  \item \textbf{Instant replies:} \texttt{instantReplies.js} shows chitchat locally before server confirms.
+  \item \textbf{Events panel:} Fetches \texttt{GET /events} on load --- correctly decoupled from chat LLM.
+  \item \textbf{Admin:} Separate \texttt{admin.html} page; checks session and blocks guests.
+\end{itemize}
+
+\section{Current: Authentication}
+
+\begin{itemize}
+  \item Password signup/login (Argon2 hashing).
+  \item Google OAuth \textbf{removed} in recent work.
+  \item Guest users: ephemeral DB row + Bearer session (24h TTL), tab-scoped.
+  \item Admin promotion via \texttt{AUTH\_ADMIN\_EMAILS} env list (never for guests).
+  \item Rate limits: guest creation per IP; chat per session (Redis if configured, else per-worker memory).
+  \item Guest cleanup cron script (\texttt{cleanup\_guest\_users.py}) --- opt-in via env flag.
+\end{itemize}
+
+\section{Current: Data Storage}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Store} & \textbf{Used for} \\
+\midrule
+MySQL & Users, sessions, threads, messages, 311/911 tables, events, admin knowledge, interaction logs \\
+ChromaDB (\texttt{vectordb\_new/}) & Document embeddings (news, policies, transcripts) --- SQLite-backed files \\
+Redis (optional) & Session cache for legacy \texttt{/chat}, rate limits, semantic cache is \emph{in-process only} \\
+Flask session / memory & Per-worker caches when Redis not enabled \\
+\bottomrule
+\end{tabular}
+\caption{Current data stores}
+\end{table}
+
+\textbf{Pain point:} Chroma uses a local SQLite file. When the ingestion cron writes while users read, SQLite can lock --- retrieval retries with WAL mode, but contention remains at scale.
+
+\section{Current: Ingestion Pipeline}
+
+\texttt{cron\_ingest.sh} runs sequentially (with \texttt{flock} lock):
+\begin{enumerate}[noitemsep]
+  \item Boston 311 \& 911 sync
+  \item DotNews newsletter ingest
+  \item Tribe events
+  \item RSS via \texttt{ingest\_rss\_wayback.py} (can be slow --- Wayback backfill)
+  \item Google Drive $\rightarrow$ vector DB
+  \item Guest user cleanup
+\end{enumerate}
+
+MySQL updates are incremental (upsert) --- safe for live readers. Vector writes go \emph{directly} into the live Chroma store (no blue-green swap).
+
+\section{Current: Chat Intelligence Details}
+
+\subsection{Routing (\texttt{\_route\_question})}
+\begin{itemize}
+  \item Large prompt with many mandatory rules sent to \texttt{GEMINI\_FAST\_MODEL}.
+  \item Returns JSON: \texttt{\{mode, transcript\_tags, policy\_sources, k\}}.
+  \item JSON parse failure $\rightarrow$ defaults to \textbf{hybrid} (slowest path).
+\end{itemize}
+
+\subsection{Follow-up gate (\texttt{\_check\_if\_needs\_new\_data})}
+\begin{itemize}
+  \item Separate LLM call on every follow-up when history/cache exists.
+  \item Prompt bias: ``when in doubt, fetch new data'' --- increases latency but reduces stale answers.
+\end{itemize}
+
+\subsection{SQL path (\texttt{sql\_chat/app4.py})}
+\begin{itemize}
+  \item Schema snapshot (cached with TTL --- improvement added).
+  \item LLM picks relevant tables.
+  \item LLM generates SQL string.
+  \item Executes on MySQL with retries.
+  \item LLM summarizes results into natural language.
+  \item \textbf{Fast path:} \texttt{run\_generic\_events\_query()} for ``events this week'' --- direct SQL, fewer LLM calls.
+\end{itemize}
+
+\subsection{RAG path (\texttt{retrieval.py})}
+\begin{itemize}
+  \item Four parallel retrievals: RSS, Boston.gov cache, transcripts, policies.
+  \item Each embeds the query separately (Gemini embedding API).
+  \item Chroma similarity search; on lock failure, keyword scan over \emph{entire} collection (expensive).
+  \item LLM composes final answer from top chunks.
+\end{itemize}
+
+\subsection{Caching}
+\begin{itemize}
+  \item \textbf{Semantic cache} (\texttt{api/semantic\_cache.py}): off by default; in-process per worker; first-turn only.
+  \item \textbf{Thread state JSON:} stores last SQL/RAG results for follow-ups.
+  \item \textbf{Legacy /chat session cache:} Redis or memory --- not used by main conversation API path.
+\end{itemize}
+
+\section{Current: Events Panel}
+
+\begin{itemize}
+  \item \texttt{GET /events?days\_ahead=14\&limit=10} reads MySQL \texttt{weekly\_events} (or similar).
+  \item No LLM involved --- good design.
+  \item Panel loads in parallel with auth --- good design.
+  \item Client-side event card layout with ResizeObserver (recent bug fix for \texttt{eventsPanel}).
+\end{itemize}
+
+\section{Current: Admin Dashboard}
+
+\begin{itemize}
+  \item \texttt{public/admin.html} --- stats, flagged interactions, knowledge CRUD, community notes chat.
+  \item Protected by \texttt{\_require\_admin()} + guest block.
+  \item CSRF on mutating routes (recent security hardening).
+  \item Knowledge changes trigger background Chroma re-ingest thread.
+\end{itemize}
+
+\section{Current: Deployment \& Operations}
+
+\begin{itemize}
+  \item \textbf{Dev:} \texttt{python api/api\_v2.py} (Flask threaded).
+  \item \textbf{Prod-capable:} \texttt{./start\_api.sh} $\rightarrow$ Gunicorn, 3 workers $\times$ 8 threads.
+  \item \textbf{Redis:} Optional; required for correct rate limits across workers.
+  \item \textbf{Health:} \texttt{/health} checks MySQL, Redis, Chroma (recent expansion).
+  \item \textbf{Observability:} Print logging; no structured metrics/tracing by default.
+\end{itemize}
+
+%=============================================================================
+\part{Proposed Greenfield Architecture}
+%=============================================================================
+
+\section{High-Level Picture (Proposed)}
+
+\proposed{
+\textbf{Stack:} Modern SPA (React or Vite JS) $\rightarrow$ FastAPI/Flask behind load balancer $\rightarrow$ single \textbf{Chat Orchestrator} $\rightarrow$ PostgreSQL + Qdrant + Redis + Gemini.
+
+\textbf{Key difference:} Cap LLM calls at 1--2 per question. Precompute aggregates. Decouple all non-chat surfaces from the LLM.
+
+\textbf{Deployment:} Containerized API pods (autoscaling), managed PostgreSQL, managed Redis cluster, Qdrant Cloud or self-hosted vector DB, CDN for static assets, separate ingestion worker fleet.
+}
+
+\subsection{Request Flow (Proposed Chat)}
+
+\begin{enumerate}
+  \item \textbf{Tier 0} ($<$100ms): Rules, exact cache, FAQ, chitchat --- \textbf{zero LLM}.
+  \item \textbf{Tier 1} ($<$200ms): Hybrid intent classifier (keywords + regex + tiny model) --- \textbf{not} a large generative routing prompt.
+  \item \textbf{Tier 2} ($<$800ms): Parallel data fetch:
+  \begin{itemize}
+    \item Events/311/911 common questions $\rightarrow$ \textbf{prepared SQL} (no LLM SQL generation).
+    \item News/policy $\rightarrow$ parallel BM25 + vector search.
+  \end{itemize}
+  \item \textbf{Tier 3} ($<$2.5s): \textbf{One} synthesis LLM call with structured context + citations, streamed.
+  \item \textbf{Async enrichment:} Boston.gov / external sources only if needed, \emph{after} first answer --- never blocking p95.
+\end{enumerate}
+
+\textbf{Typical LLM count:} 0--2. \textbf{Target latency:} p50 1.5--2.5s, p95 $\leq$ 5s.
+
+\section{Proposed: Data Layer}
+
+\begin{itemize}
+  \item \textbf{PostgreSQL} for OLTP + materialized views (\texttt{events\_materialized}, \texttt{mv\_311\_weekly\_by\_neighborhood}).
+  \item \textbf{Qdrant or pgvector} instead of file-based Chroma --- no SQLite lock contention.
+  \item \textbf{Redis cluster} mandatory for sessions, rate limits, L1/L2/L3 caches --- shared across all API replicas.
+  \item \textbf{S3} for raw PDFs and ingestion artifacts.
+  \item \textbf{Blue-green vector indexing} --- bulk rebuilds swap alias, never lock live readers.
+\end{itemize}
+
+\section{Proposed: Ingestion}
+
+\begin{itemize}
+  \item Job queue (Redis/SQS) instead of single bash script only.
+  \item 311/911 every 30--60 min; news every 1--4 hours; events daily.
+  \item Wayback backfill as \textbf{offline batch}, not in daily cron.
+  \item Ingestion lag exposed in \texttt{/health} with alert thresholds.
+  \item Materialized view refresh after civic data sync --- events API reads views only.
+\end{itemize}
+
+\section{Proposed: Auth, Events, Admin}
+
+Same \emph{features} as current, stricter \emph{separation}:
+\begin{itemize}
+  \item Guest + password auth (same product semantics).
+  \item Events API: 100\% SQL on materialized table, p95 $<$100ms, ETag caching.
+  \item Admin: read replica for heavy stats queries; immutable audit log; same RBAC model.
+\end{itemize}
+
+%=============================================================================
+\part{Side-by-Side Comparison}
+%=============================================================================
+
+\section{Architecture Overview}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Overall pattern & Monolithic Flask app importing a large Python chatbot module & Stateless API pods + dedicated orchestrator + async workers \\
+Frontend & Vanilla JS SPA, static file server & CDN-hosted SPA (React/Vite) \\
+API framework & Flask + Gunicorn & FastAPI or Flask behind LB + autoscaling \\
+Primary database & MySQL & PostgreSQL (+ optional Timescale for 311/911) \\
+Vector search & ChromaDB (local SQLite files) & Qdrant or pgvector (managed, concurrent) \\
+Cache & Optional Redis; many caches in-process & Redis cluster required \\
+LLM provider & Google Gemini (multiple models) & Same, but fewer calls \\
+Ingestion & Bash cron script, sequential steps & Queue + worker fleet + blue-green index \\
+Auth & Guest Bearer + password cookies & Same semantics, hardened at scale \\
+\bottomrule
+\caption{Architecture overview comparison}
+\end{longtable}
+
+\section{Chat Pipeline --- The Most Important Difference}
+
+\begin{longtable}{@{}p{3cm}p{5.4cm}p{5.4cm}@{}}
+\toprule
+\textbf{Step} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+1. Chitchat & Rule-based, 0 LLM (good) & Rule-based + FAQ table, 0 LLM \\
+2. Cache check & Semantic cache optional, per-worker, off by default & L1 exact + L2 semantic + L3 intent cache in Redis \\
+3. Follow-up handling & Extra LLM: ``needs new data?'' & Thread state + rules; no extra LLM gate \\
+4. Routing & Large LLM prompt $\rightarrow$ sql/rag/hybrid JSON & Keyword/rules + light classifier; fixed 12 intents \\
+5. SQL questions & LLM picks tables + LLM writes SQL + LLM summarizes & Prepared query catalog for common intents; LLM SQL only for novel queries with 2s timeout \\
+6. RAG retrieval & 4 parallel Chroma searches; embed per search & BM25 + vector fusion + optional rerank; embeddings batched at ingest \\
+7. Hybrid & SQL + RAG parallel, then LLM merge & Same parallelism, but single synthesis call with structured JSON \\
+8. Boston.gov fallback & Blocks non-streaming path; async correction in streaming (recent) & Always async after first answer \\
+9. Streaming & SSE; SQL pseudo-streams after full compute & SSE from first token; same \\
+10. LLM calls (typical) & \textbf{3--6} & \textbf{0--2} \\
+11. Latency (typical) & 5--30s complex; 1--3s simple & Target 1.5--5s \\
+\bottomrule
+\caption{Chat pipeline comparison}
+\end{longtable}
+
+\section{Feature-by-Feature Comparison}
+
+\subsection{Chat / Conversations}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Thread storage & MySQL \texttt{conversation\_threads} + messages & PostgreSQL equivalent \\
+Thread state & JSON blob with last SQL/RAG cache & Structured state with intent + doc IDs \\
+Streaming & Yes, default on & Yes, required \\
+Sources/citations & Extracted post-answer from mode result & Mandatory in synthesis prompt \\
+Message limits & 8000 chars (recent) & 2000 chars (stricter default) \\
+Concurrent sends & Client lock (\texttt{isSendingMessage}) & Server-side thread lock recommended \\
+Flag flow & PUT /log with ownership check & Same pattern \\
+\bottomrule
+\end{longtable}
+
+\subsection{Authentication}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Guest model & Bearer + sessionStorage, tab-scoped & Same \\
+Registered & HttpOnly cookie + CSRF & Same \\
+OAuth & Removed & Optional later, not required \\
+Admin gate & API + admin.html bootstrap & Same + audit log \\
+Rate limits & Redis or per-worker memory & Redis cluster only \\
+Guest cleanup & Cron script, opt-in & Cron + metrics on guest table size \\
+\bottomrule
+\end{longtable}
+
+\subsection{Events Panel}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Data source & MySQL events tables directly & Materialized \texttt{events\_materialized} view \\
+LLM involved? & No (good) & No \\
+Prefetch & On app load & On app load + ETag \\
+Latency & Fast ($<$200ms typical) & Target $<$100ms p95 \\
+Chat coupling & None & None \\
+\bottomrule
+\end{longtable}
+
+\textbf{Verdict:} Events panel is already well-designed in the current project. Proposed design mainly adds materialized views and HTTP caching.
+
+\subsection{Admin Dashboard}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+UI & Single \texttt{admin.html} & Could remain or split into admin SPA \\
+Stats queries & Live aggregation on \texttt{interaction\_log} & Pre-aggregated counters + read replica \\
+Knowledge CRUD & MySQL + background Chroma ingest & MySQL + queue-based embed worker \\
+Community notes & Approve flow exists & Same + explicit job queue \\
+Security & CSRF + admin role (recent hardening) & Same + immutable audit log \\
+\bottomrule
+\end{longtable}
+
+\subsection{Data Ingestion}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Orchestration & \texttt{cron\_ingest.sh} bash & Scheduler + job queue \\
+Overlap protection & flock file lock & Queue deduplication + worker leases \\
+311/911 & Incremental upsert (good) & Same + materialized view refresh \\
+News/RSS & Includes Wayback script in daily cron & RSS frequent; Wayback offline only \\
+Vector writes & Direct to live Chroma & Incremental upsert + blue-green rebuild \\
+Freshness visibility & Partial (/health expanded) & Explicit lag metrics per source \\
+Failure handling & Log file & Alerts + dead-letter queue \\
+\bottomrule
+\end{longtable}
+
+\subsection{Retrieval \& Answer Quality}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Search method & Vector similarity (Chroma) + keyword fallback & Hybrid BM25 + vector + RRF fusion \\
+Embeddings & Per-query via Gemini API & Primarily at ingest; query embed once \\
+Chunking & Per ingest script & Standardized sizes per doc type \\
+Grounding & Prompt instructions + sources list & Strict context contract + citation IDs \\
+Safety (911) & Answers generated & Aggregation rules + suppression thresholds \\
+Hallucination risk & Higher when SQL LLM wrong & Lower with prepared queries + citations \\
+\bottomrule
+\end{longtable}
+
+%=============================================================================
+\part{Performance, Scalability, and Complexity}
+%=============================================================================
+
+\section{Latency --- Why the Current App Feels Slow}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Question type} & \textbf{Current (approx.)} & \textbf{Proposed (target)} \\
+\midrule
+``Hi'' / chitchat & 0.1--2s (instant UI + persist) & $<$0.1s \\
+``Events this week'' & 2--8s (fast SQL path helps) & 0.2--1s (zero LLM) \\
+``311 requests last month'' & 8--20s (full SQL pipeline) & 1--3s (prepared SQL) \\
+News / policy question & 10--25s (RAG + routing) & 2--5s \\
+Hybrid neighborhood question & 15--40s (slowest path) & 3--5s \\
+Cache hit (rare today) & 1--3s & $<$0.5s \\
+\bottomrule
+\end{tabular}
+\caption{Latency comparison by question type}
+\end{table}
+
+\subsection{Root causes of current latency}
+\begin{enumerate}
+  \item \textbf{Too many LLM round-trips} --- routing + needs-new-data + SQL gen + summarize + merge.
+  \item \textbf{Hybrid as default fallback} --- when routing JSON fails, hybrid runs both SQL and RAG plus merge.
+  \item \textbf{LLM-generated SQL} --- even when a fixed query template would work.
+  \item \textbf{Sequential embedding} --- multiple embed API calls per RAG question.
+  \item \textbf{Boston.gov on hot path} --- scraping + classifier + regeneration (non-streaming).
+  \item \textbf{Chroma lock retries} --- ingestion contention adds seconds occasionally.
+\end{enumerate}
+
+\section{Scalability --- 130,000 Residents}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Factor} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+API horizontal scale & Gunicorn multi-worker works, but caches diverge without Redis & Stateless pods + shared Redis --- linear scale \\
+Rate limiting & Broken across workers without Redis (3$\times$ effective limit) & Correct global limits \\
+Vector DB concurrency & Chroma SQLite --- poor write/read concurrency & Qdrant/pgvector --- built for concurrent reads \\
+DB connections & MySQL pool per worker (fixed) & PgBouncer + pool tuning \\
+Peak 2000 concurrent & Risky without Redis + Qdrant migration & Designed for it \\
+Ingestion vs live traffic & Same Chroma file --- lock risk & Separate index build path \\
+Cost at scale & High Gemini bill (many calls/user) & Lower bill (fewer calls + cache hits) \\
+\bottomrule
+\caption{Scalability comparison}
+\end{longtable}
+
+\section{Complexity --- Ease of Building and Maintaining}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Factor} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+Code organization & Large \texttt{unified\_chatbot.py} ($\sim$1500 lines) + Flask API ($\sim$3200 lines) & Smaller orchestrator + query catalog + workers \\
+Folder naming & \texttt{rag stuff/} (space in path) & Clean \texttt{rag/} module \\
+Routing logic & 200+ line LLM prompt & Intent table + rules --- easier to test \\
+SQL logic & Dynamic LLM SQL --- hard to predict & Named queries --- auditable \\
+Deploy steps & Manual: Redis, API, frontend, cron & Containers + CI/CD + health gates \\
+Debugging & Print statements & Structured traces per request \\
+Onboarding new dev & Must understand full LLM chain & Can work on ingest OR API OR frontend separately \\
+\bottomrule
+\caption{Complexity comparison}
+\end{longtable}
+
+\section{Reliability and Data Freshness}
+
+\begin{longtable}{@{}p{3.2cm}p{5.3cm}p{5.3cm}@{}}
+\toprule
+\textbf{Factor} & \textbf{Current} & \textbf{Proposed} \\
+\midrule
+\endhead
+311/911 freshness & Cron-dependent; no SLA metric & 30--60 min target + alert if stale \\
+News freshness & RSS in cron; Wayback may delay & 1--4 hour target; Wayback offline \\
+Vector index safety & Live writes during cron & Blue-green swap \\
+MySQL gone-away & Fixed with pool ping (improvement) & Same pattern on PostgreSQL \\
+Error responses & JSON error handlers added (improvement) & Built-in from day one \\
+Degraded mode & Partial --- keyword fallback & Explicit stale-cache + disclaimer \\
+\bottomrule
+\end{longtable}
+
+\section{Security}
+
+Both designs converge after recent hardening (CSRF on admin, log ownership, guest blocks). Proposed adds: secret manager, audit log, stricter input limits by default, synthetic security monitoring.
+
+\section{Cost (Gemini API)}
+
+\textbf{Rough model:} Each LLM call $\approx$ \$0.001--0.01 depending on tokens.
+
+\begin{itemize}
+  \item \textbf{Current:} 50,000 questions/month $\times$ 4 calls avg = 200,000 API calls.
+  \item \textbf{Proposed:} 50,000 questions/month $\times$ 1.2 calls avg (with 25\% cache) = 60,000 API calls.
+\end{itemize}
+
+Proposed design reduces cost roughly 60--70\% at the same traffic, while improving latency.
+
+%=============================================================================
+\part{Why the Current Project Underperforms}
+%=============================================================================
+
+\section{Summary Table: Gaps}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Area} & \textbf{Symptom users feel} & \textbf{Root cause in current design} \\
+\midrule
+Chat speed & Long ``Thinking\ldots'' & 3--6 LLM calls per question \\
+Inconsistent speed & Sometimes fast, sometimes 30s+ & Hybrid fallback + Chroma locks \\
+Answer quality gaps & ``Couldn't find info'' on streaming & Boston.gov was skipped in stream (partially fixed) \\
+Production deploy & Rate limits ineffective & In-memory cache per Gunicorn worker \\
+Ingestion risk & Occasional search failures during cron & Chroma SQLite concurrent read/write \\
+Ops blind spots & Hard to know if data is stale & No per-source freshness SLAs \\
+Developer velocity & Hard to change routing rules & Logic buried in giant LLM prompts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{What the Current Project Already Does Well}
+
+Do \textbf{not} throw everything away. These parts are solid or near-optimal:
+
+\begin{enumerate}
+  \item \textbf{Events panel decoupled from LLM} --- keep as-is; add materialized views.
+  \item \textbf{Guest-by-default auth model} --- product semantics are correct.
+  \item \textbf{Small-talk bypass} --- matches proposed Tier 0.
+  \item \textbf{Parallel RAG retrieval} --- matches proposed parallelism.
+  \item \textbf{Events fast SQL path} --- prototype of proposed prepared queries.
+  \item \textbf{MySQL incremental ingest} --- safe; keep pattern.
+  \item \textbf{Streaming SSE UX} --- correct approach.
+  \item \textbf{Admin feature set} --- meets requirements; needs scale hardening only.
+  \item \textbf{Recent reliability fixes} --- pool ping, WAL, flock, gunicorn, security patches.
+\end{enumerate}
+
+%=============================================================================
+\part{Improvement Roadmap (Without Full Rewrite)}
+%=============================================================================
+
+\section{Phased Migration: Current $\rightarrow$ Proposed}
+
+You can move toward the proposed architecture incrementally:
+
+\subsection{Phase A --- Quick latency wins (1--2 weeks)}
+\begin{enumerate}
+  \item Add \textbf{prepared SQL catalog} for top 10 intents (311 weekly, 911 monthly, events list).
+  \item Skip \texttt{\_check\_if\_needs\_new\_data} LLM when thread state has high-confidence match.
+  \item Enable \textbf{semantic cache} in Redis (not in-process) with \texttt{SEMANTIC\_CACHE\_ENABLED=true}.
+  \item Remove \texttt{ingest\_rss\_wayback.py} from daily cron; run offline monthly.
+  \item Require \textbf{Redis} in production (\texttt{CACHE\_BACKEND=redis}).
+\end{enumerate}
+\textbf{Expected impact:} 30--50\% latency reduction on common questions.
+
+\subsection{Phase B --- Routing simplification (2--4 weeks)}
+\begin{enumerate}
+  \item Replace LLM routing with rules + lightweight classifier for 12 intents.
+  \item Change hybrid JSON-parse failure default to \texttt{rag} or \texttt{sql}, not hybrid.
+  \item Move Boston.gov fallback fully off hot path (already started for streaming).
+\end{enumerate}
+\textbf{Expected impact:} More predictable latency; fewer 30s+ outliers.
+
+\subsection{Phase C --- Vector DB migration (4--8 weeks)}
+\begin{enumerate}
+  \item Migrate Chroma $\rightarrow$ Qdrant or pgvector.
+  \item Implement blue-green index builds for bulk ingest.
+  \item Add BM25 keyword search alongside vectors.
+\end{enumerate}
+\textbf{Expected impact:} Eliminate lock contention; better recall for street names.
+
+\subsection{Phase D --- Data plane hardening (ongoing)}
+\begin{enumerate}
+  \item Materialized views for events and 311 aggregates.
+  \item Ingestion job queue with lag metrics and alerts.
+  \item Read replica for admin stats.
+  \item Structured request tracing (intent, tier, timings).
+\end{enumerate}
+
+\section{Decision Guide}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{If your priority is\ldots} & \textbf{Do this first} \\
+\midrule
+Faster answers this month & Phase A (prepared SQL + Redis cache) \\
+Fewer production incidents & Redis required + Chroma migration (Phase C) \\
+Lower Gemini bill & Reduce LLM calls (Phase A + B) \\
+130k-resident scale & Full proposed data plane (Phases C + D) \\
+Ship features faster & Phase B (simpler routing code) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%=============================================================================
+\part{Conclusion}
+%=============================================================================
+
+\section{One-Paragraph Summary}
+
+The \textbf{current On The Porch} is a capable monolith: it combines Flask, MySQL, ChromaDB, and multiple Gemini calls to route questions through SQL, RAG, or hybrid paths. It works and has many good patterns (guest auth, events decoupling, streaming, parallel retrieval), but it is \textbf{latency-limited by design} because it asks the AI too many times per question and stores vectors in a file database that fights with ingestion jobs.
+
+The \textbf{proposed architecture} keeps the same user-facing features but reorganizes the \emph{hot path}: classify intent cheaply, fetch data in parallel with prepared queries, synthesize once, cache aggressively, and move slow enrichment off the critical path. It trades prompt complexity for system structure --- making the app faster, cheaper, and easier to scale to Dorchester's full population.
+
+\section{Further Reading in This Repository}
+
+\begin{itemize}[noitemsep]
+  \item \texttt{docs/system\_design.pdf} --- full greenfield design specification.
+  \item \texttt{changes.md} --- chronological log of improvements already made to the current codebase.
+  \item \texttt{README.md} --- how to run the current project locally.
+\end{itemize}
+
+\vfill
+\begin{center}
+\small
+\textit{Architecture Comparison Document --- June 2026}
+\end{center}
+
+\end{document}

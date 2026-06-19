@@ -1,0 +1,676 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{graphicx}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+  citecolor=blue!60!black,
+  pdftitle={On The Porch --- Greenfield System Design},
+  pdfauthor={On The Porch Team}
+}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{black!20},
+  columns=fullflexible,
+  keepspaces=true
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textsc{On The Porch}}
+\fancyhead[R]{\textsc{Greenfield System Design}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{\textbf{On The Porch}\\[0.5em]
+\Large Greenfield System Design\\
+\large Dorchester Community Chatbot --- Production Architecture}
+\author{System Design Document}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+This document specifies a production-grade architecture for \textbf{On The Porch}, a Dorchester-localized community chatbot intended to serve up to \textbf{130,000 residents}. The design optimizes for stability, data freshness, high-quality grounded answers, and \textbf{sub-5-second} response latency (p95), while supporting chat, an events panel, guest and registered authentication, and an admin dashboard. The architecture is specified from first principles, independent of any existing implementation.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Product Goals and Constraints}
+
+\subsection{What We Are Building}
+A web application where Dorchester residents can ask natural-language questions about:
+\begin{itemize}[noitemsep]
+  \item Neighborhood news (DotNews, local RSS, community notes)
+  \item City services (311 requests, response patterns, categories)
+  \item Public safety (911 / crime summaries --- responsibly framed)
+  \item Events (calendar, meetings, festivals)
+  \item Policy and civic context (plans, anti-displacement, budgets where available)
+  \item General Dorchester orientation
+\end{itemize}
+
+\subsection{Non-Functional Requirements}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Requirement} & \textbf{Target} \\
+\midrule
+Response latency (p50) & $\leq$ 3 seconds \\
+Response latency (p95) & $\leq$ 5 seconds \\
+Availability & 99.9\% (API + chat) \\
+Data freshness & 311/911 $\leq$ 1h; news $\leq$ 4h; events $\leq$ 24h \\
+Peak concurrent users & 2,000+ without degradation \\
+Answer quality & Grounded, cited, refusal when uncertain \\
+Cost predictability & $\leq$ 2 LLM calls per question (normal path) \\
+Privacy & Minimal PII; guest-by-default; auditable admin actions \\
+\bottomrule
+\end{tabular}
+\caption{Non-functional requirements}
+\end{table}
+
+\subsection{Key Design Insight}
+Most community chatbot implementations are slow because each question triggers \textbf{3--6 sequential LLM calls} (route $\rightarrow$ retrieve gate $\rightarrow$ SQL generation $\rightarrow$ summarize $\rightarrow$ merge $\rightarrow$ fallback). A greenfield design must \textbf{cap LLM round-trips at 1--2} and push everything else to \textbf{precomputed data, rules, and caches}.
+
+\section{High-Level Architecture}
+
+\subsection{Component Overview}
+The system comprises six logical planes:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Clients} --- Web SPA (mobile-responsive)
+  \item \textbf{Edge} --- CDN for static assets; WAF and edge rate limiting
+  \item \textbf{API layer} --- Stateless horizontally scaled services behind a load balancer
+  \item \textbf{Hot-path cache} --- Redis cluster (sessions, rate limits, semantic cache)
+  \item \textbf{Data plane} --- PostgreSQL (OLTP), time-series tables, vector database, object storage
+  \item \textbf{Ingestion} --- Async workers scheduled via cron/queue; never on the chat critical path
+\end{enumerate}
+
+\subsection{Data Flow (Simplified)}
+\begin{verbatim}
+Browser (SPA)
+    -> CDN (static) + WAF -> Load Balancer
+        -> Auth Service
+        -> Chat Orchestrator -> Redis / PostgreSQL / Vector DB / LLM APIs
+        -> Events API       -> PostgreSQL (materialized events)
+        -> Admin API        -> PostgreSQL (RBAC)
+
+Scheduler -> Ingestion Workers -> PostgreSQL / Object Storage / Vector DB
+\end{verbatim}
+
+\subsection{Architectural Principles}
+\begin{enumerate}[noitemsep]
+  \item \textbf{Separate read path from write path} --- chat never blocks on ingestion.
+  \item \textbf{Precompute before query time} --- aggregates, event lists, and embeddings are ready before a user asks.
+  \item \textbf{One orchestrator, many specialists} --- single chat service coordinates SQL, vector search, and LLM; no microservice chatter on the hot path.
+  \item \textbf{Fail soft, degrade gracefully} --- stale cache with disclaimer beats a 30s hang or HTTP 500.
+  \item \textbf{Grounding is mandatory} --- every factual answer cites rows or document IDs used.
+\end{enumerate}
+
+\section{Logical Components}
+
+\subsection{Frontend (Single-Page Application)}
+\textbf{Technology:} React or vanilla JS with Vite; hosted on CDN (Cloudflare Pages, S3+CloudFront, or Vercel).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+\textbf{Surface} & \textbf{Responsibility} \\
+\midrule
+Chat workspace & Threads, streaming tokens, sources, flag flow \\
+Events panel & Pre-fetched events; no LLM on panel load \\
+Auth screens & Guest default; optional signup/login \\
+Admin dashboard & Stats, flags, knowledge CRUD, moderation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Client rules for speed:}
+\begin{itemize}[noitemsep]
+  \item Events panel loads from \texttt{GET /events} only --- never waits on chat.
+  \item Streaming SSE for answers; 5s client abort and retry UX.
+  \item Instant local replies for chitchat (display immediately; persist asynchronously).
+  \item \texttt{sessionStorage} for guest Bearer tokens; HttpOnly cookies for registered users.
+\end{itemize}
+
+\subsection{API Layer}
+\textbf{Technology:} Python FastAPI or Flask behind Gunicorn/Uvicorn; 3--8 replicas with autoscaling on CPU and latency.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llp{6.5cm}@{}}
+\toprule
+\textbf{Service} & \textbf{Endpoints} & \textbf{Notes} \\
+\midrule
+Auth & \texttt{/auth/*} & Guest Bearer + CSRF; registered cookie session \\
+Conversations & CRUD threads/messages & Optimistic UI; message length limits \\
+Chat & \texttt{POST /chat}, \texttt{POST /chat/stream} & Core orchestrator \\
+Events & \texttt{GET /events} & Materialized table only \\
+Admin & stats, flags, knowledge & RBAC + CSRF on mutations \\
+Health & \texttt{/health}, \texttt{/ready} & DB, Redis, vector, ingestion lag \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Chat Orchestrator}
+The chat orchestrator is the only service on the critical path for answer quality and latency.
+
+\subsubsection{Query Pipeline (Target: $\leq$ 5s p95)}
+\begin{verbatim}
+User question
+  -> Tier 0: rules / exact cache / FAQ        [< 100 ms, no LLM]
+  -> Tier 1: intent classification            [< 200 ms]
+  -> Tier 2: parallel SQL + retrieval         [< 800 ms]
+  -> Tier 3: single LLM synthesis (streamed)  [< 2500 ms]
+  -> Post-process: citations + safety         [< 200 ms]
+\end{verbatim}
+
+\subsubsection{Tier 0 --- No LLM ($<$ 100ms)}
+\begin{itemize}[noitemsep]
+  \item Chitchat, help, identity questions
+  \item Exact + semantic cache (Redis) for repeated questions
+  \item Pre-authored FAQ for top 50 Dorchester questions (admin-maintained)
+\end{itemize}
+
+\subsubsection{Tier 1 --- Intent Classification ($\leq$ 200ms)}
+Use a \textbf{hybrid classifier}, not a generative LLM router:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+\textbf{Signal} & \textbf{Method} \\
+\midrule
+Keywords & 311, crime, event, meeting, DotNews, street names \\
+Patterns & Regex for dates, ``this week'', ``last month'' \\
+Light model & Small classifier (Gemini Flash) $\rightarrow$ intent label \\
+Confidence & If low $\rightarrow$ \texttt{hybrid\_light} with tight timeouts \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Intent taxonomy (fixed, $\sim$12 labels):}
+\begin{verbatim}
+events_list | events_detail | 311_stats | 911_stats | safety_trend |
+news_recent | policy_doc | neighborhood_fact | city_service_howto |
+community_note | chitchat | unknown
+\end{verbatim}
+
+\textbf{Critical rule:} Classification must not be a separate generative LLM call with JSON-parse fallback to hybrid (the slowest path).
+
+\subsubsection{Tier 2 --- Data Fetch (parallel, $\leq$ 800ms)}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Intent} & \textbf{Data Source} & \textbf{Technique} \\
+\midrule
+\texttt{events\_list} & \texttt{events\_materialized} & Zero LLM; SQL + template \\
+\texttt{311\_stats} & Aggregated 311 views & Parameterized SQL only \\
+\texttt{911\_stats} & Aggregated 911 views & SQL + safety copy rules \\
+\texttt{news\_recent} & Vector + BM25 & Top-$k$=8, parallel sources \\
+\texttt{policy\_doc} & Policies collection & Higher $k$, rerank top 5 \\
+\texttt{hybrid\_light} & SQL slice + vector slice & Parallel execution \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Never} generate SQL with an LLM on the hot path for common intents. Use a \textbf{prepared query library} (20--40 named queries). LLM$\rightarrow$SQL only for novel analytical questions, with 2s timeout and graceful fallback.
+
+\subsubsection{Tier 3 --- Answer Synthesis (one LLM call, $\leq$ 2.5s)}
+\begin{itemize}[noitemsep]
+  \item Single main model call with question + structured context JSON + citation instructions
+  \item Fast capable model (e.g.\ Gemini 2.5 Flash); Pro reserved for admin tools
+  \item Streaming starts as soon as first tokens arrive
+  \item Hard timeout: 3s $\rightarrow$ partial answer or cached stale response
+\end{itemize}
+
+\section{Data Architecture}
+
+\subsection{Storage Choices}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llp{5.5cm}@{}}
+\toprule
+\textbf{Store} & \textbf{Purpose} & \textbf{Rationale} \\
+\midrule
+PostgreSQL 16 & Users, sessions, threads, flags, events & ACID, JSONB, mature ops \\
+PostgreSQL / Timescale & 311, 911 time-series & Fast range queries, rollups \\
+Qdrant or pgvector & Document embeddings & Horizontal scale; no SQLite locks \\
+Redis Cluster & Sessions, rate limits, caches & Sub-ms; shared across replicas \\
+S3-compatible & Raw PDFs, newsletters & Cheap, versioned \\
+OpenSearch (optional) & BM25 keyword search & Better recall for street names \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Avoid:} File-based Chroma on SQLite for production at community scale --- concurrent ingestion causes lock contention.
+
+\subsection{Core Schemas (Simplified)}
+
+\textbf{OLTP (PostgreSQL):}
+\begin{lstlisting}
+users(id, email, username, role, is_guest, ...)
+web_sessions(id, user_id, token_hash, expires_at, ...)
+conversation_threads(id, user_id, title, state_json, ...)
+conversation_messages(id, thread_id, role, content, sources_json, ...)
+interaction_log(id, user_id, query, response, flagged, ...)
+admin_knowledge(id, content, category, active, expires_at, ...)
+\end{lstlisting}
+
+\textbf{Civic data (partitioned by month):}
+\begin{lstlisting}
+requests_311(id, case_id, open_dt, neighborhood, lat, lon, subject, status, ...)
+incidents_911(id, incident_id, occurred_at, district, offense_type, ...)
+\end{lstlisting}
+
+\textbf{Materialized views (refreshed by ingestion):}
+\begin{lstlisting}
+mv_311_weekly_by_neighborhood
+mv_911_monthly_by_offense
+events_materialized   -- next 30 days, denormalized for API
+\end{lstlisting}
+
+\textbf{Vector collections (Qdrant):}
+\begin{lstlisting}
+news_articles, policies, transcripts, community_notes, boston_gov_cache
+\end{lstlisting}
+
+\subsection{Ingestion Pipeline}
+
+\subsubsection{Ingestion Rules}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Source} & \textbf{Frequency} & \textbf{Strategy} \\
+\midrule
+311 / 911 & Every 30--60 min & Incremental upsert by external ID \\
+RSS / news & Every 1--4 hours & ETag / Last-Modified; dedupe by URL hash \\
+Events & Daily + on-demand & Normalize to \texttt{events\_materialized} \\
+Policies / PDFs & Weekly or webhook & Chunk, embed, upsert \\
+Wayback backfill & Offline batch only & Staging index; not daily cron \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Ingestion Invariants}
+\begin{itemize}[noitemsep]
+  \item Never \texttt{TRUNCATE} production tables during live operation.
+  \item Bulk vector rebuilds use \textbf{blue-green indexing}: build \texttt{index\_v2}, swap alias.
+  \item Ingestion lag exposed in \texttt{/health} for operational visibility.
+\end{itemize}
+
+\section{Latency Budget}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Stage} & \textbf{Budget} & \textbf{Technique} \\
+\midrule
+Auth + rate limit & 50 ms & Redis session cache \\
+Load thread context & 80 ms & Last 6 turns; state in \texttt{thread.state\_json} \\
+Intent classify & 150 ms & Rules first; tiny model if needed \\
+Retrieval / SQL & 800 ms & Parallel; prepared SQL; connection pool \\
+LLM synthesis & 2500 ms & One call; streaming; fast model \\
+Persist + log & 100 ms & Async write-behind for non-critical logs \\
+\textbf{Total p95} & \textbf{$\sim$3.7 s} & Buffer to 5 s target \\
+\bottomrule
+\end{tabular}
+\caption{End-to-end latency budget}
+\end{table}
+
+\subsection{Latency Anti-Patterns to Eliminate}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Anti-pattern} & \textbf{Replacement} \\
+\midrule
+LLM routing + needs-new-data gate + answer & Single classify + one synthesis \\
+LLM-generated SQL per query & Prepared query catalog \\
+Sequential RAG sources & Parallel with 600ms per-source timeout \\
+Boston.gov scrape on hot path & Async enrichment or nightly cache \\
+Per-request schema introspection & Schema cached 24h in Redis \\
+Embedding on every cache miss & Batch embeddings in ingestion only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Caching Strategy}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Layer} & \textbf{Key} & \textbf{TTL} & \textbf{Goal} \\
+\midrule
+L1 Exact & \texttt{hash(normalize(q))} & 15 min & 10--20\% hit rate \\
+L2 Semantic & embedding $\geq$ 0.92 & 15 min & 5--15\% hit rate \\
+L3 Intent+params & \texttt{intent:nbhd:week} & 1 hour & 20\% for stats queries \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Never cache:} time-sensitive queries (``today'', ``tonight''), unresolved pronoun follow-ups.
+
+\section{Feature-Specific Design}
+
+\subsection{Chat Authentication}
+\textbf{Guest model:}
+\begin{itemize}[noitemsep]
+  \item \texttt{POST /auth/guest} $\rightarrow$ ephemeral user + Bearer token (tab-scoped)
+  \item Rate limit: 30 guests/hour/IP; 60 messages/hour/session
+  \item No thread migration on login (fresh registered session)
+\end{itemize}
+
+\textbf{Registered model:}
+\begin{itemize}[noitemsep]
+  \item HttpOnly session cookie + CSRF double-submit
+  \item Threads persist across devices; optional password auth
+\end{itemize}
+
+\textbf{Conversation state example:}
+\begin{lstlisting}
+{
+  "last_intent": "311_stats",
+  "last_neighborhood": "Dorchester",
+  "last_sql_result_id": "mv_311_weekly:week12",
+  "retrieval_doc_ids": ["news_123", "policy_45"]
+}
+\end{lstlisting}
+
+\subsection{Events Panel}
+\textbf{Design rule:} Events panel is \textbf{100\% decoupled} from the LLM.
+
+\begin{lstlisting}
+GET /events?days_ahead=14&limit=20&neighborhood=dorchester
+  -> reads events_materialized only
+  -> p95 < 100 ms
+\end{lstlisting}
+
+Panel prefetches on app load (parallel with \texttt{/auth/me}). Client caches 5 minutes with ETag support.
+
+\subsection{Admin Dashboard}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Module} & \textbf{Backend} & \textbf{Auth} \\
+\midrule
+Stats & Read replicas + pre-aggregated counters & \texttt{role=admin} \\
+Flagged responses & \texttt{interaction\_log WHERE flagged} & admin + CSRF \\
+Knowledge base & CRUD $\rightarrow$ embed worker & admin + CSRF \\
+Community notes & Approve queue $\rightarrow$ embed & admin + CSRF \\
+Audit log & Immutable \texttt{admin\_audit\_log} & admin \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Guests are hard-blocked at API (\texttt{403 guest\_not\_allowed}) and UI bootstrap.
+
+\subsection{Boston.gov Enrichment (Off Hot Path)}
+When synthesis confidence is low:
+\begin{enumerate}[noitemsep]
+  \item Return initial streamed answer immediately.
+  \item Trigger async job to fetch Boston.gov / city page.
+  \item Push \texttt{correction} SSE event or ``Updated answer'' toast.
+\end{enumerate}
+
+\subsection{Flagging and Feedback}
+\begin{itemize}[noitemsep]
+  \item \texttt{PUT /interactions/:id/flag} with ownership verification
+  \item Flags feed admin queue and optional retraining corpus
+  \item Rate-limit flags to prevent abuse
+\end{itemize}
+
+\section{Retrieval and Answer Quality}
+
+\subsection{Hybrid Search Pipeline}
+\begin{enumerate}[noitemsep]
+  \item BM25 top 20 (exact street names, source names)
+  \item Vector top 20 (semantic)
+  \item Reciprocal Rank Fusion $\rightarrow$ top 8
+  \item Cross-encoder rerank (optional, $\leq$ 200ms) for \texttt{policy\_doc} intent
+  \item Pass top 5 chunks to synthesis LLM
+\end{enumerate}
+
+\subsection{Chunking Strategy}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Content} & \textbf{Chunk Size} & \textbf{Metadata} \\
+\midrule
+News & 400--600 tokens & \texttt{published\_at}, \texttt{source}, \texttt{url} \\
+Policy PDFs & 800 tokens, overlap 100 & \texttt{section}, \texttt{page} \\
+Transcripts & Speaker-aware segments & \texttt{meeting\_date} \\
+Community notes & Whole note if $<$ 300 tokens & \texttt{expires\_at}, \texttt{category} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Grounding Contract}
+Every synthesis prompt enforces:
+\begin{itemize}[noitemsep]
+  \item Use only provided \texttt{CONTEXT}; cite sources as [1], [2].
+  \item If \texttt{CONTEXT} is insufficient, state what is missing.
+  \item Never invent statistics; never expose raw addresses from 911 rows.
+\end{itemize}
+
+\subsection{Safety (911 / Crime)}
+\begin{itemize}[noitemsep]
+  \item Aggregate by neighborhood and time --- no voyeuristic incident narratives.
+  \item Suppress counts $<$ 5 in small geographic areas.
+  \item Fixed disclaimer on safety answers; human review queue for flagged responses.
+\end{itemize}
+
+\section{Infrastructure and Deployment}
+
+\subsection{Production Topology}
+\begin{verbatim}
+Cloudflare CDN + WAF
+    -> Load Balancer
+        -> API Pods (N replicas, autoscaling)
+            -> Redis (managed cluster)
+            -> RDS PostgreSQL (+ read replica for admin)
+            -> Qdrant Cloud / self-hosted
+            -> Object Storage (S3)
+        -> Ingestion Workers (2+ replicas, separate deploy)
+            -> same data plane
+\end{verbatim}
+
+\subsection{Scaling Estimates (130k Residents)}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Metric} & \textbf{Conservative} & \textbf{Peak Planning} \\
+\midrule
+MAU (5--10\%) & 6,500--13,000 & --- \\
+DAU (1--3\%) & 1,300--3,900 & --- \\
+Peak concurrent & 200--500 & 2,000 \\
+Chat QPS (peak) & 20--50 & 100--150 \\
+API replicas & 3--4 & 8--12 (autoscale) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Environments}
+\begin{itemize}[noitemsep]
+  \item \textbf{local} --- Docker Compose: PostgreSQL, Redis, Qdrant, API, static frontend
+  \item \textbf{staging} --- Full ingest on subset; synthetic load tests
+  \item \textbf{prod} --- Blue-green deploy; read replica for admin stats
+\end{itemize}
+
+\subsection{CI/CD}
+\begin{itemize}[noitemsep]
+  \item PR: lint, unit tests, contract tests, migration dry-run
+  \item Main: build container $\rightarrow$ deploy API $\rightarrow$ migrations $\rightarrow$ smoke \texttt{/health} + golden questions
+  \item Ingestion: separate deploy cadence; feature flags for new sources
+\end{itemize}
+
+\section{Observability and SLOs}
+
+\subsection{Golden Signals}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Signal} & \textbf{Tool} & \textbf{Alert Threshold} \\
+\midrule
+Latency p50/p95 & Prometheus + Grafana & p95 $>$ 5s for 5 min \\
+Error rate & Sentry & $>$ 1\% HTTP 5xx \\
+LLM timeout rate & Custom metric & $>$ 5\% \\
+Cache hit rate & Redis metrics & $<$ 15\% \\
+Ingestion lag & Worker heartbeat & 311 $>$ 2h stale \\
+Vector index age & Qdrant metadata & news $>$ 24h stale \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Request Tracing}
+Every chat request receives \texttt{X-Request-ID} with structured fields:
+\begin{lstlisting}
+intent, tier, cache_hit, sql_ms, retrieval_ms, llm_ms, total_ms, token_count
+\end{lstlisting}
+
+\subsection{Synthetic Monitoring}
+Every 5 minutes, a bot asks 10 golden questions (events, 311, news) and asserts status 200, latency $<$ 5s, and presence of citations.
+
+\section{Security Model}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+\textbf{Area} & \textbf{Design} \\
+\midrule
+Secrets & Vault / cloud secret manager; never in repository \\
+Sessions & HMAC-hashed tokens; quarterly pepper rotation \\
+CSRF & All cookie-authenticated mutations \\
+Rate limits & IP + session + global; Redis sliding window \\
+Input limits & 2k chars/message; 4k community notes \\
+Admin & RBAC, audit log, no guest access \\
+LLM & Prompt injection defenses; context delimiters \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Phased Build Plan}
+
+\subsection{Phase 1 --- Foundation (4--6 weeks)}
+\begin{itemize}[noitemsep]
+  \item PostgreSQL schema; guest + password auth; thread CRUD
+  \item \texttt{events\_materialized} + Events API + panel
+  \item 311/911 ingest + 3 prepared SQL queries
+  \item Rule-based chitchat + \texttt{/health}
+  \item \textbf{SLO:} events $<$ 100ms; SQL answers $<$ 2s
+\end{itemize}
+
+\subsection{Phase 2 --- RAG Core (4--6 weeks)}
+\begin{itemize}[noitemsep]
+  \item Qdrant + news/policy ingest + hybrid retrieval
+  \item Single-call synthesis with citations; SSE streaming
+  \item Semantic + exact cache (Redis)
+\end{itemize}
+
+\subsection{Phase 3 --- Admin and Quality (3--4 weeks)}
+\begin{itemize}[noitemsep]
+  \item Admin dashboard, flags, knowledge base, community notes approval
+  \item Safety filters on 911 answers
+  \item Golden question suite + load test to 100 QPS
+\end{itemize}
+
+\subsection{Phase 4 --- Scale and Polish (ongoing)}
+\begin{itemize}[noitemsep]
+  \item Blue-green vector index; async Boston.gov enrichment
+  \item Read replica for admin; autoscaling; cost dashboards
+  \item Optional mobile PWA
+\end{itemize}
+
+\section{Anti-Patterns to Avoid}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Don't} & \textbf{Do Instead} \\
+\midrule
+3--6 LLM calls per question & Max 2; often 0--1 \\
+LLM-generated SQL on every query & Prepared query catalog \\
+Chroma SQLite on local disk in prod & Qdrant or pgvector \\
+Daily Wayback crawl in live cron & Offline backfill jobs \\
+Boston.gov scrape before returning answer & Async enrichment \\
+In-memory cache per worker & Redis cluster \\
+Guest threads migrate on login & Fresh session on login \\
+Track vector DB in git & S3 + managed index \\
+Flask debug in production & Container + Gunicorn; \texttt{DEBUG=false} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Summary}
+
+The optimal Dorchester chatbot for \textbf{130,000 residents} is not a bigger LLM pipeline. It is:
+
+\begin{enumerate}[noitemsep]
+  \item \textbf{Precomputed civic data} (311, 911, events) served by SQL and templates for common questions.
+  \item \textbf{One fast synthesis call} with parallel retrieval, not a chain of routing models.
+  \item \textbf{Managed infrastructure} (PostgreSQL, Redis, Qdrant) --- not file-locked SQLite vector stores.
+  \item \textbf{Decoupled surfaces} --- events panel and admin never compete with chat for LLM time.
+  \item \textbf{Aggressive caching} with clear freshness SLAs and visible degradation.
+  \item \textbf{Async ingestion} with incremental upserts and blue-green index swaps.
+\end{enumerate}
+
+Built this way, \textbf{p50 $\approx$ 1.5--2.5s} and \textbf{p95 $\leq$ 5s} is achievable for the majority of resident questions, while keeping the system stable, updatable, and operable at community scale.
+
+\vfill
+\begin{center}
+\small
+\textit{Document generated June 2026 --- On The Porch Greenfield System Design}
+\end{center}
+
+\end{document}
