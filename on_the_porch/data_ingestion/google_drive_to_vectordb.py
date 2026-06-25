@@ -25,7 +25,7 @@ from langchain_community.vectorstores import Chroma
 
 # Local imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "rag stuff"))
-from retrieval import GeminiEmbeddings
+from retrieval import get_embeddings
 
 # SQL for events
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -702,12 +702,12 @@ def add_documents_to_vectordb(documents: List) -> None:
         print("No documents to add.")
         return
     
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
     
     # Load existing vector DB or create new one
-    if config.VECTORDB_DIR.exists():
+    if config.ACTIVE_VECTORDB_DIR.exists():
         vectordb = Chroma(
-            persist_directory=str(config.VECTORDB_DIR),
+            persist_directory=str(config.ACTIVE_VECTORDB_DIR),
             embedding_function=embeddings
         )
         # Add new documents
@@ -718,20 +718,20 @@ def add_documents_to_vectordb(documents: List) -> None:
         vectordb = Chroma.from_documents(
             documents=documents,
             embedding=embeddings,
-            persist_directory=str(config.VECTORDB_DIR)
+            persist_directory=str(config.ACTIVE_VECTORDB_DIR)
         )
         print(f"✓ Created new vector DB with {len(documents)} document chunks.")
 
 
 def delete_chunks_by_file_id(file_id: str) -> int:
     """Delete all chunks from vector database that belong to a specific Google Drive file ID."""
-    if not config.VECTORDB_DIR.exists():
+    if not config.ACTIVE_VECTORDB_DIR.exists():
         return 0
     
     try:
-        embeddings = GeminiEmbeddings()
+        embeddings = get_embeddings()
         vectordb = Chroma(
-            persist_directory=str(config.VECTORDB_DIR),
+            persist_directory=str(config.ACTIVE_VECTORDB_DIR),
             embedding_function=embeddings
         )
         

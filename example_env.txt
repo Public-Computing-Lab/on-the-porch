@@ -5,10 +5,12 @@
 # Gemini AI configuration
 # ============================================================================
 GEMINI_API_KEY=your-gemini-api-key
-GEMINI_MODEL=gemini-2.5-pro
-GEMINI_SUMMARY_MODEL=gemini-2.5-pro
-GEMINI_EMBED_MODEL=models/gemini-embedding-001
+# Production: use Flash Lite for cost control; Pro only as fallback (see GEMINI_FALLBACK_MODEL).
+GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_SUMMARY_MODEL=gemini-2.5-flash-lite
 GEMINI_FAST_MODEL=gemini-2.5-flash-lite
+GEMINI_FALLBACK_MODEL=gemini-2.5-pro
+GEMINI_EMBED_MODEL=models/gemini-embedding-001
 GEMINI_REQUEST_TIMEOUT=20
 GEMINI_MAX_ATTEMPTS=3
 
@@ -70,6 +72,7 @@ GUNICORN_BIND=127.0.0.1:8888
 # ============================================================================
 # Shared cache (required for multi-worker gunicorn deployments)
 # ============================================================================
+# Local dev: memory is fine for a single worker. Production: use redis.
 CACHE_BACKEND=memory
 REDIS_URL=redis://127.0.0.1:6379/0
 CACHE_TTL_MINUTES=60
@@ -77,10 +80,39 @@ CACHE_MAX_SESSIONS=100
 CACHE_KEY_PREFIX=rethinkai:chatcache:
 
 # Semantic response cache (near-duplicate first-turn questions)
+# Enable in production to reduce repeat LLM cost (Iteration 0+).
 SEMANTIC_CACHE_ENABLED=false
+SEMANTIC_CACHE_BACKEND=redis
+SEMANTIC_CACHE_KEY=rethinkai:semantic_cache:entries
 SEMANTIC_CACHE_THRESHOLD=0.95
 SEMANTIC_CACHE_TTL_SECONDS=900
 SEMANTIC_CACHE_MAX=200
+
+# Iteration 1: prepared SQL catalog + smarter follow-up gate
+PREPARED_SQL_ENABLED=true
+PREPARED_SQL_USE_LLM_SUMMARY=false
+FAST_FOLLOWUP_GATE_ENABLED=true
+
+# Iteration 2: rule-first intent router + async Boston.gov enrichment
+INTENT_ROUTER_V2_ENABLED=true
+ROUTER_RULE_CONFIDENCE_THRESHOLD=0.75
+BOSTON_GOV_ASYNC_ENABLED=true
+BOSTON_GOV_BLOCKING=false
+BOSTON_GOV_ASYNC_TIMEOUT_SECONDS=8
+
+# Iteration 3: local BGE embeddings (run reindex_bge_vectordb.py before enabling local)
+EMBED_PROVIDER=gemini
+LOCAL_EMBED_MODEL=BAAI/bge-base-en-v1.5
+LOCAL_EMBED_DEVICE=cpu
+VECTORDB_BGE_DIR=../vectordb_bge_v1
+
+# ============================================================================
+# Production profile (Iteration 0)
+# ============================================================================
+# Set PRODUCTION_MODE=true on deployed servers. Requires CACHE_BACKEND=redis.
+PRODUCTION_MODE=false
+INGEST_STALE_HOURS=26
+REQUEST_METRICS_ENABLED=true
 
 # Streaming endpoint (client opt-in via public/config.js)
 STREAMING_ENABLED=true
@@ -100,6 +132,7 @@ MYSQL_CONNECT_TIMEOUT=10
 # Vector database configuration
 # ============================================================================
 VECTORDB_DIR=../vectordb_new
+VECTORDB_BGE_DIR=../vectordb_bge_v1
 PARALLEL_RETRIEVAL=true
 VECTORDB_SINGLETON=true
 CHROMA_MAX_ATTEMPTS=3

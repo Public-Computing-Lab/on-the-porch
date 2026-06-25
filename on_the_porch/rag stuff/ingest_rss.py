@@ -38,13 +38,13 @@ load_dotenv()
 if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
  
-from retrieval import GeminiEmbeddings  # noqa: E402  (same embeddings as the rest of the app)
+from retrieval import get_embeddings, resolve_vectordb_dir  # noqa: E402  (same embeddings as the rest of the app)
  
 # ── config ───────────────────────────────────────────────────────────────────
  
 # Resolve relative to this file so it always points at on_the_porch/vectordb_new
 # regardless of the process working directory (the cron runs from the repo root).
-DEFAULT_VECTORDB_DIR = (_RAG_DIR / "../vectordb_new").resolve()
+DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 RSS_FEEDS: list[dict] = [
     {
         "url":    "https://www.dotnews.com/feed/",         
@@ -182,7 +182,7 @@ def ingest_rss(
     print(f"\nTotal entries fetched: {len(all_items)}")
  
     # ── open / create vectordb ────────────────────────────────────────────────
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
  
     if vectordb_dir.exists():
         vectordb = Chroma(

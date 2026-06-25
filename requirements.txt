@@ -21,3 +21,4 @@ langchain-core
 google 
 google_auth_oauthlib
 chromadb
+sentence-transformers

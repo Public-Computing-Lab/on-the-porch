@@ -35,7 +35,7 @@ load_dotenv()
 if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
 
-from retrieval import GeminiEmbeddings  # noqa: E402
+from retrieval import get_embeddings, resolve_vectordb_dir  # noqa: E402
 from ingest_rss import (               # reuse everything from ingest_rss.py
     DEFAULT_VECTORDB_DIR,
     _stable_id,
@@ -134,7 +134,7 @@ def ingest_rss_wayback(
     print("Wayback Machine RSS Backfill Pipeline")
     print("=" * 70)
 
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
     vectordb   = Chroma(
         persist_directory=str(vectordb_dir),
         embedding_function=embeddings,

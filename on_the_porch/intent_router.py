@@ -1,0 +1,252 @@
+"""Rule-first intent router (Iteration 2).
+
+Maps civic questions to sql / rag / hybrid plans without an LLM call when
+confidence is high. Ambiguous questions fall through to the slim LLM router in
+unified_chatbot._route_question_llm().
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from typing import Any, Dict, List, Optional
+
+_DEFAULT_PLAN: Dict[str, Any] = {
+    "transcript_tags": None,
+    "policy_sources": None,
+    "folder_categories": None,
+    "k": 5,
+}
+
+_EVENT_HINTS = (
+    "event", "events", "happening", "going on", "what's on", "whats on",
+    "calendar", "schedule", "activities", "activity", "things to do",
+    "workshop", "workshops", "meeting", "meetings",
+)
+_SCHEDULE_HINTS = (
+    "today", "tomorrow", "this week", "next week", "weekend",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+_CRIME_HINTS = (
+    "crime", "crimes", "arrest", "arrests", "offense", "offenses",
+    "homicide", "homicides", "shooting", "shootings", "shots fired",
+    "safety incident", "violence", "violent", "911", "police report",
+)
+_311_HINTS = ("311", "service request", "service requests", "city complaint")
+_STATS_HINTS = (
+    "how many", "count", "number of", "total", "statistics", "stats",
+    "trend", "trends", "rate", "compare", "comparison", "breakdown",
+    "per month", "per week", "over time",
+)
+_OPINION_HINTS = (
+    "what do people", "what do residents", "how do people", "how do residents",
+    "what are people saying", "community feel", "community thinks",
+    "perspective", "opinion", "opinions", "sentiment", "concerned about",
+)
+_POLICY_HINTS = (
+    "policy", "policies", "plan", "plans", "ordinance", "zoning",
+    "imagine boston", "anti-displacement", "slow streets", "budget",
+)
+_RSS_NEWS_HINTS = (
+    "news", "recent news", "latest news", "news about", "news from",
+    "updates from", "recent updates", "what's going on in", "whats going on in",
+    "what's happening in", "whats happening in", "what is happening in",
+    "lately in", "dorchester reporter", "dotnews", "dot news",
+)
+_RSS_SOURCE_ALIASES = (
+    "dorchester reporter", "dotnews", "dot news", "csndc", "codman",
+)
+
+
+def is_router_v2_enabled() -> bool:
+    return os.getenv("INTENT_ROUTER_V2_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def rule_confidence_threshold() -> float:
+    try:
+        return float(os.getenv("ROUTER_RULE_CONFIDENCE_THRESHOLD", "0.75"))
+    except ValueError:
+        return 0.75
+
+
+def infer_parse_failure_mode(question: str) -> str:
+    """Default mode when LLM routing JSON fails — prefer rag over hybrid."""
+    q = (question or "").lower()
+    if any(h in q for h in _EVENT_HINTS + _311_HINTS + _CRIME_HINTS + _STATS_HINTS):
+        if any(h in q for h in _OPINION_HINTS):
+            return "hybrid"
+        return "sql"
+    if any(h in q for h in _POLICY_HINTS + _OPINION_HINTS + _RSS_NEWS_HINTS):
+        return "rag"
+    return "rag"
+
+
+def _base_plan(
+    *,
+    mode: str,
+    intent: str,
+    confidence: float,
+    k: int = 5,
+    transcript_tags: Optional[List[str]] = None,
+    policy_sources: Optional[List[str]] = None,
+    folder_categories: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    plan = {
+        **_DEFAULT_PLAN,
+        "mode": mode,
+        "intent": intent,
+        "confidence": confidence,
+        "router": "rules",
+        "k": k,
+    }
+    if transcript_tags is not None:
+        plan["transcript_tags"] = transcript_tags
+    if policy_sources is not None:
+        plan["policy_sources"] = policy_sources
+    if folder_categories is not None:
+        plan["folder_categories"] = folder_categories
+    return plan
+
+
+def _q(question: str) -> str:
+    return (question or "").lower().strip()
+
+
+def _mentions_stats(q: str) -> bool:
+    return any(h in q for h in _STATS_HINTS)
+
+
+def _mentions_opinion(q: str) -> bool:
+    return any(h in q for h in _OPINION_HINTS)
+
+
+def _mentions_rss_source(q: str) -> bool:
+    if "event" in q:
+        return False
+    return any(alias in q for alias in _RSS_SOURCE_ALIASES)
+
+
+def _looks_like_rss_news(q: str) -> bool:
+    if _mentions_rss_source(q):
+        return True
+    if any(h in q for h in _RSS_NEWS_HINTS):
+        return not any(h in q for h in _EVENT_HINTS + _SCHEDULE_HINTS)
+    return False
+
+
+def _looks_like_neighborhood_pulse(q: str) -> bool:
+    """'What's going on in Dorchester lately?' — news + optional 311 context."""
+    pulse = (
+        "what's going on", "whats going on", "what is going on",
+        "what's happening", "whats happening", "what is happening",
+        "lately", "recently in", "updates in",
+    )
+    return any(p in q for p in pulse) and "dorchester" in q
+
+
+def match_rules(question: str) -> Optional[Dict[str, Any]]:
+    """Return a routing plan when rules match with sufficient confidence."""
+    q = _q(question)
+    if not q:
+        return None
+
+    # 311 stats → sql (before events — "this week" appears in both)
+    if any(h in q for h in _311_HINTS):
+        if _mentions_opinion(q) and _mentions_stats(q):
+            return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
+        return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)
+
+    # Crime routing (before generic schedule hints)
+    if any(h in q for h in _CRIME_HINTS):
+        if _mentions_stats(q) and not _mentions_opinion(q):
+            return _base_plan(mode="sql", intent="crime_stats", confidence=0.92, k=5)
+        if _mentions_opinion(q) and not _mentions_stats(q):
+            return _base_plan(
+                mode="hybrid",
+                intent="crime_opinion",
+                confidence=0.88,
+                k=5,
+                transcript_tags=["safety", "violence"],
+            )
+        if _mentions_stats(q) and _mentions_opinion(q):
+            return _base_plan(
+                mode="hybrid",
+                intent="crime_hybrid",
+                confidence=0.9,
+                k=5,
+                transcript_tags=["safety", "violence"],
+            )
+        return _base_plan(
+            mode="hybrid",
+            intent="crime_general",
+            confidence=0.8,
+            k=5,
+            transcript_tags=["safety"],
+        )
+
+    # Neighborhood pulse → hybrid (before event "going on" heuristics)
+    if _looks_like_neighborhood_pulse(q):
+        return _base_plan(
+            mode="hybrid",
+            intent="neighborhood_pulse",
+            confidence=0.88,
+            k=5,
+            folder_categories=["newsletters"],
+        )
+
+    # Events / calendar → sql
+    if any(h in q for h in _EVENT_HINTS):
+        return _base_plan(mode="sql", intent="events", confidence=0.95, k=5)
+    if any(h in q for h in _SCHEDULE_HINTS) and any(
+        h in q
+        for h in ("happening", "going on", "what's on", "whats on", "on saturday", "on sunday")
+    ):
+        return _base_plan(mode="sql", intent="events", confidence=0.88, k=5)
+
+    # Named RSS source → rag
+    if _mentions_rss_source(q):
+        return _base_plan(
+            mode="rag",
+            intent="news_source",
+            confidence=0.9,
+            k=5,
+            folder_categories=["newsletters"],
+        )
+
+    # General news → rag
+    if _looks_like_rss_news(q):
+        return _base_plan(
+            mode="rag",
+            intent="news_rss",
+            confidence=0.85,
+            k=5,
+            folder_categories=["newsletters"],
+        )
+
+    # Policy documents → rag
+    if any(h in q for h in _POLICY_HINTS):
+        return _base_plan(mode="rag", intent="policy", confidence=0.88, k=5)
+
+    # Pure opinion / community voice → rag
+    if _mentions_opinion(q):
+        return _base_plan(
+            mode="rag",
+            intent="opinion",
+            confidence=0.85,
+            k=5,
+            transcript_tags=["community"],
+        )
+
+    return None
+
+
+def route_with_rules(question: str) -> Optional[Dict[str, Any]]:
+    """Return a plan if rule confidence meets the configured threshold."""
+    plan = match_rules(question)
+    if plan is None:
+        return None
+    if plan.get("confidence", 0) < rule_confidence_threshold():
+        return None
+    return plan

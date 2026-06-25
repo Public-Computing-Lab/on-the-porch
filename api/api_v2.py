@@ -26,6 +26,8 @@ import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
+from ops_health import check_ingestion_lag, validate_production_config
+from request_metrics import log_chat_metrics, reset_request_metrics
 from rate_limit import RateLimiter
 from security import (
     generate_token,
@@ -75,9 +77,14 @@ from unified_chatbot import (  # noqa: E402
     create_empty_cache,
     is_small_talk,
     apply_post_stream_fallback,
+    should_apply_boston_gov_fallback,
     stream_agent_response,
+    try_boston_gov_enrichment,
 )
-from semantic_cache import SemanticResponseCache  # noqa: E402
+from semantic_cache import (  # noqa: E402
+    SemanticResponseCache,
+    build_semantic_cache_backend,
+)
 
 try:
     from ingest_community_notes import ingest_community_notes as _ingest_community_notes  # noqa: E402
@@ -160,6 +167,53 @@ class Config:
     SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.95"))
     SEMANTIC_CACHE_TTL_SECONDS = int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "900"))
     SEMANTIC_CACHE_MAX = int(os.getenv("SEMANTIC_CACHE_MAX", "200"))
+    _semantic_default_backend = (
+        "redis" if os.getenv("CACHE_BACKEND", "memory").strip().lower() == "redis" else "memory"
+    )
+    SEMANTIC_CACHE_BACKEND = os.getenv(
+        "SEMANTIC_CACHE_BACKEND", _semantic_default_backend,
+    ).strip().lower()
+    SEMANTIC_CACHE_KEY = os.getenv(
+        "SEMANTIC_CACHE_KEY", "rethinkai:semantic_cache:entries",
+    )
+
+    # Iteration 1: prepared SQL + follow-up gate
+    PREPARED_SQL_ENABLED = os.getenv("PREPARED_SQL_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+    FAST_FOLLOWUP_GATE_ENABLED = os.getenv(
+        "FAST_FOLLOWUP_GATE_ENABLED", "true",
+    ).strip().lower() in ("1", "true", "yes")
+
+    # Iteration 2: rule-first routing + async Boston.gov enrichment
+    INTENT_ROUTER_V2_ENABLED = os.getenv(
+        "INTENT_ROUTER_V2_ENABLED", "true",
+    ).strip().lower() in ("1", "true", "yes")
+    ROUTER_RULE_CONFIDENCE_THRESHOLD = float(
+        os.getenv("ROUTER_RULE_CONFIDENCE_THRESHOLD", "0.75")
+    )
+    BOSTON_GOV_ASYNC_ENABLED = os.getenv(
+        "BOSTON_GOV_ASYNC_ENABLED", "true",
+    ).strip().lower() in ("1", "true", "yes")
+    BOSTON_GOV_BLOCKING = os.getenv(
+        "BOSTON_GOV_BLOCKING", "false",
+    ).strip().lower() in ("1", "true", "yes")
+    BOSTON_GOV_ASYNC_TIMEOUT_SECONDS = float(
+        os.getenv("BOSTON_GOV_ASYNC_TIMEOUT_SECONDS", "8"),
+    )
+
+    # Iteration 3: local BGE embeddings + blue-green vector stores
+    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
+    LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+    LOCAL_EMBED_DEVICE = os.getenv("LOCAL_EMBED_DEVICE", "cpu")
+
+    # Iteration 0: production profile and observability
+    PRODUCTION_MODE = os.getenv("PRODUCTION_MODE", "false").strip().lower() in ("1", "true", "yes")
+    INGEST_STALE_HOURS = max(1, int(os.getenv("INGEST_STALE_HOURS", "26")))
+    REQUEST_METRICS_ENABLED = os.getenv("REQUEST_METRICS_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+    GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 
     # Response streaming endpoint (OFF by default on the client; the endpoint is
     # always available). See /conversations/<id>/messages/stream.
@@ -544,29 +598,109 @@ def _build_rate_limiter() -> RateLimiter:
 _rate_limiter = _build_rate_limiter()
 
 
-_semantic_embeddings = None
-
-
 def _semantic_embed(text: str):
-    """Embed a question for the semantic cache, reusing one embeddings object."""
-    global _semantic_embeddings
-    if _semantic_embeddings is None:
-        import retrieval  # available via the path set up by the unified_chatbot import
-        _semantic_embeddings = retrieval.GeminiEmbeddings()
-    return _semantic_embeddings.embed_query(text)
+    """Embed a question for the semantic cache (same provider as RAG)."""
+    import retrieval
+
+    return retrieval.embed_text(text)
 
 
-_semantic_cache = SemanticResponseCache(
-    enabled=Config.SEMANTIC_CACHE_ENABLED,
-    threshold=Config.SEMANTIC_CACHE_THRESHOLD,
-    ttl_seconds=Config.SEMANTIC_CACHE_TTL_SECONDS,
-    max_entries=Config.SEMANTIC_CACHE_MAX,
-    embed_fn=_semantic_embed,
-)
+def _build_semantic_cache() -> SemanticResponseCache:
+    backend_name = Config.SEMANTIC_CACHE_BACKEND
+    redis_client = None
+    if backend_name == "redis":
+        try:
+            import redis  # type: ignore
+
+            redis_client = redis.Redis.from_url(
+                Config.REDIS_URL,
+                socket_timeout=2,
+                socket_connect_timeout=2,
+            )
+            redis_client.ping()
+        except Exception as exc:  # noqa: BLE001
+            _log_exception(
+                "Semantic cache redis unavailable; using in-memory backend",
+                exc,
+            )
+            backend_name = "memory"
+
+    backend = build_semantic_cache_backend(
+        backend_name=backend_name,
+        redis_client=redis_client,
+        redis_key=Config.SEMANTIC_CACHE_KEY,
+    )
+    return SemanticResponseCache(
+        enabled=Config.SEMANTIC_CACHE_ENABLED,
+        threshold=Config.SEMANTIC_CACHE_THRESHOLD,
+        ttl_seconds=Config.SEMANTIC_CACHE_TTL_SECONDS,
+        max_entries=Config.SEMANTIC_CACHE_MAX,
+        embed_fn=_semantic_embed,
+        backend=backend,
+    )
+
+
+_semantic_cache = _build_semantic_cache()
 if Config.SEMANTIC_CACHE_ENABLED:
     print(
         f"Semantic response cache: enabled "
-        f"(threshold={Config.SEMANTIC_CACHE_THRESHOLD}, ttl={Config.SEMANTIC_CACHE_TTL_SECONDS}s)"
+        f"(backend={Config.SEMANTIC_CACHE_BACKEND}, "
+        f"threshold={Config.SEMANTIC_CACHE_THRESHOLD}, "
+        f"ttl={Config.SEMANTIC_CACHE_TTL_SECONDS}s)"
+    )
+
+print(
+    f"Embeddings: provider={Config.EMBED_PROVIDER}, "
+    f"model={Config.LOCAL_EMBED_MODEL if Config.EMBED_PROVIDER == 'local' else os.getenv('GEMINI_EMBED_MODEL', 'models/gemini-embedding-001')}"
+)
+
+
+def _run_startup_checks() -> None:
+    ok, issues = validate_production_config(
+        production_mode=Config.PRODUCTION_MODE,
+        cache_backend=Config.CACHE_BACKEND,
+        semantic_cache_enabled=Config.SEMANTIC_CACHE_ENABLED,
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+        gemini_fast_model=os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
+        embed_provider=Config.EMBED_PROVIDER,
+        vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
+    )
+    for msg in issues:
+        prefix = "ERROR" if ("must be" in msg or "missing" in msg) else "WARNING"
+        print(f"{prefix}: Production config: {msg}", file=sys.stderr)
+    if not ok:
+        raise RuntimeError(
+            "Invalid production configuration (PRODUCTION_MODE=true). "
+            "Fix CACHE_BACKEND and other settings in .env, then restart."
+        )
+
+
+if Config.PRODUCTION_MODE:
+    _run_startup_checks()
+    print("Production mode: enabled", file=sys.stderr)
+
+
+def _log_agent_metrics(
+    *,
+    mode: str,
+    cache_hit: bool = False,
+    thread_id: Optional[str] = None,
+    streaming: bool = False,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not Config.REQUEST_METRICS_ENABLED:
+        return
+    merged_extra = {"embed_provider": Config.EMBED_PROVIDER}
+    if extra:
+        merged_extra.update(extra)
+    log_chat_metrics(
+        enabled=True,
+        mode=mode,
+        intent=mode,
+        cache_hit=cache_hit,
+        thread_id=thread_id,
+        streaming=streaming,
+        extra=merged_extra,
     )
 
 # Words that make a question time-sensitive; such questions are never served
@@ -1508,14 +1642,38 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
         lowered = re.sub(r"\s+", " ", lowered)
         if lowered in {"dorchester reporter", "dot reporter"} or "dotnews" in lowered:
             return ("dorchester reporter", "Dorchester Reporter")
+        if lowered in {"admin knowledge", "community note", "community notes"}:
+            return ("community notes", "Community Notes")
         return (lowered or value.lower() or "unknown", value or "Unknown")
 
+    def _weekly_events_sql(sql_query: str) -> bool:
+        return bool(re.search(r"FROM\s+`?weekly_events`?", sql_query or "", re.IGNORECASE))
+
+    def _event_sources_from_result(payload: Dict[str, Any]) -> List[Dict[str, str]]:
+        explicit = payload.get("event_sources")
+        if isinstance(explicit, list) and explicit:
+            return [s for s in explicit if isinstance(s, dict)]
+        try:
+            from sql_chat.prepared_sql import build_event_sources  # noqa: WPS433
+
+            rows = (payload.get("result") or {}).get("rows") or []
+            if rows and (
+                payload.get("prepared_intent") == "event_by_name"
+                or _weekly_events_sql(str(payload.get("sql") or ""))
+            ):
+                return build_event_sources(rows, str(payload.get("question") or ""))
+        except Exception:
+            pass
+        return []
+
     if mode == "sql":
-        sql_query = result.get("sql", "")
-        if sql_query:
-            match = re.search(r"FROM\s+`?(\w+)`?", sql_query, re.IGNORECASE)
-            if match:
-                sources.append({"type": "sql", "table": match.group(1)})
+        sources.extend(_event_sources_from_result(result))
+        if not sources:
+            sql_query = result.get("sql", "")
+            if sql_query:
+                match = re.search(r"FROM\s+`?(\w+)`?", sql_query, re.IGNORECASE)
+                if match:
+                    sources.append({"type": "sql", "table": match.group(1)})
 
     elif mode == "rag":
         metadata = result.get("metadata", [])
@@ -1691,13 +1849,23 @@ def _execute_agent_response(
     *,
     conversation_history: List[Dict[str, str]],
     retrieval_cache: Optional[Dict[str, Any]],
+    thread_id: Optional[str] = None,
+    streaming: bool = False,
 ) -> Dict[str, Any]:
+    reset_request_metrics()
     cache = retrieval_cache or create_empty_cache()
     has_history = bool(conversation_history)
     has_cache = bool(cache and cache.get("mode"))
 
     if is_small_talk(message):
-        return build_small_talk_result(message, cache)
+        result = build_small_talk_result(message, cache)
+        _log_agent_metrics(
+            mode=result.get("mode", "chitchat"),
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return result
 
     # Semantic response cache: short-circuit near-duplicate first-turn questions.
     semantic_eligible = _semantic_cache_eligible(message, conversation_history)
@@ -1705,13 +1873,20 @@ def _execute_agent_response(
         cached = _semantic_cache.get(message)
         if cached:
             print(f"  ⚡ Semantic cache hit (similarity={cached.get('_similarity')})")
-            return {
+            out = {
                 "answer": cached["answer"],
                 "mode": cached.get("mode", "semantic_cache"),
                 "sources": cached.get("sources", []),
-                "result": {"answer": cached["answer"]},
+                "result": cached.get("agent_result", {"answer": cached["answer"]}),
                 "retrieval_cache": cache,
             }
+            _log_agent_metrics(
+                mode=out["mode"],
+                cache_hit=True,
+                thread_id=thread_id,
+                streaming=streaming,
+            )
+            return out
 
     if has_history or has_cache:
         history_check = _check_if_needs_new_data(message, conversation_history, cache)
@@ -1720,13 +1895,20 @@ def _execute_agent_response(
 
     if not history_check.get("needs_new_data", True) and (has_history or has_cache):
         answer = _answer_from_history(message, conversation_history, cache)
-        return {
+        out = {
             "answer": answer,
             "mode": "history",
             "sources": [],
             "result": {"answer": answer},
             "retrieval_cache": cache,
         }
+        _log_agent_metrics(
+            mode="history",
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return out
 
     plan = _route_question(message)
     mode = plan.get("mode", "hybrid")
@@ -1767,8 +1949,31 @@ def _execute_agent_response(
 
     # Store fresh first-turn answers for future near-duplicate questions.
     if semantic_eligible and answer:
-        _semantic_cache.put(message, {"answer": answer, "mode": mode, "sources": sources})
+        _semantic_cache.put(
+            message,
+            {
+                "answer": answer,
+                "mode": mode,
+                "sources": sources,
+                "agent_result": result,
+            },
+        )
 
+    _log_agent_metrics(
+        mode=mode,
+        cache_hit=False,
+        thread_id=thread_id,
+        streaming=streaming,
+        extra={
+            k: v
+            for k, v in {
+                "prepared_intent": result.get("prepared_intent"),
+                "intent": plan.get("intent"),
+                "router": plan.get("router"),
+            }.items()
+            if v
+        } or None,
+    )
     return {
         "answer": answer,
         "mode": mode,
@@ -2329,6 +2534,7 @@ def post_conversation_message(thread_id: str):
             message,
             conversation_history=conversation_history,
             retrieval_cache=thread_state,
+            thread_id=thread_id,
         )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
@@ -2455,18 +2661,23 @@ def post_conversation_message_stream(thread_id: str):
         return f"data: {json_dumps(obj)}\n\n"
 
     def _generate():
+        reset_request_metrics()
         full_answer = ""
         mode = "hybrid"
         result_payload: Dict[str, Any] = {}
         next_cache = thread_state
         semantic_eligible = _semantic_cache_eligible(message, conversation_history)
+        cache_hit = False
+        cached_sources: List[Dict[str, str]] = []
 
         try:
             cached = _semantic_cache.get(message) if semantic_eligible else None
             if cached:
+                cache_hit = True
                 full_answer = cached.get("answer", "")
                 mode = cached.get("mode", "semantic_cache")
-                result_payload = {"answer": full_answer}
+                result_payload = cached.get("agent_result", {"answer": full_answer})
+                cached_sources = cached.get("sources", [])
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
@@ -2484,20 +2695,33 @@ def post_conversation_message_stream(thread_id: str):
             return
 
         if full_answer:
-            enriched = apply_post_stream_fallback(message, full_answer, mode)
-            if enriched != full_answer:
-                yield _sse({"type": "correction", "text": enriched})
-                full_answer = enriched
+            blocking_boston = (
+                not Config.BOSTON_GOV_ASYNC_ENABLED or Config.BOSTON_GOV_BLOCKING
+            )
+            if blocking_boston:
+                enriched = apply_post_stream_fallback(message, full_answer, mode)
+                if enriched != full_answer:
+                    yield _sse({"type": "correction", "text": enriched})
+                    full_answer = enriched
             if semantic_eligible and mode != "semantic_cache":
                 sources_for_cache = extract_sources(mode, result_payload)
                 _semantic_cache.put(
                     message,
-                    {"answer": full_answer, "mode": mode, "sources": sources_for_cache},
+                    {
+                        "answer": full_answer,
+                        "mode": mode,
+                        "sources": sources_for_cache,
+                        "agent_result": result_payload,
+                    },
                 )
 
         conn2 = None
         try:
-            sources = extract_sources(mode, result_payload)
+            sources = (
+                cached_sources
+                if cache_hit and cached_sources
+                else extract_sources(mode, result_payload)
+            )
             conn2 = get_db_connection()
             thread2 = _fetch_thread(conn2, user_id, thread_id)
             if not thread2:
@@ -2532,6 +2756,38 @@ def post_conversation_message_stream(thread_id: str):
                 "user_message": _serialize_message(user_message_row),
                 "assistant_message": _serialize_message(assistant_message_row),
             })
+
+            # Post-final Boston.gov correction (bounded wait; does not block first token).
+            if (
+                full_answer
+                and Config.BOSTON_GOV_ASYNC_ENABLED
+                and not Config.BOSTON_GOV_BLOCKING
+                and should_apply_boston_gov_fallback(message, full_answer, mode)
+            ):
+                enriched = try_boston_gov_enrichment(
+                    message,
+                    full_answer,
+                    timeout_seconds=Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS,
+                )
+                if enriched != full_answer:
+                    yield _sse({"type": "correction", "text": enriched})
+                    try:
+                        cursor = conn2.cursor()
+                        cursor.execute(
+                            "UPDATE conversation_messages SET content = %s WHERE id = %s",
+                            (enriched, assistant_message_row["id"]),
+                        )
+                        conn2.commit()
+                        cursor.close()
+                    except Exception as exc:  # noqa: BLE001
+                        _log_exception("Failed to persist Boston.gov correction", exc)
+                    full_answer = enriched
+            _log_agent_metrics(
+                mode=mode,
+                cache_hit=cache_hit,
+                thread_id=thread_id,
+                streaming=True,
+            )
         except Exception as exc:  # noqa: BLE001
             if conn2:
                 try:
@@ -2735,6 +2991,17 @@ def health():
         "status": "ok",
         "version": Config.API_VERSION,
         "cache_backend": Config.CACHE_BACKEND,
+        "production_mode": Config.PRODUCTION_MODE,
+        "semantic_cache_enabled": Config.SEMANTIC_CACHE_ENABLED,
+        "semantic_cache_backend": Config.SEMANTIC_CACHE_BACKEND,
+        "prepared_sql_enabled": Config.PREPARED_SQL_ENABLED,
+        "intent_router_v2": Config.INTENT_ROUTER_V2_ENABLED,
+        "boston_gov_async": Config.BOSTON_GOV_ASYNC_ENABLED,
+        "embed_provider": Config.EMBED_PROVIDER,
+        "local_embed_model": Config.LOCAL_EMBED_MODEL,
+        "vectordb_dir": str(_retrieval.VECTORDB_DIR) if _retrieval else None,
+        "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+        "gemini_fast_model": os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
     }
     try:
         conn = get_db_connection()
@@ -2747,10 +3014,32 @@ def health():
     status["redis"] = _check_redis_health()
     if status["redis"] == "disconnected" and Config.CACHE_BACKEND == "redis":
         status["status"] = "degraded"
+    if Config.PRODUCTION_MODE and status["redis"] != "connected":
+        status["status"] = "degraded"
 
     status["chroma"] = _check_chroma_health()
     if status["chroma"] in {"missing", "unavailable", "degraded"}:
         status["status"] = "degraded"
+
+    ingest = check_ingestion_lag(
+        repo_root=_ROOT_DIR,
+        stale_hours=Config.INGEST_STALE_HOURS,
+    )
+    status["ingestion"] = ingest
+    if ingest.get("status") in {"stale", "degraded"}:
+        status["status"] = "degraded"
+
+    _, prod_issues = validate_production_config(
+        production_mode=Config.PRODUCTION_MODE,
+        cache_backend=Config.CACHE_BACKEND,
+        semantic_cache_enabled=Config.SEMANTIC_CACHE_ENABLED,
+        gemini_model=os.getenv("GEMINI_MODEL", ""),
+        gemini_fast_model=os.getenv("GEMINI_FAST_MODEL", ""),
+        embed_provider=Config.EMBED_PROVIDER,
+        vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
+    )
+    if prod_issues:
+        status["config_warnings"] = prod_issues
 
     return jsonify(status)
 

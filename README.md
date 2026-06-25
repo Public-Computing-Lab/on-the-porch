@@ -133,7 +133,8 @@ The project uses a **single `.env` file at the repo root**.
 - `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` – production server tuning
 - `RATE_LIMIT_*`, `GUEST_CLEANUP_ENABLED` – abuse protection and guest DB hygiene
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB` – MySQL connection
-- `VECTORDB_DIR` – path to the ChromaDB/vector DB directory
+- `VECTORDB_DIR` – Gemini-embedded Chroma store (`vectordb_new`)
+- `VECTORDB_BGE_DIR`, `EMBED_PROVIDER` – local BGE embeddings (Iteration 3; see below)
 - `GOOGLE_DRIVE_FOLDER_ID` and related `GOOGLE_*/GMAIL_*` settings – data ingestion
 
 **Frontend production config** (`public/config.js`):
@@ -277,11 +278,22 @@ This project implements a **hybrid AI system** that combines:
 1. Copy `example_env.txt` → `.env` and set strong `FLASK_SECRET_KEY` + `TOKEN_PEPPER`
 2. Set `FLASK_DEBUG=false` and `FLASK_SESSION_COOKIE_SECURE=true` behind HTTPS
 3. Configure `ALLOWED_ORIGINS` for your real frontend domain
-4. Run **Redis** and set `CACHE_BACKEND=redis` when using `GUNICORN_WORKERS > 1`
-5. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
-6. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
-7. Schedule `./cron_ingest.sh` for data sync; set `GUEST_CLEANUP_ENABLED=true`
-8. Verify `GET /health` reports `database`, `redis`, and `chroma` as healthy
+4. Set `PRODUCTION_MODE=true`, `CACHE_BACKEND=redis`, and `SEMANTIC_CACHE_ENABLED=true`
+5. **Local embeddings (Iteration 3):** build the BGE index, then flip the provider:
+   ```bash
+   pip install sentence-transformers
+   python "on_the_porch/rag stuff/reindex_bge_vectordb.py" --validate
+   # In .env: EMBED_PROVIDER=local
+   ```
+   RAG retrieval and the semantic cache then use local `BAAI/bge-base-en-v1.5` (no embedding API calls). Roll back with `EMBED_PROVIDER=gemini`.
+6. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
+7. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
+8. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
+9. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
+10. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
+11. Set `GUEST_CLEANUP_ENABLED=true` in production
+12. Verify `GET /health` reports `database`, `redis`, `chroma`, and `ingestion` as healthy
+13. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`)
 
 ### Local production-like stack
 
@@ -298,9 +310,14 @@ See `scripts/dreamhost/` for older deployment scripts. They may be out of date w
 ### Production considerations
 
 - Use gunicorn (`./start_api.sh`) — the Flask dev server is not suitable for production
-- Redis shares session cache and rate limits across gunicorn workers
+- Redis shares session cache, rate limits, and **semantic response cache** across gunicorn workers
+- **Prepared SQL** (`PREPARED_SQL_ENABLED=true`) answers common 311/crime/events questions without LLM SQL generation
+- **Intent router v2** (`INTENT_ROUTER_V2_ENABLED=true`) routes most questions with rules instead of an LLM call
+- **Async Boston.gov** (`BOSTON_GOV_ASYNC_ENABLED=true`) keeps enrichment off the hot path; streaming may send a late `correction` event
+- **Local BGE embeddings** (`EMBED_PROVIDER=local`) remove per-query embedding API latency/cost after `reindex_bge_vectordb.py`
 - Set up MySQL + ChromaDB backups
-- Monitor Gemini API usage and costs
+- **Local BGE embeddings** (`EMBED_PROVIDER=local`, Iteration 3) — zero embedding API calls; semantic cache shares the same model
+- Monitor Gemini API usage and structured chat metrics (`"event": "chat_request"` in logs)
 
 ## 📝 License
 

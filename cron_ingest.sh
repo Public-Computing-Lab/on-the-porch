@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Daily ingestion: civic data, events, RSS (current), Google Drive.
+# Wayback RSS backfill runs monthly via cron_ingest_monthly.sh (slow + embed-heavy).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,8 +33,6 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
-# Prevent overlapping ingestion runs. If a run is slow, the next scheduled run
-# must not start and double-write to the vector store / MySQL tables.
 LOCK_FILE="$LOG_DIR/cron_ingest.lock"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
@@ -52,7 +52,7 @@ run_step() {
   log "DONE: $label"
 }
 
-log "Cron ingestion job started"
+log "Cron ingestion job started (daily)"
 log "Using Python: $PYTHON"
 
 run_step \
@@ -68,8 +68,8 @@ run_step \
   "$PYTHON" "on_the_porch/data_ingestion/tribe_events_ingester.py" "all"
 
 run_step \
-  "RSS ingestion" \
-  "$PYTHON" "on_the_porch/rag stuff/ingest_rss_wayback.py"
+  "RSS ingestion (current feeds)" \
+  "$PYTHON" "on_the_porch/rag stuff/ingest_rss.py"
 
 run_step \
   "Google Drive ingestion" \

@@ -17,8 +17,18 @@ except ImportError:
 # so the location does not depend on the process working directory. The live
 # server still overrides this via _fix_retrieval_vectordb_path(), but resolving
 # here keeps standalone scripts pointed at the same store the server reads.
-VECTORDB_DIR = (Path(__file__).resolve().parent / "../vectordb_new").resolve()
+_RAG_DIR = Path(__file__).resolve().parent
+VECTORDB_GEMINI_DIR = (_RAG_DIR / "../vectordb_new").resolve()
+VECTORDB_BGE_DIR = (_RAG_DIR / "../vectordb_bge_v1").resolve()
+# Active store path (updated by configure_vectordb_paths at API startup).
+VECTORDB_DIR = VECTORDB_GEMINI_DIR
+
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
+# Iteration 3: local BGE embeddings (default gemini until BGE index is built).
+EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
+LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
+LOCAL_EMBED_DEVICE = os.getenv("LOCAL_EMBED_DEVICE", "cpu")
+_embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).
 _CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "3")))
@@ -34,6 +44,8 @@ _vectordb_singleton = None
 _vectordb_singleton_path: str | None = None
 _embeddings_singleton = None
 _vectordb_lock = threading.Lock()
+# Per-request embedding reuse (Iteration 1): one embed per question across sources.
+_query_embed_local = threading.local()
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how",
     "i", "in", "is", "it", "me", "of", "on", "or", "that", "the", "this",
@@ -66,6 +78,104 @@ class GeminiEmbeddings:
 
     def embed_query(self, text):
         return self._embed(text)
+
+
+class LocalBGEEmbeddings:
+    """Local sentence-transformers embeddings (Iteration 3)."""
+
+    def __init__(
+        self,
+        model_name: str | None = None,
+        device: str | None = None,
+    ) -> None:
+        self.model_name = model_name or LOCAL_EMBED_MODEL
+        self.device = (device or LOCAL_EMBED_DEVICE).strip() or "cpu"
+        self._model = None
+
+    def _load_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self.model_name, device=self.device)
+        return self._model
+
+    def embed_documents(self, texts):
+        if not texts:
+            return []
+        model = self._load_model()
+        vectors = model.encode(
+            list(texts),
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return vectors.tolist()
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+
+def resolve_vectordb_dir() -> Path:
+    """Return the vector store path for the active embedding provider."""
+    if EMBED_PROVIDER == "local":
+        return VECTORDB_BGE_DIR
+    return VECTORDB_GEMINI_DIR
+
+
+def configure_vectordb_paths(
+    *,
+    gemini_dir: Path | str | None = None,
+    bge_dir: Path | str | None = None,
+) -> Path:
+    """Set gemini/BGE store paths and point VECTORDB_DIR at the active store."""
+    global VECTORDB_DIR, VECTORDB_GEMINI_DIR, VECTORDB_BGE_DIR
+    global _vectordb_singleton, _vectordb_singleton_path, _embeddings_singleton, _embeddings_provider
+
+    if gemini_dir is not None:
+        VECTORDB_GEMINI_DIR = Path(gemini_dir).resolve()
+    if bge_dir is not None:
+        VECTORDB_BGE_DIR = Path(bge_dir).resolve()
+    VECTORDB_DIR = resolve_vectordb_dir()
+    _vectordb_singleton = None
+    _vectordb_singleton_path = None
+    _embeddings_singleton = None
+    _embeddings_provider = None
+    return VECTORDB_DIR
+
+
+def get_embeddings():
+    """Shared embedding function for retrieval, cache, and ingestion."""
+    global _embeddings_singleton, _embeddings_provider
+    provider = EMBED_PROVIDER if EMBED_PROVIDER in ("local", "gemini") else "gemini"
+    if _embeddings_singleton is None or _embeddings_provider != provider:
+        _embeddings_singleton = (
+            LocalBGEEmbeddings() if provider == "local" else GeminiEmbeddings()
+        )
+        _embeddings_provider = provider
+    return _embeddings_singleton
+
+
+def embed_text(text: str) -> list:
+    """Embed a single string (query or cache key)."""
+    return get_embeddings().embed_query(text)
+
+
+def clear_query_embedding_cache() -> None:
+    """Clear the per-request query embedding (call at start of each RAG fetch)."""
+    _query_embed_local.vec = None
+    _query_embed_local.key = None
+
+
+def get_query_embedding(query: str) -> list:
+    """Embed a query once per request; reused by parallel retrieval tasks."""
+    key = (query or "").strip()
+    if getattr(_query_embed_local, "key", None) == key and getattr(
+        _query_embed_local, "vec", None
+    ):
+        return _query_embed_local.vec
+    vec = get_embeddings().embed_query(key)
+    _query_embed_local.key = key
+    _query_embed_local.vec = vec
+    return vec
 
 
 def _is_locked_error(exc: Exception) -> bool:
@@ -118,17 +228,18 @@ def load_vectordb():
     _ensure_sqlite_wal()
 
     if not _VECTORDB_SINGLETON_ENABLED:
-        return Chroma(persist_directory=str(VECTORDB_DIR), embedding_function=GeminiEmbeddings())
+        return Chroma(
+            persist_directory=str(VECTORDB_DIR),
+            embedding_function=get_embeddings(),
+        )
 
-    global _vectordb_singleton, _vectordb_singleton_path, _embeddings_singleton
+    global _vectordb_singleton, _vectordb_singleton_path
     current_path = str(VECTORDB_DIR)
     with _vectordb_lock:
         if _vectordb_singleton is None or _vectordb_singleton_path != current_path:
-            if _embeddings_singleton is None:
-                _embeddings_singleton = GeminiEmbeddings()
             _vectordb_singleton = Chroma(
                 persist_directory=current_path,
-                embedding_function=_embeddings_singleton,
+                embedding_function=get_embeddings(),
             )
             _vectordb_singleton_path = current_path
         return _vectordb_singleton
@@ -233,7 +344,16 @@ def _keyword_retrieve(query, k=5, doc_type=None, tags=None, source=None):
     }
 
 
-def retrieve(query, k=5, doc_type=None, tags=None, source=None, min_score=None, vectordb=None):
+def retrieve(
+    query,
+    k=5,
+    doc_type=None,
+    tags=None,
+    source=None,
+    min_score=None,
+    vectordb=None,
+    query_embedding=None,
+):
     """
     Universal retrieval with flexible metadata filtering.
     
@@ -300,13 +420,22 @@ def retrieve(query, k=5, doc_type=None, tags=None, source=None, min_score=None, 
         filter_dict = {"source": source}
 
     def _do_semantic_search(vectordb):
+        embedding = query_embedding if query_embedding is not None else get_query_embedding(query)
         # Retrieve with or without score threshold
         if min_score is not None:
-            results_with_scores = vectordb.similarity_search_with_score(
-                query,
-                k=k * 3 if tags else k,
-                filter=filter_dict if filter_dict else None,
-            )
+            score_fn = getattr(vectordb, "similarity_search_with_score_by_vector", None)
+            if score_fn is not None:
+                results_with_scores = score_fn(
+                    embedding,
+                    k=k * 3 if tags else k,
+                    filter=filter_dict if filter_dict else None,
+                )
+            else:
+                results_with_scores = vectordb.similarity_search_with_score(
+                    query,
+                    k=k * 3 if tags else k,
+                    filter=filter_dict if filter_dict else None,
+                )
 
             # Post-process tag filtering if needed (soft filter: fall back to unfiltered if no matches)
             if tags:
@@ -330,10 +459,10 @@ def retrieve(query, k=5, doc_type=None, tags=None, source=None, min_score=None, 
                 "query": query,
             }
 
-        results = vectordb.similarity_search(
-            query,
+        results = vectordb.similarity_search_by_vector(
+            embedding,
             k=k * 3 if tags else k,
-            filter=filter_dict if filter_dict else None
+            filter=filter_dict if filter_dict else None,
         )
 
         if tags:
@@ -371,7 +500,7 @@ def retrieve(query, k=5, doc_type=None, tags=None, source=None, min_score=None, 
             return _keyword_retrieve(query, k=k, doc_type=doc_type, tags=tags, source=source)
 
 
-def retrieve_transcripts(query, tags=None, k=5):
+def retrieve_transcripts(query, tags=None, k=5, query_embedding=None):
     """
     Convenience function for transcript-only search.
     
@@ -383,10 +512,12 @@ def retrieve_transcripts(query, tags=None, k=5):
     Example:
         retrieve_transcripts("What do people say about safety?", tags=['safety'])
     """
-    return retrieve(query, k=k, doc_type='transcript', tags=tags)
+    return retrieve(
+        query, k=k, doc_type="transcript", tags=tags, query_embedding=query_embedding,
+    )
 
 
-def retrieve_policies(query, k=5, source=None):
+def retrieve_policies(query, k=5, source=None, query_embedding=None):
     """
     Convenience function for policy-only search.
     
@@ -398,7 +529,9 @@ def retrieve_policies(query, k=5, source=None):
     Example:
         retrieve_policies("anti-displacement strategies")
     """
-    return retrieve(query, k=k, doc_type='policy', source=source)
+    return retrieve(
+        query, k=k, doc_type="policy", source=source, query_embedding=query_embedding,
+    )
 
 
 
@@ -427,7 +560,7 @@ def format_results(result_dict):
     return '\n'.join(formatted)
 
 
-def retrieve_rss(query, k=5, source=None):
+def retrieve_rss(query, k=5, source=None, query_embedding=None):
     """
     Search RSS-ingested content in ChromaDB (doc_type='calendar_event' with feed_url set).
     
@@ -442,7 +575,10 @@ def retrieve_rss(query, k=5, source=None):
     # RSS docs have doc_type='calendar_event' AND a 'feed_url' metadata field.
     # We filter by calendar_event and post-filter to only RSS-sourced docs
     # (newsletter PDFs also use calendar_event but don't have feed_url).
-    results = retrieve(query, k=k * 2, doc_type="calendar_event", source=source)
+    results = retrieve(
+        query, k=k * 2, doc_type="calendar_event", source=source,
+        query_embedding=query_embedding,
+    )
 
     # Post-filter: keep only RSS docs (they have feed_url in metadata)
     rss_chunks = []
@@ -456,7 +592,9 @@ def retrieve_rss(query, k=5, source=None):
 
     # If source filter returned nothing, fall back to unfiltered RSS docs
     if not rss_chunks:
-        fallback = retrieve(query, k=k * 2, doc_type="calendar_event")
+        fallback = retrieve(
+            query, k=k * 2, doc_type="calendar_event", query_embedding=query_embedding,
+        )
         for chunk, meta in zip(fallback["chunks"], fallback["metadata"]):
             if meta.get("feed_url"):
                 rss_chunks.append(chunk)

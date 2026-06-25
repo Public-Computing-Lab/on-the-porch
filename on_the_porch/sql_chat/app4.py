@@ -145,6 +145,12 @@ def _generate_content(model, prompt, generation_config):
     fall back to a plain call so an unexpected kwarg never crashes a request.
     """
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
+    try:
+        from unified_chatbot import increment_llm_call_counter  # type: ignore
+
+        increment_llm_call_counter()
+    except Exception:
+        pass
     if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
         try:
             return model.generate_content(

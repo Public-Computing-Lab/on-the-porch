@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from pypdf import PdfReader
 import google.generativeai as genai  # type: ignore
 
-from retrieval import GeminiEmbeddings
+from retrieval import get_embeddings, resolve_vectordb_dir
 
 _THIS_FILE = Path(__file__).resolve()
 _RAG_DIR = _THIS_FILE.parent
@@ -24,7 +24,7 @@ DEFAULT_NEWSLETTER_DIR = Path("Data/newsletters")
 
 # Shared vector DB used by the chatbot (must match retrieval.py). Resolved
 # relative to this file so it does not depend on the process working directory.
-DEFAULT_VECTORDB_DIR = (_RAG_DIR / "../vectordb_new").resolve()
+DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 
 
 def _get_gemini_client():
@@ -351,7 +351,7 @@ def build_vectordb(
     print(f"  - Newsletter chunks: {len(newsletter_docs)}")
     print(f"{'='*80}\n")
 
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
 
     if vectordb_dir.exists():
         print(f"Adding documents to existing vector database at {vectordb_dir}")

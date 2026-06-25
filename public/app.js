@@ -80,7 +80,7 @@ const sourceMapping = {
   bos311_data: { label: '311 Service Requests', path: 'https://data.boston.gov/dataset/311-service-requests' },
   shots_fired_data: { label: 'Crime data (shots fired)', path: 'https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system' },
   homicide_data: { label: 'Crime data (homicides)', path: 'https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system' },
-  weekly_events: { label: 'Community newsletters', path: null },
+  weekly_events: { label: 'Community calendar', path: null },
   crime_incident: { label: 'Crime data', path: 'https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system' },
 };
 
@@ -469,15 +469,46 @@ function formatDate(value) {
   });
 }
 
-function formatSource(source) {
+function normalizeSourceEntry(source) {
+  if (!source) return null;
+  if (typeof source === 'string') {
+    try {
+      return JSON.parse(source);
+    } catch (error) {
+      return null;
+    }
+  }
+  return typeof source === 'object' ? source : null;
+}
+
+function normalizeSources(sources) {
+  if (!Array.isArray(sources)) return [];
+  return sources.map(normalizeSourceEntry).filter(Boolean);
+}
+
+function formatSource(rawSource) {
+  const source = normalizeSourceEntry(rawSource);
+  if (!source) {
+    return { label: 'Community data', path: null };
+  }
+
+  const label = (source.source || source.label || source.name || '').trim();
+  const path = source.path || source.link || source.url || null;
+
+  if (source.type === 'event' && label) {
+    return { label, path };
+  }
+  if (label && path) {
+    return { label, path };
+  }
   if (source.type === 'sql' && source.table) {
     const key = source.table.toLowerCase();
     return sourceMapping[key] || { label: source.table, path: null };
   }
-  if (source.type === 'rag' && source.source) {
-    return { label: source.source, path: source.path || null };
+  if (source.type === 'rag' && label) {
+    return { label, path };
   }
-  return { label: 'Community data', path: null };
+  return { label: label || 'Community data', path };
 }
 
 function setAuthMode(mode) {
@@ -647,7 +678,8 @@ function createMessageElement(message) {
   text.innerHTML = formatRichText(message.content);
   content.appendChild(text);
 
-  if (Array.isArray(message.sources) && message.sources.length > 0) {
+  const messageSources = normalizeSources(message.sources);
+  if (messageSources.length > 0) {
     const meta = document.createElement('div');
     meta.className = 'message-meta';
     const label = document.createElement('span');
@@ -656,7 +688,7 @@ function createMessageElement(message) {
     meta.appendChild(label);
 
     const seen = new Set();
-    message.sources.forEach((source) => {
+    messageSources.forEach((source) => {
       const formatted = formatSource(source);
       if (seen.has(formatted.label)) return;
       seen.add(formatted.label);
@@ -941,7 +973,10 @@ function normalizeMessages(messages) {
     }
   }
 
-  return ordered.map(({ __index, ...message }) => message);
+  return ordered.map(({ __index, ...message }) => ({
+    ...message,
+    sources: normalizeSources(message.sources),
+  }));
 }
 
 async function refreshSession() {
@@ -1293,7 +1328,14 @@ async function sendChatMessage(event) {
           (entry) => entry.id !== optimisticMessageId && entry.id !== assistantPendingId,
         ),
         result.data.user_message,
-        result.data.assistant_message,
+        {
+          ...result.data.assistant_message,
+          sources: normalizeSources(
+            (result.data.assistant_message && result.data.assistant_message.sources && result.data.assistant_message.sources.length)
+              ? result.data.assistant_message.sources
+              : result.data.sources,
+          ),
+        },
       ]);
 
       renderThreads();
@@ -1388,10 +1430,18 @@ async function sendChatMessage(event) {
       }
       // Replace the optimistic user bubble + transient streaming bubble with the
       // authoritative server messages in one final render.
+      const assistantMessage = {
+        ...data.assistant_message,
+        sources: normalizeSources(
+          (data.assistant_message && data.assistant_message.sources && data.assistant_message.sources.length)
+            ? data.assistant_message.sources
+            : data.sources,
+        ),
+      };
       state.messages = normalizeMessages([
         ...state.messages.filter((item) => item.id !== optimisticMessageId),
         data.user_message,
-        data.assistant_message,
+        assistantMessage,
       ]);
       renderThreads();
       updateThreadHeader();
@@ -1434,7 +1484,14 @@ async function sendChatMessage(event) {
     state.messages = normalizeMessages([
       ...state.messages.filter((entry) => entry.id !== optimisticMessageId),
       result.data.user_message,
-      result.data.assistant_message,
+      {
+        ...result.data.assistant_message,
+        sources: normalizeSources(
+          (result.data.assistant_message && result.data.assistant_message.sources && result.data.assistant_message.sources.length)
+            ? result.data.assistant_message.sources
+            : result.data.sources,
+        ),
+      },
     ]);
 
     renderThreads();

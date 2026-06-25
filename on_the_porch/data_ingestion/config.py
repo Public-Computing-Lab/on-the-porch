@@ -54,6 +54,15 @@ if Path(_VECTORDB_DIR_RAW).is_absolute():
 else:
     VECTORDB_DIR = (_THIS_DIR / _VECTORDB_DIR_RAW).resolve()
 
+_VECTORDB_BGE_RAW = os.getenv("VECTORDB_BGE_DIR", "../vectordb_bge_v1")
+if Path(_VECTORDB_BGE_RAW).is_absolute():
+    VECTORDB_BGE_DIR = Path(_VECTORDB_BGE_RAW)
+else:
+    VECTORDB_BGE_DIR = (_THIS_DIR.parent / _VECTORDB_BGE_RAW).resolve()
+
+EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
+ACTIVE_VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_DIR
+
 # NOTE: Calendar events are now SQL-only (weekly_events table), no vector DB needed.
 
 # Temporary download directory

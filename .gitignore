@@ -32,6 +32,8 @@ logs/
 **/chroma.sqlite3
 vectordb_new/
 on_the_porch/vectordb_new/
+vectordb_bge_v1/
+on_the_porch/vectordb_bge_v1/
 **/vectordb_new.zip
 
 
