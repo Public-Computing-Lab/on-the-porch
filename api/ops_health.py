@@ -137,6 +137,7 @@ def validate_production_config(
     gemini_fast_model: str,
     embed_provider: str = "gemini",
     vectordb_dir: Optional[Path] = None,
+    vector_db_provider: str = "chroma",
 ) -> Tuple[bool, list[str]]:
     """Return (ok, warnings/errors) for production deployment settings."""
     issues: list[str] = []
@@ -158,7 +159,21 @@ def validate_production_config(
             "set EMBED_PROVIDER=local after BGE reindex (Iteration 3)"
         )
     elif embed_provider == "local":
-        if vectordb_dir is None or not vectordb_dir.exists():
+        if vector_db_provider == "qdrant":
+            try:
+                from qdrant_store import check_qdrant_health
+
+                q_status = check_qdrant_health()
+                if q_status != "connected":
+                    issues.append(
+                        f"VECTOR_DB_PROVIDER=qdrant but Qdrant is {q_status}; "
+                        "run migrate_chroma_to_qdrant.py"
+                    )
+            except Exception:
+                issues.append(
+                    "VECTOR_DB_PROVIDER=qdrant but qdrant-client is unavailable"
+                )
+        elif vectordb_dir is None or not vectordb_dir.exists():
             issues.append(
                 "EMBED_PROVIDER=local but BGE vector store is missing; "
                 "run on_the_porch/rag stuff/reindex_bge_vectordb.py"

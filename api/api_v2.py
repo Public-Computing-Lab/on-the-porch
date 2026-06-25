@@ -120,18 +120,27 @@ def _trigger_ingest() -> None:
 
 
 def _remove_from_chroma(entry_id: int) -> None:
-    """Delete a community note from the Chroma vector DB by its note ID."""
-    if _chromadb is None or _retrieval is None:
+    """Delete a community note from the active vector DB by its note ID."""
+    if _retrieval is None:
         return
 
     def _run():
+        note_id = f"community_note_{entry_id}"
         try:
+            if Config.VECTOR_DB_PROVIDER == "qdrant":
+                from qdrant_store import get_qdrant_store
+
+                get_qdrant_store().delete([note_id])
+                print(f"Removed {note_id} from Qdrant")
+                return
+            if _chromadb is None:
+                return
             client = _chromadb.PersistentClient(path=str(_retrieval.VECTORDB_DIR))
             collection = client.get_collection("langchain")
-            collection.delete(ids=[f"community_note_{entry_id}"])
-            print(f"Removed community_note_{entry_id} from Chroma")
+            collection.delete(ids=[note_id])
+            print(f"Removed {note_id} from Chroma")
         except Exception as exc:
-            print(f"Background Chroma removal failed for note {entry_id}: {exc}")
+            print(f"Background vector DB removal failed for note {entry_id}: {exc}")
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -206,6 +215,15 @@ class Config:
     EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
     LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
     LOCAL_EMBED_DEVICE = os.getenv("LOCAL_EMBED_DEVICE", "cpu")
+
+    # Iteration 4: Qdrant vector DB + BM25 hybrid retrieval
+    VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").strip().lower()
+    BM25_HYBRID_ENABLED = os.getenv("BM25_HYBRID_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+    QDRANT_MODE = os.getenv("QDRANT_MODE", "local").strip().lower()
+    QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
+    QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "otp_documents")
 
     # Iteration 0: production profile and observability
     PRODUCTION_MODE = os.getenv("PRODUCTION_MODE", "false").strip().lower() in ("1", "true", "yes")
@@ -653,6 +671,15 @@ print(
     f"Embeddings: provider={Config.EMBED_PROVIDER}, "
     f"model={Config.LOCAL_EMBED_MODEL if Config.EMBED_PROVIDER == 'local' else os.getenv('GEMINI_EMBED_MODEL', 'models/gemini-embedding-001')}"
 )
+print(
+    f"Vector DB: provider={Config.VECTOR_DB_PROVIDER}, "
+    f"bm25_hybrid={Config.BM25_HYBRID_ENABLED}"
+    + (
+        f", qdrant={Config.QDRANT_COLLECTION}"
+        if Config.VECTOR_DB_PROVIDER == "qdrant"
+        else ""
+    )
+)
 
 
 def _run_startup_checks() -> None:
@@ -664,6 +691,7 @@ def _run_startup_checks() -> None:
         gemini_fast_model=os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
         embed_provider=Config.EMBED_PROVIDER,
         vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
+        vector_db_provider=Config.VECTOR_DB_PROVIDER,
     )
     for msg in issues:
         prefix = "ERROR" if ("must be" in msg or "missing" in msg) else "WARNING"
@@ -1344,6 +1372,8 @@ def _check_redis_health() -> str:
 
 
 def _check_chroma_health() -> str:
+    if Config.VECTOR_DB_PROVIDER == "qdrant":
+        return "bypassed"
     if _chromadb is None or _retrieval is None:
         return "unavailable"
     try:
@@ -1356,6 +1386,17 @@ def _check_chroma_health() -> str:
         return "connected" if count >= 0 else "empty"
     except Exception:
         return "degraded"
+
+
+def _check_qdrant_health() -> str:
+    if Config.VECTOR_DB_PROVIDER != "qdrant":
+        return "not_configured"
+    try:
+        from qdrant_store import check_qdrant_health
+
+        return check_qdrant_health()
+    except Exception:
+        return "unavailable"
 
 
 
@@ -2999,6 +3040,11 @@ def health():
         "boston_gov_async": Config.BOSTON_GOV_ASYNC_ENABLED,
         "embed_provider": Config.EMBED_PROVIDER,
         "local_embed_model": Config.LOCAL_EMBED_MODEL,
+        "vector_db_provider": Config.VECTOR_DB_PROVIDER,
+        "bm25_hybrid_enabled": Config.BM25_HYBRID_ENABLED,
+        "qdrant_collection": (
+            Config.QDRANT_COLLECTION if Config.VECTOR_DB_PROVIDER == "qdrant" else None
+        ),
         "vectordb_dir": str(_retrieval.VECTORDB_DIR) if _retrieval else None,
         "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         "gemini_fast_model": os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
@@ -3018,7 +3064,11 @@ def health():
         status["status"] = "degraded"
 
     status["chroma"] = _check_chroma_health()
-    if status["chroma"] in {"missing", "unavailable", "degraded"}:
+    status["qdrant"] = _check_qdrant_health()
+    if Config.VECTOR_DB_PROVIDER == "qdrant":
+        if status["qdrant"] in {"missing", "unavailable", "degraded", "empty"}:
+            status["status"] = "degraded"
+    elif status["chroma"] in {"missing", "unavailable", "degraded"}:
         status["status"] = "degraded"
 
     ingest = check_ingestion_lag(
@@ -3037,6 +3087,7 @@ def health():
         gemini_fast_model=os.getenv("GEMINI_FAST_MODEL", ""),
         embed_provider=Config.EMBED_PROVIDER,
         vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
+        vector_db_provider=Config.VECTOR_DB_PROVIDER,
     )
     if prod_issues:
         status["config_warnings"] = prod_issues

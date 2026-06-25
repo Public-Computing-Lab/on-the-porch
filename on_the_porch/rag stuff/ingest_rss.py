@@ -182,38 +182,34 @@ def ingest_rss(
     print(f"\nTotal entries fetched: {len(all_items)}")
  
     # ── open / create vectordb ────────────────────────────────────────────────
-    embeddings = get_embeddings()
- 
-    if vectordb_dir.exists():
-        vectordb = Chroma(
-            persist_directory=str(vectordb_dir),
-            embedding_function=embeddings,
-        )
-    else:
-        print(f"Creating new vectordb at {vectordb_dir}")
-        vectordb = Chroma(
-            persist_directory=str(vectordb_dir),
-            embedding_function=embeddings,
-        )
- 
+    from vectordb_io import (
+        open_ingest_vectordb,
+        vectordb_add_documents,
+        vectordb_delete,
+        vectordb_get,
+        vectordb_get_all_ids,
+        vectordb_location,
+    )
+
+    vectordb = open_ingest_vectordb(vectordb_dir)
+
     # ── optionally wipe existing rss docs ────────────────────────────────────
     if reset:
         print("--reset: removing existing RSS docs from vectordb …")
-        existing = vectordb.get(where={"doc_type": "calendar_event"})
-        rss_ids  = [
-            id_ for id_, meta in zip(
-                existing["ids"], existing["metadatas"]
-            )
-            if meta.get("feed_url")          # only RSS-sourced docs have feed_url
+        existing = vectordb_get(vectordb, where={"doc_type": "calendar_event"})
+        rss_ids = [
+            id_
+            for id_, meta in zip(existing["ids"], existing["metadatas"])
+            if meta.get("feed_url")
         ]
         if rss_ids:
-            vectordb.delete(ids=rss_ids)
+            vectordb_delete(vectordb, rss_ids)
             print(f"  Deleted {len(rss_ids)} existing RSS docs.")
         else:
             print("  No existing RSS docs found.")
- 
+
     # ── deduplicate against existing ids ─────────────────────────────────────
-    existing_ids: set[str] = set(vectordb.get()["ids"])
+    existing_ids = vectordb_get_all_ids(vectordb)
     new_items = [(sid, doc) for sid, doc in all_items if sid not in existing_ids]
  
     print(f"Already in DB:  {len(all_items) - len(new_items)}")
@@ -235,10 +231,10 @@ def ingest_rss(
     ids  = [sid  for sid, _   in new_items]
     docs = [doc  for _,   doc in new_items]
  
-    vectordb.add_documents(documents=docs, ids=ids)
- 
+    vectordb_add_documents(vectordb, docs, ids)
+
     print(f"\n✓ Added {len(new_items)} new RSS entries to vectordb.")
-    print(f"  DB location: {vectordb_dir.resolve()}")
+    print(f"  DB location: {vectordb_location(vectordb, vectordb_dir)}")
     print("=" * 70 + "\n")
  
  

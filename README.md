@@ -135,6 +135,7 @@ The project uses a **single `.env` file at the repo root**.
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB` – MySQL connection
 - `VECTORDB_DIR` – Gemini-embedded Chroma store (`vectordb_new`)
 - `VECTORDB_BGE_DIR`, `EMBED_PROVIDER` – local BGE embeddings (Iteration 3; see below)
+- `VECTOR_DB_PROVIDER`, `QDRANT_*`, `BM25_HYBRID_ENABLED` – Qdrant + BM25 hybrid retrieval (Iteration 4)
 - `GOOGLE_DRIVE_FOLDER_ID` and related `GOOGLE_*/GMAIL_*` settings – data ingestion
 
 **Frontend production config** (`public/config.js`):
@@ -286,14 +287,22 @@ This project implements a **hybrid AI system** that combines:
    # In .env: EMBED_PROVIDER=local
    ```
    RAG retrieval and the semantic cache then use local `BAAI/bge-base-en-v1.5` (no embedding API calls). Roll back with `EMBED_PROVIDER=gemini`.
-6. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
-7. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
-8. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
-9. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
-10. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
-11. Set `GUEST_CLEANUP_ENABLED=true` in production
-12. Verify `GET /health` reports `database`, `redis`, `chroma`, and `ingestion` as healthy
-13. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`)
+6. **Qdrant vector DB (Iteration 4):** migrate off Chroma SQLite to remove ingest/API lock contention:
+   ```bash
+   pip install qdrant-client rank-bm25
+   python "on_the_porch/rag stuff/migrate_chroma_to_qdrant.py" --validate
+   # In .env: VECTOR_DB_PROVIDER=qdrant
+   # Optional server mode: ./start_qdrant.sh and QDRANT_MODE=server
+   ```
+   Retrieval uses dense vectors + **BM25** reciprocal-rank fusion (`BM25_HYBRID_ENABLED=true`) for better street-name recall. Cron ingest can target a staging collection (`QDRANT_INGEST_STAGING=true`) and promote with `--promote-staging`.
+7. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
+8. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
+9. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
+10. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
+11. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
+12. Set `GUEST_CLEANUP_ENABLED=true` in production
+13. Verify `GET /health` reports `database`, `redis`, `qdrant` (or `chroma`), and `ingestion` as healthy
+14. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`)
 
 ### Local production-like stack
 
@@ -315,8 +324,8 @@ See `scripts/dreamhost/` for older deployment scripts. They may be out of date w
 - **Intent router v2** (`INTENT_ROUTER_V2_ENABLED=true`) routes most questions with rules instead of an LLM call
 - **Async Boston.gov** (`BOSTON_GOV_ASYNC_ENABLED=true`) keeps enrichment off the hot path; streaming may send a late `correction` event
 - **Local BGE embeddings** (`EMBED_PROVIDER=local`) remove per-query embedding API latency/cost after `reindex_bge_vectordb.py`
-- Set up MySQL + ChromaDB backups
-- **Local BGE embeddings** (`EMBED_PROVIDER=local`, Iteration 3) — zero embedding API calls; semantic cache shares the same model
+- **Qdrant + BM25** (`VECTOR_DB_PROVIDER=qdrant`) removes Chroma SQLite lock contention during `cron_ingest.sh`
+- Set up MySQL + vector store backups (Chroma or Qdrant)
 - Monitor Gemini API usage and structured chat metrics (`"event": "chat_request"` in logs)
 
 ## 📝 License

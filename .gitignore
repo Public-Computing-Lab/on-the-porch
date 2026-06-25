@@ -34,6 +34,10 @@ vectordb_new/
 on_the_porch/vectordb_new/
 vectordb_bge_v1/
 on_the_porch/vectordb_bge_v1/
+qdrant_data/
+on_the_porch/qdrant_data/
+qdrant_data_test/
+on_the_porch/qdrant_data_test/
 **/vectordb_new.zip
 
 

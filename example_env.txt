@@ -106,6 +106,18 @@ LOCAL_EMBED_MODEL=BAAI/bge-base-en-v1.5
 LOCAL_EMBED_DEVICE=cpu
 VECTORDB_BGE_DIR=../vectordb_bge_v1
 
+# Iteration 4: Qdrant vector DB + BM25 hybrid retrieval
+# Default chroma; set qdrant after migrate_chroma_to_qdrant.py
+VECTOR_DB_PROVIDER=chroma
+BM25_HYBRID_ENABLED=true
+QDRANT_MODE=local
+QDRANT_URL=http://127.0.0.1:6333
+QDRANT_PATH=../qdrant_data
+QDRANT_COLLECTION=otp_documents
+QDRANT_STAGING_COLLECTION=otp_documents_staging
+QDRANT_INGEST_STAGING=false
+VECTOR_SIZE=768
+
 # ============================================================================
 # Production profile (Iteration 0)
 # ============================================================================

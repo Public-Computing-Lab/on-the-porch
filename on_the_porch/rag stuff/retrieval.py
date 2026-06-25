@@ -28,6 +28,11 @@ GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-00
 EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
 LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 LOCAL_EMBED_DEVICE = os.getenv("LOCAL_EMBED_DEVICE", "cpu")
+# Iteration 4: Qdrant vector store + BM25 hybrid retrieval.
+VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").strip().lower()
+BM25_HYBRID_ENABLED = os.getenv("BM25_HYBRID_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes",
+)
 _embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).
@@ -219,12 +224,107 @@ def _ensure_sqlite_wal() -> None:
         print(f"  ⚠️ Could not enable SQLite WAL on vector store: {exc}")
 
 
-def load_vectordb():
-    """Load the unified vector database (policies, transcripts, client uploads, etc.).
+def _bm25_index_path() -> Path:
+    if VECTOR_DB_PROVIDER == "qdrant":
+        from qdrant_store import BM25_INDEX_PATH
 
-    Returns a cached singleton keyed by the current VECTORDB_DIR. If the path
+        return BM25_INDEX_PATH
+    return Path(VECTORDB_DIR) / "bm25_index.pkl"
+
+
+def _load_bm25_index():
+    if not BM25_HYBRID_ENABLED:
+        return None
+    try:
+        from bm25_index import get_bm25_index
+
+        return get_bm25_index(_bm25_index_path())
+    except Exception as exc:
+        print(f"  ⚠️ BM25 index unavailable: {exc}")
+        return None
+
+
+def _merge_vector_and_bm25(
+    query: str,
+    vector_result: dict,
+    *,
+    k: int,
+    doc_type=None,
+    tags=None,
+    source=None,
+) -> dict:
+    """Reciprocal-rank fusion of dense vector hits and BM25 keyword hits."""
+    index = _load_bm25_index()
+    if index is None:
+        return vector_result
+
+    from bm25_index import reciprocal_rank_fusion
+
+    vector_ids: list[str] = []
+    id_to_chunk: dict[str, str] = {}
+    id_to_meta: dict[str, dict] = {}
+    for chunk, meta in zip(
+        vector_result.get("chunks") or [],
+        vector_result.get("metadata") or [],
+    ):
+        doc_id = str(
+            (meta or {}).get("external_id")
+            or (meta or {}).get("note_id")
+            or (meta or {}).get("source")
+            or chunk[:80]
+        )
+        vector_ids.append(doc_id)
+        id_to_chunk[doc_id] = chunk
+        id_to_meta[doc_id] = meta or {}
+
+    bm25_rows = index.search(
+        query, k=k * 2, doc_type=doc_type, tags=tags, source=source,
+    )
+    bm25_ids = [row[1] for row in bm25_rows]
+    for _, doc_id, chunk, meta in bm25_rows:
+        id_to_chunk.setdefault(doc_id, chunk)
+        id_to_meta.setdefault(doc_id, meta)
+
+    fused_ids = reciprocal_rank_fusion([vector_ids, bm25_ids], limit=k * 3)
+    chunks: list[str] = []
+    metadata: list[dict] = []
+    for doc_id in fused_ids:
+        chunk = id_to_chunk.get(doc_id)
+        if not chunk:
+            continue
+        meta = id_to_meta.get(doc_id, {})
+        if tags:
+            raw_tags = meta.get("tags")
+            if raw_tags:
+                doc_tags = [t.strip() for t in str(raw_tags).split(",")]
+                if not any(tag in doc_tags for tag in tags):
+                    continue
+        chunks.append(chunk)
+        metadata.append(meta)
+        if len(chunks) >= k:
+            break
+
+    if not chunks:
+        return vector_result
+    return {
+        "chunks": chunks,
+        "metadata": metadata,
+        "scores": None,
+        "query": query,
+    }
+
+
+def load_vectordb():
+    """Load the active vector database (Chroma or Qdrant).
+
+    Returns a cached singleton keyed by the current store. If the path
     changes (the live server overrides it at startup), the client is rebuilt.
     """
+    if VECTOR_DB_PROVIDER == "qdrant":
+        from qdrant_store import get_qdrant_store
+
+        return get_qdrant_store()
+
     _ensure_sqlite_wal()
 
     if not _VECTORDB_SINGLETON_ENABLED:
@@ -490,7 +590,17 @@ def retrieve(
     for attempt in range(1, _CHROMA_MAX_ATTEMPTS + 1):
         try:
             db = vectordb if vectordb is not None else load_vectordb()
-            return _do_semantic_search(db)
+            result = _do_semantic_search(db)
+            if BM25_HYBRID_ENABLED:
+                result = _merge_vector_and_bm25(
+                    query,
+                    result,
+                    k=k,
+                    doc_type=doc_type,
+                    tags=tags,
+                    source=source,
+                )
+            return result
         except Exception as exc:
             if _is_locked_error(exc) and attempt < _CHROMA_MAX_ATTEMPTS:
                 print(f"  ⏳ Vector store busy (attempt {attempt}/{_CHROMA_MAX_ATTEMPTS}): {exc}; retrying")
