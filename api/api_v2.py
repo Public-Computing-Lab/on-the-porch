@@ -27,7 +27,7 @@ from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
 from ops_health import check_ingestion_lag, validate_production_config
-from request_metrics import log_chat_metrics, reset_request_metrics
+from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
 from rate_limit import RateLimiter
 from security import (
     generate_token,
@@ -224,6 +224,15 @@ class Config:
     QDRANT_MODE = os.getenv("QDRANT_MODE", "local").strip().lower()
     QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
     QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "otp_documents")
+
+    # Iteration 5: materialized summaries, ingest job tracking, SLO metrics
+    MATERIALIZED_VIEWS_ENABLED = os.getenv(
+        "MATERIALIZED_VIEWS_ENABLED", "true",
+    ).strip().lower() in ("1", "true", "yes")
+    INGEST_QUEUE_ENABLED = os.getenv("INGEST_QUEUE_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+    BOSTON_311_STALE_HOURS = float(os.getenv("BOSTON_311_STALE_HOURS", "2"))
 
     # Iteration 0: production profile and observability
     PRODUCTION_MODE = os.getenv("PRODUCTION_MODE", "false").strip().lower() in ("1", "true", "yes")
@@ -719,8 +728,17 @@ def _log_agent_metrics(
     if not Config.REQUEST_METRICS_ENABLED:
         return
     merged_extra = {"embed_provider": Config.EMBED_PROVIDER}
+    req_id = get_request_id()
+    if req_id:
+        merged_extra["request_id"] = req_id
+    if cache_hit:
+        merged_extra["cache_layer"] = "semantic"
     if extra:
         merged_extra.update(extra)
+        if extra.get("prepared_intent"):
+            merged_extra["tier"] = "prepared_sql"
+        elif extra.get("router") == "rules":
+            merged_extra["tier"] = "rules"
     log_chat_metrics(
         enabled=True,
         mode=mode,
@@ -2042,6 +2060,7 @@ def before_request_handler():
     g.is_guest = False
     g.clear_auth_cookies = False
     g.csrf_cookie_written = False
+    g.request_id = str(uuid.uuid4())[:12]
 
     provided_api_key = request.headers.get("RethinkAI-API-Key", "")
     if provided_api_key and provided_api_key in Config.RETHINKAI_API_KEYS:
@@ -2981,12 +3000,16 @@ def events():
     cursor = None
     try:
         conn = get_db_connection()
+        from materialized_views import events_query_source, is_materialized_views_enabled
+
+        source_table = events_query_source(conn)
+        url_col = ", event_url" if source_table == "events_materialized" else ""
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
-            """
+            f"""
             SELECT id, event_name, event_date, start_date, end_date,
-                   start_time, end_time, raw_text, source_pdf
-            FROM weekly_events
+                   start_time, end_time, raw_text, source_pdf{url_col}
+            FROM {source_table}
             WHERE start_date >= CURDATE()
               AND start_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY)
             ORDER BY start_date ASC, start_time ASC
@@ -2997,6 +3020,13 @@ def events():
         rows = cursor.fetchall()
         events_list = []
         for row in rows:
+            event_url = row.get("event_url") if source_table == "events_materialized" else None
+            if not event_url and row.get("raw_text"):
+                match = re.search(
+                    r"URL:\s*(https?://\S+)", str(row["raw_text"]), re.IGNORECASE,
+                )
+                if match:
+                    event_url = match.group(1).rstrip(").,]")
             events_list.append(
                 {
                     "id": row["id"],
@@ -3008,9 +3038,15 @@ def events():
                     "end_time": str(row["end_time"]) if row["end_time"] else None,
                     "description": row["raw_text"],
                     "source": row["source_pdf"],
+                    "url": event_url,
                 }
             )
-        return jsonify({"events": events_list, "total": len(events_list)})
+        return jsonify({
+            "events": events_list,
+            "total": len(events_list),
+            "source_table": source_table,
+            "materialized": is_materialized_views_enabled(),
+        })
     except mysql.connector.Error as exc:
         if getattr(exc, "errno", None) == 1146:
             return jsonify({"events": [], "total": 0})
@@ -3078,6 +3114,21 @@ def health():
     status["ingestion"] = ingest
     if ingest.get("status") in {"stale", "degraded"}:
         status["status"] = "degraded"
+
+    try:
+        from ingest_queue import check_311_freshness, get_ingest_job_status
+
+        status["ingest_jobs"] = get_ingest_job_status()
+        status["boston_311_freshness"] = check_311_freshness(
+            get_db_connection,
+            stale_hours=Config.BOSTON_311_STALE_HOURS,
+        )
+        if status["boston_311_freshness"].get("status") == "stale":
+            status["status"] = "degraded"
+    except Exception:
+        pass
+
+    status["materialized_views_enabled"] = Config.MATERIALIZED_VIEWS_ENABLED
 
     _, prod_issues = validate_production_config(
         production_mode=Config.PRODUCTION_MODE,

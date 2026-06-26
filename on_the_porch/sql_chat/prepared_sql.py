@@ -17,6 +17,9 @@ _DORCHESTER_311 = (
     "(`neighborhood` = 'Dorchester' OR `police_district` = 'C11')"
 )
 _DORCHESTER_CRIME = "`district` = 'C11'"
+_OFFENSE_EXPR = (
+    "COALESCE(NULLIF(`offense_code_group`, ''), NULLIF(`offense_description`, ''))"
+)
 
 
 @dataclass
@@ -425,20 +428,33 @@ def _sql_311_weekly_count(days: int) -> str:
 
 def _sql_311_top_types(days: int) -> str:
     days = max(1, min(days, 365))
+    if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        weeks = max(1, min((days + 6) // 7, 52))
+        return (
+            "SELECT issue_type, SUM(request_count) AS cnt "
+            "FROM `mv_311_weekly` "
+            f"WHERE `week_start` >= DATE_SUB(CURDATE(), INTERVAL {weeks * 7} DAY) "
+            "AND issue_type IS NOT NULL AND issue_type <> '' "
+            "GROUP BY issue_type ORDER BY cnt DESC LIMIT 10"
+        )
+    issue = "COALESCE(NULLIF(`service_name`, ''), NULLIF(`case_topic`, ''))"
     return (
-        "SELECT `type` AS issue_type, COUNT(*) AS cnt "
+        f"SELECT {issue} AS issue_type, COUNT(*) AS cnt "
         "FROM `service_requests_311` "
         f"WHERE {_DORCHESTER_311} "
         f"AND `open_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
-        "AND `type` IS NOT NULL AND `type` <> '' "
-        "GROUP BY `type` ORDER BY cnt DESC LIMIT 10"
+        f"AND {issue} IS NOT NULL AND {issue} <> '' "
+        f"GROUP BY {issue} ORDER BY cnt DESC LIMIT 10"
     )
 
 
 def _sql_311_recent(days: int) -> str:
     days = max(1, min(days, 90))
+    issue = "COALESCE(NULLIF(`service_name`, ''), NULLIF(`case_topic`, ''))"
     return (
-        "SELECT `open_date`, `type`, `reason`, `street_name`, `case_status` "
+        f"SELECT `open_date`, {issue} AS issue_type, `street_name`, `case_status` "
         "FROM `service_requests_311` "
         f"WHERE {_DORCHESTER_311} "
         f"AND `open_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
@@ -448,6 +464,15 @@ def _sql_311_recent(days: int) -> str:
 
 def _sql_crime_monthly_count(days: int) -> str:
     days = max(1, min(days, 365))
+    if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        months = max(1, min((days + 29) // 30, 24))
+        return (
+            "SELECT SUM(incident_count) AS cnt "
+            "FROM `mv_crime_monthly` "
+            f"WHERE `month_start` >= DATE_SUB(CURDATE(), INTERVAL {months} MONTH)"
+        )
     return (
         "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
         f"WHERE {_DORCHESTER_CRIME} "
@@ -457,13 +482,24 @@ def _sql_crime_monthly_count(days: int) -> str:
 
 def _sql_crime_top_offenses(days: int) -> str:
     days = max(1, min(days, 365))
+    if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        months = max(1, min((days + 29) // 30, 24))
+        return (
+            "SELECT offense_group, SUM(incident_count) AS cnt "
+            "FROM `mv_crime_monthly` "
+            f"WHERE `month_start` >= DATE_SUB(CURDATE(), INTERVAL {months} MONTH) "
+            "AND offense_group IS NOT NULL AND offense_group <> '' "
+            "GROUP BY offense_group ORDER BY cnt DESC LIMIT 10"
+        )
     return (
-        "SELECT `offense_code_group` AS offense_group, COUNT(*) AS cnt "
+        f"SELECT {_OFFENSE_EXPR} AS offense_group, COUNT(*) AS cnt "
         "FROM `crime_incident_reports` "
         f"WHERE {_DORCHESTER_CRIME} "
         f"AND `occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
-        "AND `offense_code_group` IS NOT NULL "
-        "GROUP BY `offense_code_group` ORDER BY cnt DESC LIMIT 10"
+        f"AND {_OFFENSE_EXPR} IS NOT NULL AND {_OFFENSE_EXPR} <> '' "
+        f"GROUP BY {_OFFENSE_EXPR} ORDER BY cnt DESC LIMIT 10"
     )
 
 

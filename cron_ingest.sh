@@ -44,12 +44,49 @@ else
   log "WARNING: 'flock' not available; skipping overlap protection."
 fi
 
+job_start() {
+  local job_name="$1"
+  "$PYTHON" "api/ingest_job_runner.py" start "$job_name" 2>/dev/null || true
+}
+
+job_finish() {
+  local job_name="$1"
+  local status="$2"
+  local error_msg="${3:-}"
+  if [ -n "$error_msg" ]; then
+    "$PYTHON" "api/ingest_job_runner.py" finish "$job_name" "$status" --error "$error_msg" 2>/dev/null || true
+  else
+    "$PYTHON" "api/ingest_job_runner.py" finish "$job_name" "$status" 2>/dev/null || true
+  fi
+}
+
+# label, job_name, allow_fail (true|false), command...
 run_step() {
   local label="$1"
-  shift
+  local job_name="$2"
+  local allow_fail="$3"
+  shift 3
+
+  local status=success
+  local err_msg=""
+
   log "START: $label"
-  "$@" 2>&1 | tee -a "$LOG_FILE"
+  job_start "$job_name"
+
+  if ! "$@" 2>&1 | tee -a "$LOG_FILE"; then
+    status=failed
+    err_msg="$label failed"
+    log "ERROR: $label"
+    job_finish "$job_name" failed "$err_msg"
+    if [ "$allow_fail" != "true" ]; then
+      log "Cron ingestion aborted (required step failed)."
+      exit 1
+    fi
+    return 0
+  fi
+
   log "DONE: $label"
+  job_finish "$job_name" success
 }
 
 log "Cron ingestion job started (daily)"
@@ -57,26 +94,44 @@ log "Using Python: $PYTHON"
 
 run_step \
   "Boston Open Data sync (311 & 911)" \
+  boston_sync \
+  false \
   "$PYTHON" "on_the_porch/data_ingestion/boston_data_sync/boston_data_sync.py"
 
 run_step \
+  "Materialized summary refresh" \
+  materialized_refresh \
+  true \
+  "$PYTHON" "scripts/refresh_materialized_views.py"
+
+run_step \
   "DotNews newsletter ingestion" \
+  dotnews \
+  true \
   "$PYTHON" "on_the_porch/data_ingestion/run_dotnews_ingest_v2.py"
 
 run_step \
   "Tribe events ingestion" \
+  tribe_events \
+  true \
   "$PYTHON" "on_the_porch/data_ingestion/tribe_events_ingester.py" "all"
 
 run_step \
   "RSS ingestion (current feeds)" \
+  rss \
+  true \
   "$PYTHON" "on_the_porch/rag stuff/ingest_rss.py"
 
 run_step \
   "Google Drive ingestion" \
+  google_drive \
+  true \
   "$PYTHON" "on_the_porch/data_ingestion/google_drive_to_vectordb.py"
 
 run_step \
   "Orphan guest user cleanup" \
+  guest_cleanup \
+  true \
   "$PYTHON" "api/cleanup_guest_users.py"
 
 log "Cron ingestion job finished successfully"

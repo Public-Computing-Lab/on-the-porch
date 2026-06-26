@@ -118,6 +118,15 @@ QDRANT_STAGING_COLLECTION=otp_documents_staging
 QDRANT_INGEST_STAGING=false
 VECTOR_SIZE=768
 
+# Iteration 5: materialized MySQL summaries, ingest job tracking, 311 freshness SLO
+MATERIALIZED_VIEWS_ENABLED=true
+EVENTS_MATERIALIZED_DAYS=90
+INGEST_QUEUE_ENABLED=true
+BOSTON_311_STALE_HOURS=2
+INGEST_QUEUE_KEY=rethinkai:ingest:jobs
+INGEST_STATUS_PREFIX=rethinkai:ingest:status:
+INGEST_STATUS_TTL_SECONDS=604800
+
 # ============================================================================
 # Production profile (Iteration 0)
 # ============================================================================

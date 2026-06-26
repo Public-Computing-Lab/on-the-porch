@@ -136,6 +136,7 @@ The project uses a **single `.env` file at the repo root**.
 - `VECTORDB_DIR` – Gemini-embedded Chroma store (`vectordb_new`)
 - `VECTORDB_BGE_DIR`, `EMBED_PROVIDER` – local BGE embeddings (Iteration 3; see below)
 - `VECTOR_DB_PROVIDER`, `QDRANT_*`, `BM25_HYBRID_ENABLED` – Qdrant + BM25 hybrid retrieval (Iteration 4)
+- `MATERIALIZED_VIEWS_ENABLED`, `INGEST_QUEUE_ENABLED`, `BOSTON_311_STALE_HOURS` – summary tables, ingest tracking, 311 freshness (Iteration 5)
 - `GOOGLE_DRIVE_FOLDER_ID` and related `GOOGLE_*/GMAIL_*` settings – data ingestion
 
 **Frontend production config** (`public/config.js`):
@@ -295,14 +296,19 @@ This project implements a **hybrid AI system** that combines:
    # Optional server mode: ./start_qdrant.sh and QDRANT_MODE=server
    ```
    Retrieval uses dense vectors + **BM25** reciprocal-rank fusion (`BM25_HYBRID_ENABLED=true`) for better street-name recall. Cron ingest can target a staging collection (`QDRANT_INGEST_STAGING=true`) and promote with `--promote-staging`.
-7. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
-8. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
-9. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
-10. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
-11. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
-12. Set `GUEST_CLEANUP_ENABLED=true` in production
-13. Verify `GET /health` reports `database`, `redis`, `qdrant` (or `chroma`), and `ingestion` as healthy
-14. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`)
+7. **Materialized summaries (Iteration 5):** migration `008_materialized_summaries.sql` runs on API startup. Refresh after Boston sync:
+   ```bash
+   python scripts/refresh_materialized_views.py
+   ```
+   `/events` reads `events_materialized` when enabled; prepared SQL uses `mv_311_weekly` / `mv_crime_monthly`. `/health` reports ingest job status and 311 freshness (`BOSTON_311_STALE_HOURS=2`).
+8. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
+9. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
+10. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
+11. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
+12. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
+13. Set `GUEST_CLEANUP_ENABLED=true` in production
+14. Verify `GET /health` reports `database`, `redis`, `qdrant` (or `chroma`), `ingestion`, `ingest_jobs`, and `boston_311_freshness`
+15. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`, includes `request_id`, `tier`, `cache_layer`)
 
 ### Local production-like stack
 

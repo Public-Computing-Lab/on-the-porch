@@ -58,6 +58,15 @@ def track_chat_request() -> Iterator[None]:
         pass
 
 
+def get_request_id() -> Optional[str]:
+    try:
+        from flask import g
+
+        return getattr(g, "request_id", None)
+    except Exception:
+        return None
+
+
 def build_chat_metrics(
     *,
     mode: str,
@@ -78,8 +87,13 @@ def build_chat_metrics(
     }
     if thread_id:
         payload["thread_id"] = thread_id
+    for key in ("request_id", "tier", "cache_layer", "embed_provider"):
+        if extra and extra.get(key) is not None:
+            payload[key] = extra[key]
     if extra:
-        payload.update(extra)
+        for k, v in extra.items():
+            if k not in payload:
+                payload[k] = v
     return payload
 
 
