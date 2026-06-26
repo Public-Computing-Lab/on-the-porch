@@ -1280,6 +1280,14 @@ def _run_sql(
     import sql_chat.app4 as app4  # noqa: WPS433
     from sql_chat import prepared_sql  # noqa: WPS433
 
+    prepared = prepared_sql.run_prepared_sql(
+        question,
+        app4._execute_sql,
+        conversation_history=conversation_history,
+    )
+    if prepared is not None:
+        return prepared
+
     if app4.is_generic_events_list_question(question):
         try:
             out = app4.run_generic_events_query(question, conversation_history)
@@ -1288,18 +1296,6 @@ def _run_sql(
             return out
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠️ Fast events path failed ({exc}); falling back to LLM SQL")
-
-    prepared = prepared_sql.run_prepared_sql(
-        question,
-        app4._execute_sql,
-        conversation_history=conversation_history,
-    )
-    if prepared is not None:
-        if apply_fallback and prepared.get("prepared_intent") != "event_by_name":
-            prepared["answer"] = _apply_sql_fallback_if_needed(
-                question, prepared.get("answer", ""),
-            )
-        return prepared
 
     database = os.environ.get("PGSCHEMA", "public")
     schema = app4._fetch_schema_snapshot(database)
@@ -1640,8 +1636,16 @@ def stream_agent_response(
     yield ("final", {"answer": answer, "mode": "hybrid", "result": result, "retrieval_cache": next_cache})
 
 
-def apply_post_stream_fallback(question: str, answer: str, mode: str) -> str:
+def apply_post_stream_fallback(
+    question: str,
+    answer: str,
+    mode: str,
+    *,
+    prepared_intent: Optional[str] = None,
+) -> str:
     """Apply Boston.gov fallback after streaming completes."""
+    if prepared_intent:
+        return answer
     if not answer:
         return answer
     if mode == "sql":

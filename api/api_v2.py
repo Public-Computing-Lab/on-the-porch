@@ -2759,7 +2759,12 @@ def post_conversation_message_stream(thread_id: str):
                 not Config.BOSTON_GOV_ASYNC_ENABLED or Config.BOSTON_GOV_BLOCKING
             )
             if blocking_boston:
-                enriched = apply_post_stream_fallback(message, full_answer, mode)
+                enriched = apply_post_stream_fallback(
+                    message,
+                    full_answer,
+                    mode,
+                    prepared_intent=result_payload.get("prepared_intent"),
+                )
                 if enriched != full_answer:
                     yield _sse({"type": "correction", "text": enriched})
                     full_answer = enriched

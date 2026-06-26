@@ -122,13 +122,44 @@ def _format_recent_rows(
     return "\n".join(lines)
 
 
+def _events_source_table() -> str:
+    if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    ):
+        return "events_materialized"
+    return "weekly_events"
+
+
+def _sql_events_upcoming(days: int, *, weekend_only: bool = False) -> str:
+    days = max(1, min(days, 90))
+    table = _events_source_table()
+    weekend_clause = ""
+    if weekend_only:
+        weekend_clause = (
+            " AND (DAYOFWEEK(`start_date`) IN (1, 7) "
+            " OR LOWER(`event_date`) LIKE '%saturday%' "
+            " OR LOWER(`event_date`) LIKE '%sunday%') "
+        )
+    return (
+        f"SELECT `event_name`, `event_date`, `start_date`, `end_date`, "
+        f"`start_time`, `end_time`, `raw_text`, `source_pdf` "
+        f"FROM `{table}` "
+        "WHERE `start_date` >= CURDATE() "
+        f"AND `start_date` <= DATE_ADD(CURDATE(), INTERVAL {days} DAY) "
+        f"{weekend_clause}"
+        "ORDER BY `start_date` ASC, `start_time` ASC "
+        "LIMIT 30"
+    )
+
+
 def _events_by_source_sql(source: str, days: int) -> str:
     days = max(1, min(days, 90))
     like = source.lower()
+    table = _events_source_table()
     return (
         "SELECT `event_name`, `event_date`, `start_date`, `start_time`, "
         "`raw_text`, `source_pdf` "
-        "FROM `weekly_events` "
+        f"FROM `{table}` "
         f"WHERE LOWER(`source_pdf`) LIKE '%{like}%' "
         "AND `start_date` >= CURDATE() "
         f"AND `start_date` <= DATE_ADD(CURDATE(), INTERVAL {days} DAY) "
@@ -520,6 +551,42 @@ def _sql_crime_top_offenses(days: int) -> str:
     )
 
 
+def _match_events_list(question: str) -> Optional[PreparedMatch]:
+    from sql_chat import app4  # noqa: WPS433
+
+    if not app4.is_generic_events_list_question(question):
+        return None
+    q = (question or "").lower()
+    weekend_only = "weekend" in q
+    days = 7 if weekend_only else _days_from_question(question, 14)
+    intent = "events_weekend" if weekend_only else "events_list"
+    period = "this weekend" if weekend_only else f"the next {days} days"
+    return PreparedMatch(
+        intent=intent,
+        sql=_sql_events_upcoming(days, weekend_only=weekend_only),
+        answer_fn=lambda question, result: _format_events_list_answer(
+            question, result, period=period,
+        ),
+    )
+
+
+def _format_events_list_answer(
+    question: str,
+    result: Dict[str, Any],
+    *,
+    period: str,
+) -> str:
+    from sql_chat import app4  # noqa: WPS433
+
+    rows = result.get("rows") or []
+    if not rows:
+        return (
+            f"I didn't find any upcoming events in Dorchester for {period}. "
+            "Try a wider date range or check back later."
+        )
+    return app4._format_events_answer_fallback(question, result)
+
+
 def _match_events_by_source(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     sources = (
@@ -628,6 +695,7 @@ def match_prepared_sql(question: str) -> Optional[PreparedMatch]:
         return None
     for matcher in (
         _match_event_by_name,
+        _match_events_list,
         _match_events_by_source,
         _match_311,
         _match_crime,

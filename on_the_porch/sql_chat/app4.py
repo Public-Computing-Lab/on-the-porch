@@ -686,7 +686,7 @@ def is_generic_events_list_question(question: str) -> bool:
 
     if any(m in q for m in ("tell me about", "more about", "details about", "when is the", "where is the")):
         return False
-    if '"' in q or "'" in q:
+    if re.search(r"""['"]([^'"]{4,})['"]""", q):
         return False
 
     time_hints = (
