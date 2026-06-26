@@ -782,7 +782,9 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
         k = 20
 
     if _looks_like_rss_query(question):
-        if _question_mentions_rss_source(question):
+        if plan.get("intent") in _STRUCTURED_SQL_INTENTS and mode == "sql":
+            pass
+        elif _question_mentions_rss_source(question):
             mode = "rag"
         elif mode == "sql":
             mode = "hybrid"
@@ -1105,15 +1107,18 @@ _RSS_NEWS_HINTS = (
     "what is happening in",
     "what is going on in",
     "lately in",
-    "dorchester",
-    "south dorchester",
-    "codman square",
-    "csndc",
     "tell me about",
     "what has",
     "who is",
     "what is",
 )
+
+_STRUCTURED_SQL_INTENTS = frozenset({
+    "311_stats",
+    "crime_stats",
+    "events",
+    "311_hybrid",
+})
 _SCHEDULE_HINTS = (
     "event",
     "events",
