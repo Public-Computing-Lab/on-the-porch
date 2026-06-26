@@ -462,6 +462,23 @@ def _sql_311_recent(days: int) -> str:
     )
 
 
+def _sql_311_open(days: int) -> str:
+    days = max(1, min(days, 90))
+    issue = "COALESCE(NULLIF(`service_name`, ''), NULLIF(`case_topic`, ''))"
+    open_status = (
+        "`case_status` IS NOT NULL AND `case_status` <> '' "
+        "AND `case_status` NOT IN ('Closed')"
+    )
+    return (
+        f"SELECT `open_date`, {issue} AS issue_type, `street_name`, `case_status` "
+        "FROM `service_requests_311` "
+        f"WHERE {_DORCHESTER_311} "
+        f"AND {open_status} "
+        f"AND `open_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
+        "ORDER BY `open_date` DESC LIMIT 20"
+    )
+
+
 def _sql_crime_monthly_count(days: int) -> str:
     days = max(1, min(days, 365))
     if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
@@ -547,13 +564,22 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
                 key_field="issue_type", period=period,
             ),
         )
+    if "open" in q and any(h in q for h in ("case", "cases", "request", "requests")):
+        return PreparedMatch(
+            intent="311_open",
+            sql=_sql_311_open(days),
+            answer_fn=lambda question, result: _format_recent_rows(
+                question, result, title="open 311 cases",
+                fields=["open_date", "issue_type", "street_name", "case_status"],
+            ),
+        )
     if any(h in q for h in ("recent", "latest", "last few", "open requests", "list")):
         return PreparedMatch(
             intent="311_recent",
             sql=_sql_311_recent(days),
             answer_fn=lambda question, result: _format_recent_rows(
                 question, result, title="311 requests",
-                fields=["open_date", "type", "street_name", "case_status"],
+                fields=["open_date", "issue_type", "street_name", "case_status"],
             ),
         )
     return None
