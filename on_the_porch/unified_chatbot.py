@@ -101,16 +101,23 @@ def _normalize_small_talk(message: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _has_small_talk_domain_hint(lower: str) -> bool:
+    """True when the message mentions civic data topics (whole-word match)."""
+    return any(re.search(rf"\b{re.escape(hint)}\b", lower) for hint in _SMALL_TALK_DOMAIN_HINTS)
+
+
 def is_small_talk(message: str) -> bool:
     """True when the message is a brief greeting or pleasantry, not a data question."""
     raw = (message or "").strip()
     if not raw or len(raw) > 120:
         return False
-    lower = raw.lower()
-    if any(hint in lower for hint in _SMALL_TALK_DOMAIN_HINTS):
-        return False
     normalized = _normalize_small_talk(raw)
     if not normalized:
+        return False
+    if re.match(r"^(thanks|thank you|thx|ty)\b", normalized):
+        return True
+    lower = raw.lower()
+    if _has_small_talk_domain_hint(lower):
         return False
     if normalized in _SMALL_TALK_EXACT:
         return True

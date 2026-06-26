@@ -42,6 +42,7 @@ _OPINION_HINTS = (
     "what do people", "what do residents", "how do people", "how do residents",
     "what are people saying", "community feel", "community thinks",
     "perspective", "opinion", "opinions", "sentiment", "concerned about",
+    "what concerns", "concerns do", "residents raise", "residents say",
 )
 _POLICY_HINTS = (
     "policy", "policies", "plan", "plans", "ordinance", "zoning",
@@ -143,7 +144,20 @@ def _looks_like_neighborhood_pulse(q: str) -> bool:
         "what's happening", "whats happening", "what is happening",
         "lately", "recently in", "updates in",
     )
-    return any(p in q for p in pulse) and "dorchester" in q
+    if not (any(p in q for p in pulse) and "dorchester" in q):
+        return False
+    # Calendar-specific windows → events SQL, not open-ended neighborhood pulse.
+    if any(h in q for h in _SCHEDULE_HINTS + ("weekend",)):
+        return False
+    return True
+
+
+def _looks_like_transcript_query(q: str) -> bool:
+    if "transcript" in q:
+        return True
+    return "meeting" in q and any(
+        h in q for h in ("say", "said", "residents", "displacement", "community", "discuss")
+    )
 
 
 def match_rules(question: str) -> Optional[Dict[str, Any]]:
@@ -184,6 +198,16 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
             confidence=0.8,
             k=5,
             transcript_tags=["safety"],
+        )
+
+    # Meeting transcripts / community voice → rag (before events — "meeting" is an event hint)
+    if _looks_like_transcript_query(q):
+        return _base_plan(
+            mode="rag",
+            intent="transcript",
+            confidence=0.9,
+            k=5,
+            transcript_tags=["community", "displacement", "housing"],
         )
 
     # Neighborhood pulse → hybrid (before event "going on" heuristics)
@@ -228,6 +252,16 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
     # Policy documents → rag
     if any(h in q for h in _POLICY_HINTS):
         return _base_plan(mode="rag", intent="policy", confidence=0.88, k=5)
+
+    # Resident opinion on safety/crime → hybrid (stats + community voice)
+    if _mentions_opinion(q) and any(h in q for h in _CRIME_HINTS + ("safety",)):
+        return _base_plan(
+            mode="hybrid",
+            intent="opinion_safety",
+            confidence=0.88,
+            k=5,
+            transcript_tags=["safety", "violence", "community"],
+        )
 
     # Pure opinion / community voice → rag
     if _mentions_opinion(q):
