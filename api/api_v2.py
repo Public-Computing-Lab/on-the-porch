@@ -2052,8 +2052,11 @@ def _execute_agent_response(
                 "prepared_intent": result.get("prepared_intent"),
                 "intent": plan.get("intent"),
                 "router": plan.get("router"),
+                "period_days": (plan.get("query_plan") or {}).get("period_days"),
+                "period_label": (plan.get("query_plan") or {}).get("period_label"),
+                "metric": (plan.get("query_plan") or {}).get("metric"),
             }.items()
-            if v
+            if v is not None and v != ""
         } or None,
     )
     return {

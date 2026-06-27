@@ -11,6 +11,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
+from query_plan import build_query_plan
+
 _DEFAULT_PLAN: Dict[str, Any] = {
     "transcript_tags": None,
     "policy_sources": None,
@@ -297,4 +299,6 @@ def route_with_rules(question: str) -> Optional[Dict[str, Any]]:
         return None
     if plan.get("confidence", 0) < rule_confidence_threshold():
         return None
+    mode = str(plan.get("mode", "sql"))
+    plan["query_plan"] = build_query_plan(question, mode=mode).to_dict()
     return plan

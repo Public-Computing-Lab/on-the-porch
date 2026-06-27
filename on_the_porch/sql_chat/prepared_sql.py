@@ -12,6 +12,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from query_plan import days_from_question as _days_from_question
+from query_plan import period_from_question as _period_from_question
+
 # Dorchester scope (matches app4 post-processing conventions).
 _DORCHESTER_311 = (
     "(`neighborhood` = 'Dorchester' OR `police_district` = 'C11')"
@@ -27,60 +30,6 @@ class PreparedMatch:
     intent: str
     sql: str
     answer_fn: Callable[[str, Dict[str, Any]], str]
-
-
-def _days_from_question(question: str, default: int = 7) -> int:
-    q = (question or "").lower()
-    if "today" in q:
-        return 1
-    if "yesterday" in q:
-        return 2
-    if "this weekend" in q or ("weekend" in q and "last" not in q):
-        return 7
-    if "this week" in q:
-        return 7
-    if "last week" in q:
-        return 14
-    if "next week" in q:
-        return 14
-    if "this month" in q:
-        return 30
-    if "last month" in q:
-        return 30
-    if "this year" in q:
-        return 365
-    if "last year" in q:
-        return 730
-    if "30 day" in q or "last 30" in q:
-        return 30
-    if "90 day" in q or "last 90" in q:
-        return 90
-    return default
-
-
-def _period_from_question(question: str, default: int = 7) -> tuple[int, str]:
-    """Map vague time phrases to (lookback_days, human-readable period label)."""
-    days = _days_from_question(question, default)
-    q = (question or "").lower()
-    if "this year" in q:
-        return days, "this year (calendar year to date)"
-    if "last year" in q:
-        return days, "last year"
-    if "last month" in q:
-        return 30, "the last 30 days"
-    if "this month" in q:
-        return 30, "the last 30 days"
-    if "last week" in q:
-        return 14, "the last 14 days"
-    if "this week" in q:
-        return 7, "the last 7 days"
-    if "this weekend" in q or ("weekend" in q and "last" not in q):
-        return 7, "this weekend"
-    if "today" in q:
-        return 1, "today"
-    if "yesterday" in q:
-        return 2, "yesterday"
-    return days, f"the last {days} days"
 
 
 def _data_source_note() -> str:
@@ -616,25 +565,61 @@ def _format_homicide_answer(
         proxy = int(rows[0].get("proxy_cnt") or 0)
     labeled_def = "offense labeled homicide or murder in Boston Open Data"
     proxy_def = "death investigations with a shooting flag in Boston Open Data"
+    baseline_note = _bpd_fatal_shootings_baseline_note()
 
     if labeled > 0:
-        return (
+        answer = (
             f"There were **{labeled:,}** homicides in Dorchester for {period} "
             f"({labeled_def}; {_data_source_note()})."
         )
+        return answer + baseline_note
+
     if proxy > 0:
-        return (
+        answer = (
             f"I found **0** homicides explicitly labeled in Boston Open Data for {period}, "
             f"but **{proxy:,}** fatal-shooting death investigations in Dorchester "
             f"({proxy_def}). Official BPD homicide counts may differ because rulings "
             f"and offense labels are updated separately from this feed."
         )
-    return (
+        return answer + baseline_note
+
+    answer = (
         f"I found **0** homicides in Dorchester for {period} using both labeled homicides "
         f"and fatal-shooting death investigations in Boston Open Data ({_data_source_note()}). "
         "Recent fatal shootings may not appear yet, or may be coded under other offense types "
         "until BPD updates the record."
     )
+    return answer + baseline_note
+
+
+def _bpd_fatal_shootings_baseline_note() -> str:
+    """Optional cross-check from BPD shootings dashboard baseline file."""
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "data_ingestion"
+        / "boston_data_sync"
+        / "bpd_homicide_baseline.json"
+    )
+    if not path.exists():
+        return ""
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        fatal = int(data.get("fatal_shootings_ytd") or 0)
+        as_of = data.get("as_of", "")[:10]
+        if fatal <= 0:
+            return ""
+        return (
+            f"\n\nFor context, the BPD shootings dashboard reports **{fatal:,}** fatal "
+            f"shootings in Dorchester (C11) year-to-date"
+            + (f" as of {as_of}" if as_of else "")
+            + ". That count uses a different methodology than labeled homicides above."
+        )
+    except Exception:
+        return ""
 
 
 def _sql_crime_top_offenses(days: int) -> str:
@@ -873,8 +858,8 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     crime_hints = (
         "crime", "crimes", "incident", "incidents", "assault", "robbery",
-        "shooting", "shootings", "shots fired", "theft", "burglary", "offense",
-        "police report",
+        "shooting", "shootings", "shots fired", "gun violence", "theft", "burglary",
+        "offense", "police report",
         "homicide", "homicides", "murder", "murders",
     )
     if not any(h in q for h in crime_hints):
@@ -883,7 +868,7 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     calendar_year = "this year" in q
 
     if any(h in q for h in ("how many", "count", "number of", "total", "stats")):
-        if any(h in q for h in ("shooting", "shootings", "shots fired")):
+        if any(h in q for h in ("shooting", "shootings", "shots fired", "gun violence")):
             shoot_def = "incidents flagged shooting=1 in BPD crime reports"
             return PreparedMatch(
                 intent="crime_shooting_count",

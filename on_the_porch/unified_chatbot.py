@@ -27,6 +27,8 @@ if str(_RAG_DIR) not in sys.path:
 import retrieval  # type: ignore  # noqa: E402
 import boston_gov  # type: ignore  # noqa: E402
 import intent_router  # noqa: E402
+import answer_validator  # noqa: E402
+from query_plan import build_query_plan  # noqa: E402
 
 # Local Gemini client config (avoid importing app3 at module load)
 try:
@@ -827,6 +829,10 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
         if not folders:
             folders = ["newsletters"]
 
+    query_plan = plan.get("query_plan")
+    if not isinstance(query_plan, dict):
+        query_plan = build_query_plan(question, mode=mode).to_dict()
+
     return {
         "mode": mode,
         "transcript_tags": tags if isinstance(tags, list) or tags is None else None,
@@ -836,6 +842,7 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
         "intent": plan.get("intent"),
         "router": plan.get("router", "llm"),
         "confidence": plan.get("confidence"),
+        "query_plan": query_plan,
     }
 
 
@@ -924,11 +931,25 @@ def _has_transcript_chunks(metadatas: List[Dict[str, Any]]) -> bool:
     return any((m or {}).get("doc_type") == "transcript" for m in metadatas)
 
 
+def _finalize_prepared_sql_out(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate numeric prepared-SQL answers against query results."""
+    intent = out.get("prepared_intent")
+    if not intent:
+        return out
+    out["answer"] = answer_validator.validate_prepared_answer(
+        out.get("answer", ""),
+        out.get("result") or {},
+        prepared_intent=intent,
+    )
+    return out
+
+
 def _try_fast_hybrid_stitch(
     sql_part: Dict[str, Any],
     rag_part: Dict[str, Any],
 ) -> Optional[str]:
     """When SQL used prepared facts, stitch RAG narrative without a merge LLM call."""
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
     prepared_intent = sql_part.get("prepared_intent")
     sql_answer = (sql_part.get("answer") or "").strip()
     if not prepared_intent or not sql_answer:
@@ -1263,6 +1284,12 @@ def _retrieve_rag(
     sources = plan.get("policy_sources")
     folders = plan.get("folder_categories") if isinstance(plan.get("folder_categories"), list) else None
 
+    transcript_first = (
+        plan.get("intent") == "transcript"
+        or _is_transcript_focused_question(question)
+    )
+    transcript_k = min(k + 4, 15) if transcript_first else k
+
     combined_chunks: List[str] = []
     combined_meta: List[Dict[str, Any]] = []
 
@@ -1286,7 +1313,7 @@ def _retrieve_rag(
 
     def _task_transcripts():
         t_res = retrieval.retrieve_transcripts(
-            question, tags=tags, k=k, query_embedding=query_embedding,
+            question, tags=tags, k=transcript_k, query_embedding=query_embedding,
         )
         return ("📝 Transcripts", t_res.get("chunks", []), t_res.get("metadata", []))
 
@@ -1309,11 +1336,15 @@ def _retrieve_rag(
         return ("📋 Policies", chunks, meta)
 
     # Fixed order so combined results are deterministic regardless of which task
-    # finishes first.
+    # finishes first. Transcript-focused questions prioritize meeting transcripts.
     tasks = []
+    if transcript_first:
+        tasks.append(_task_transcripts)
     if _should_include_rss(question, folders):
         tasks.append(_task_rss)
-    tasks.extend([_task_boston, _task_transcripts, _task_policies])
+    if not transcript_first:
+        tasks.append(_task_transcripts)
+    tasks.extend([_task_boston, _task_policies])
 
     def _safe_run(fn):
         try:
@@ -1364,7 +1395,7 @@ def _run_sql(
         conversation_history=conversation_history,
     )
     if prepared is not None:
-        return prepared
+        return _finalize_prepared_sql_out(prepared)
 
     if app4.is_generic_events_list_question(question):
         try:
@@ -1528,6 +1559,7 @@ def _build_hybrid_merge_prompt(
 
 def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     sql_part, rag_part = _run_hybrid_parts(question, plan, conversation_history)
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
     fast = _try_fast_hybrid_stitch(sql_part, rag_part)
     if fast:
         answer = _apply_default_fallback_if_needed(question, fast)
@@ -1548,7 +1580,7 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
         answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
 
     answer = _apply_default_fallback_if_needed(question, answer)
-    return {"answer": answer, "sql": sql_part, "rag": rag_part}
+    return {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
 
 
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
@@ -1700,7 +1732,14 @@ def stream_agent_response(
             mode="sql", question=message, answer=answer,
             sql_result=out.get("result"), sql_query=out.get("sql"),
         )
-        yield ("final", {"answer": answer, "mode": "sql", "result": out, "retrieval_cache": next_cache})
+        yield ("final", {
+            "answer": answer,
+            "mode": "sql",
+            "result": out,
+            "retrieval_cache": next_cache,
+            "prepared_intent": out.get("prepared_intent"),
+            "query_plan": plan.get("query_plan"),
+        })
         return
 
     if mode == "rag":
@@ -1733,6 +1772,7 @@ def stream_agent_response(
 
     # hybrid
     sql_part, rag_part = _run_hybrid_parts(message, plan, conversation_history)
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
     fast_hybrid = _try_fast_hybrid_stitch(sql_part, rag_part)
     if fast_hybrid:
         answer = fast_hybrid
@@ -1753,7 +1793,13 @@ def stream_agent_response(
         if not answer:
             answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
             yield ("delta", answer)
-    result = {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
+    result = {
+        "answer": answer,
+        "sql": sql_part,
+        "rag": rag_part,
+        "prepared_intent": sql_part.get("prepared_intent"),
+        "query_plan": plan.get("query_plan"),
+    }
     next_cache = build_retrieval_cache(
         mode="hybrid", question=message, answer=answer,
         sql_result=sql_part.get("result"), sql_query=sql_part.get("sql"),
