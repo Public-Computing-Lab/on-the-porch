@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
@@ -43,6 +44,7 @@ GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
 # Escalation model for low-confidence synthesis (Iteration 0+); wired in later iterations.
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "20"))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
 _llm_calls_local = threading.local()
 # Run independent retrievals (and hybrid SQL+RAG) concurrently for lower latency.
@@ -217,20 +219,47 @@ def get_llm_call_count() -> int:
     return int(getattr(_llm_calls_local, "count", 0))
 
 
+_TRANSIENT_ERROR_MARKERS = (
+    "429", "rate limit", "quota", "resource exhausted", "exhausted",
+    "500", "502", "503", "504", "internal error", "unavailable",
+    "service unavailable", "deadline", "timeout", "timed out", "temporarily",
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
 def _generate_content(model, prompt, generation_config):
-    """Call Gemini with a per-request timeout when the SDK supports it."""
+    """Call Gemini with a per-request timeout and transient retries."""
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
-    increment_llm_call_counter()
-    if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        increment_llm_call_counter()
         try:
-            return model.generate_content(
-                prompt,
-                generation_config=generation_config,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
-            )
-        except TypeError:
-            _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
-    return model.generate_content(prompt, generation_config=generation_config)
+            if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+                try:
+                    return model.generate_content(
+                        prompt,
+                        generation_config=generation_config,
+                        request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                    )
+                except TypeError:
+                    _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
+            return model.generate_content(prompt, generation_config=generation_config)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                backoff = min(2 ** (attempt - 1), 8) * 0.5
+                print(
+                    f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
+                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    raise RuntimeError(f"Gemini call failed: {last_exc}")
 
 
 def _should_trigger_boston_gov_fallback(answer: str) -> bool:
@@ -1469,7 +1498,34 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
 
 
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
-    """Yield text deltas from a streaming Gemini generation. Defensive on errors."""
+    """Yield text deltas from a streaming Gemini generation with retries."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        yielded = False
+        try:
+            for piece in _stream_model_text_once(model_name, prompt, temperature):
+                yielded = True
+                yield piece
+            if yielded:
+                return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                backoff = min(2 ** (attempt - 1), 8) * 0.5
+                print(
+                    f"  ⚠️ Stream transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
+                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Gemini stream returned no content")
+
+
+def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
+    """Single streaming attempt (no retry)."""
     client = _get_llm_client()
     model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
@@ -1489,7 +1545,7 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
             )
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Streaming generation failed to start: {exc}")
-        return
+        raise
     for chunk in stream:
         try:
             piece = getattr(chunk, "text", "") or ""
@@ -1601,9 +1657,14 @@ def stream_agent_response(
             yield ("delta", answer)
         else:
             acc = []
-            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
-                acc.append(piece)
-                yield ("delta", piece)
+            try:
+                for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
+                    acc.append(piece)
+                    yield ("delta", piece)
+            except Exception as exc:  # noqa: BLE001
+                if not acc:
+                    raise
+                print(f"  ⚠️ RAG stream ended early: {exc.__class__.__name__}")
             answer = "".join(acc).strip()
             if not answer:
                 answer = "\n\n".join(context_parts[:10])
@@ -1620,9 +1681,14 @@ def stream_agent_response(
     sql_part, rag_part = _run_hybrid_parts(message, plan, conversation_history)
     prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
     acc = []
-    for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
-        acc.append(piece)
-        yield ("delta", piece)
+    try:
+        for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
+            acc.append(piece)
+            yield ("delta", piece)
+    except Exception as exc:  # noqa: BLE001
+        if not acc:
+            raise
+        print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
     answer = "".join(acc).strip()
     if not answer:
         answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")

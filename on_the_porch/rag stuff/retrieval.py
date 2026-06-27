@@ -20,8 +20,6 @@ except ImportError:
 _RAG_DIR = Path(__file__).resolve().parent
 VECTORDB_GEMINI_DIR = (_RAG_DIR / "../vectordb_new").resolve()
 VECTORDB_BGE_DIR = (_RAG_DIR / "../vectordb_bge_v1").resolve()
-# Active store path (updated by configure_vectordb_paths at API startup).
-VECTORDB_DIR = VECTORDB_GEMINI_DIR
 
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 # Iteration 3: local BGE embeddings (default gemini until BGE index is built).
@@ -33,6 +31,8 @@ VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").strip().lower()
 BM25_HYBRID_ENABLED = os.getenv("BM25_HYBRID_ENABLED", "true").strip().lower() in (
     "1", "true", "yes",
 )
+# Active store path (updated by configure_vectordb_paths at API startup).
+VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_GEMINI_DIR
 _embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).

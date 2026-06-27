@@ -12,6 +12,7 @@ This script:
 import os
 import sys
 import json
+import re
 import time
 import requests
 import pandas as pd
@@ -432,8 +433,16 @@ class BostonDataSyncer:
             # Check if table exists and has data - if so, do incremental sync
             cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
             table_exists = cursor.fetchone() is not None
-            
-            if table_exists and date_field_normalized:
+
+            force_backfill_days = dataset_config.get("force_backfill_days")
+            if force_backfill_days:
+                sync_from = datetime.now() - timedelta(days=int(force_backfill_days))
+                date_from = sync_from.strftime('%Y-%m-%d')
+                print(
+                    f"   📅 Backfill sync: fetching records from {date_from} to {date_to} "
+                    f"(last {force_backfill_days} days)"
+                )
+            elif table_exists and date_field_normalized:
                 try:
                     table_columns = self._get_table_columns(cursor, table_name)
                     table_date_field = self._resolve_date_field(date_field, table_columns)
@@ -544,6 +553,22 @@ class BostonDataSyncer:
                     except Exception as e:
                         print(f"   ❌ Could not add primary key: {e}")
             
+            # Keep only columns that exist on the target table (legacy 311 has extra fields).
+            if table_exists:
+                table_columns = self._get_table_columns(cursor, table_name)
+                keep = [col for col in df.columns if col in table_columns]
+                drop = [col for col in df.columns if col not in table_columns]
+                if drop:
+                    print(
+                        f"   ℹ️  Dropping {len(drop)} unmapped column(s) not in `{table_name}`"
+                    )
+                if not keep:
+                    print("   ⚠️  No overlapping columns after mapping — skipping insert")
+                    return stats
+                df = df[keep]
+                char_limits = self._get_column_char_limits(cursor, table_name)
+                self._truncate_df_to_table(df, char_limits)
+
             # Prepare data for insertion
             # Convert date columns and strip timezone if present
             for col in df.columns:
@@ -635,6 +660,38 @@ class BostonDataSyncer:
         
         return stats
     
+    def _get_column_char_limits(self, cursor, table_name: str) -> Dict[str, int]:
+        """Return {column_name: max_chars} for VARCHAR columns."""
+        cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
+        limits: Dict[str, int] = {}
+        for row in cursor.fetchall():
+            if isinstance(row, dict):
+                field = row.get("Field", "")
+                type_str = (row.get("Type") or "").lower()
+            else:
+                field = row[0]
+                type_str = (row[1] or "").lower()
+            match = re.match(r"varchar\((\d+)\)", type_str)
+            if field and match:
+                limits[field.lower()] = int(match.group(1))
+        return limits
+
+    def _truncate_df_to_table(self, df, limits: Dict[str, int]):
+        """Truncate string cells so inserts respect VARCHAR limits."""
+        if not limits:
+            return
+        for col in df.columns:
+            max_len = limits.get(col.lower())
+            if not max_len:
+                continue
+            df[col] = df[col].apply(
+                lambda v: (
+                    None
+                    if v is None or (isinstance(v, float) and pd.isna(v))
+                    else str(v)[:max_len]
+                )
+            )
+
     def _get_table_columns(self, cursor, table_name: str) -> set:
         """Get all column names from a table."""
         cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")

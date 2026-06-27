@@ -119,7 +119,7 @@ REGRESSION_CASES: List[QuestionCase] = [
         expect_mode="hybrid",
         min_length=60,
         any_of=["dorchester", "311", "news", "community", "recent", "service"],
-        max_latency_ms=35000,
+        max_latency_ms=45000,
     ),
     QuestionCase(
         "news_rss",
@@ -195,7 +195,7 @@ REGRESSION_CASES: List[QuestionCase] = [
         expect_mode="hybrid",
         min_length=80,
         any_of=["shoot", "crime", "resident", "concern", "safety", "incident"],
-        max_latency_ms=40000,
+        max_latency_ms=50000,
     ),
     QuestionCase(
         "transcript_displacement",

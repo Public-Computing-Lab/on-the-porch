@@ -47,6 +47,10 @@ def _days_from_question(question: str, default: int = 7) -> int:
         return 30
     if "last month" in q:
         return 60
+    if "this year" in q:
+        return 365
+    if "last year" in q:
+        return 730
     if "30 day" in q or "last 30" in q:
         return 30
     if "90 day" in q or "last 90" in q:
@@ -528,6 +532,26 @@ def _sql_crime_monthly_count(days: int) -> str:
     )
 
 
+def _sql_crime_homicide_count(days: int, *, calendar_year: bool = False) -> str:
+    days = max(1, min(days, 365))
+    homicide = (
+        "LOWER(COALESCE(`offense_description`, '')) LIKE '%homicide%' "
+        "OR LOWER(COALESCE(`offense_code_group`, '')) LIKE '%homicide%' "
+        "OR LOWER(COALESCE(`offense_description`, '')) LIKE '%murder%'"
+    )
+    date_clause = (
+        "YEAR(`occurred_on_date`) = YEAR(CURDATE())"
+        if calendar_year
+        else f"`occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY)"
+    )
+    return (
+        "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
+        f"WHERE {_DORCHESTER_CRIME} "
+        f"AND {date_clause} "
+        f"AND ({homicide})"
+    )
+
+
 def _sql_crime_top_offenses(days: int) -> str:
     days = max(1, min(days, 365))
     if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
@@ -549,6 +573,25 @@ def _sql_crime_top_offenses(days: int) -> str:
         f"AND {_OFFENSE_EXPR} IS NOT NULL AND {_OFFENSE_EXPR} <> '' "
         f"GROUP BY {_OFFENSE_EXPR} ORDER BY cnt DESC LIMIT 10"
     )
+
+
+def _format_open_311_answer(question: str, result: Dict[str, Any], *, period: str) -> str:
+    rows = result.get("rows") or []
+    if not rows:
+        return f"I didn't find any open 311 cases in Dorchester for {period}."
+    lines = [f"Open 311 cases in Dorchester for {period}:\n"]
+    for row in rows[:15]:
+        if not isinstance(row, dict):
+            continue
+        parts = [
+            str(row.get("open_date") or ""),
+            str(row.get("issue_type") or ""),
+            str(row.get("street_name") or ""),
+            str(row.get("case_status") or ""),
+        ]
+        label = " — ".join(p for p in parts if p)
+        lines.append(f"- {label}")
+    return "\n".join(lines)
 
 
 def _match_events_list(question: str) -> Optional[PreparedMatch]:
@@ -607,21 +650,114 @@ def _match_events_by_source(question: str) -> Optional[PreparedMatch]:
     return None
 
 
+def _sql_311_issue_count(terms: tuple, days: int) -> str:
+    """Count 311 requests matching issue-type keywords (pothole, trash, etc.)."""
+    days = max(1, min(days, 365))
+    parts: List[str] = []
+    for term in terms:
+        esc = term.replace("'", "''")
+        parts.append(f"LOWER(COALESCE(`service_name`, '')) LIKE '%{esc}%'")
+        parts.append(f"LOWER(COALESCE(`case_topic`, '')) LIKE '%{esc}%'")
+    issue_clause = "(" + " OR ".join(parts) + ")"
+    return (
+        "SELECT COUNT(*) AS cnt FROM `service_requests_311` "
+        f"WHERE {_DORCHESTER_311} "
+        f"AND `open_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
+        f"AND {issue_clause}"
+    )
+
+
+_311_ISSUE_ALIASES: Dict[str, tuple] = {
+    "pothole": ("pothole",),
+    "trash": ("trash", "missed trash", "garbage", "recycling"),
+    "graffiti": ("graffiti",),
+    "rodent": ("rodent", "rat", "rats"),
+    "snow": ("snow", "ice", "plow"),
+    "street_light": ("street light", "streetlight"),
+    "illegal_dumping": ("illegal dumping", "dumping"),
+}
+
+
+def _issue_search_terms(question: str) -> Optional[tuple]:
+    q = (question or "").lower()
+    for _key, hints in _311_ISSUE_ALIASES.items():
+        for hint in hints:
+            if " " in hint:
+                if hint in q:
+                    return hints
+            elif re.search(rf"\b{re.escape(hint)}\b", q):
+                return hints
+    return None
+
+
+_311_DOMAIN_HINTS = (
+    "311", "service request", "service requests", "city complaint",
+    "complaint", "complaints", "pothole", "potholes", "trash", "graffiti",
+    "rodent", "rats", "snow", "streetlight", "street light", "missed pickup",
+    "illegal dumping",
+)
+
+
+def _match_911(question: str) -> Optional[PreparedMatch]:
+    """Boston 911 dispatch data is not in our database — return a clear static answer."""
+    q = (question or "").lower()
+    if "911" not in q:
+        return None
+    if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+        return None
+    if not any(h in q for h in ("call", "calls", "dispatch", "emergency", "how many", "count", "number of", "total")):
+        return None
+
+    def _answer(_question: str, _result: Dict[str, Any]) -> str:
+        return (
+            "We don't have Boston **911 emergency dispatch call** data in this app. "
+            "911 call logs are separate from BPD crime incident reports and 311 service requests.\n\n"
+            "For **crime statistics** in Dorchester, ask about crime incidents or shootings. "
+            "For **non-emergency city services** (potholes, trash, lights), ask about **311 requests**."
+        )
+
+    return PreparedMatch(intent="911_unavailable", sql="SELECT 0 AS cnt", answer_fn=_answer)
+
+
+def _sql_crime_shooting_count(days: int) -> str:
+    days = max(1, min(days, 365))
+    return (
+        "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
+        f"WHERE {_DORCHESTER_CRIME} "
+        f"AND `occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY) "
+        "AND (`shooting` = 1 OR `shooting` = '1' OR UPPER(COALESCE(`shooting`, '')) = 'Y')"
+    )
+
+
 def _match_311(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
-    if not any(h in q for h in ("311", "service request", "service requests", "city complaint")):
+    if not any(h in q for h in _311_DOMAIN_HINTS):
         return None
     days = _days_from_question(question, 7)
     period = f"the last {days} days"
 
     if any(h in q for h in ("how many", "count", "number of", "total")):
-        return PreparedMatch(
-            intent="311_weekly_count",
-            sql=_sql_311_weekly_count(days),
-            answer_fn=lambda question, result: _format_count_answer(
-                question, result, label="311 service requests", period=period,
-            ),
+        generic_311 = any(
+            h in q for h in ("311", "service request", "service requests", "city complaint")
         )
+        issue_terms = _issue_search_terms(question)
+        if issue_terms and not generic_311:
+            label = issue_terms[0].replace("_", " ") + " 311 requests"
+            return PreparedMatch(
+                intent="311_issue_count",
+                sql=_sql_311_issue_count(issue_terms, days),
+                answer_fn=lambda question, result: _format_count_answer(
+                    question, result, label=label, period=period,
+                ),
+            )
+        if generic_311 or issue_terms:
+            return PreparedMatch(
+                intent="311_weekly_count",
+                sql=_sql_311_weekly_count(days),
+                answer_fn=lambda question, result: _format_count_answer(
+                    question, result, label="311 service requests", period=period,
+                ),
+            )
     if any(h in q for h in ("top", "most common", "common", "breakdown", "types", "issues")):
         return PreparedMatch(
             intent="311_top_types",
@@ -635,10 +771,7 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
         return PreparedMatch(
             intent="311_open",
             sql=_sql_311_open(days),
-            answer_fn=lambda question, result: _format_recent_rows(
-                question, result, title="open 311 cases",
-                fields=["open_date", "issue_type", "street_name", "case_status"],
-            ),
+            answer_fn=lambda question, result: _format_open_311_answer(question, result, period=period),
         )
     if any(h in q for h in ("recent", "latest", "last few", "open requests", "list")):
         return PreparedMatch(
@@ -656,14 +789,34 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     crime_hints = (
         "crime", "crimes", "incident", "incidents", "assault", "robbery",
-        "shooting", "theft", "burglary", "offense", "911", "police report",
+        "shooting", "shootings", "shots fired", "theft", "burglary", "offense",
+        "police report",
+        "homicide", "homicides", "murder", "murders",
     )
     if not any(h in q for h in crime_hints):
         return None
     days = _days_from_question(question, 30)
-    period = f"the last {days} days"
+    period = "this year" if "this year" in q else f"the last {days} days"
 
     if any(h in q for h in ("how many", "count", "number of", "total", "stats")):
+        if any(h in q for h in ("shooting", "shootings", "shots fired")):
+            return PreparedMatch(
+                intent="crime_shooting_count",
+                sql=_sql_crime_shooting_count(days),
+                answer_fn=lambda question, result: _format_count_answer(
+                    question, result, label="shootings", period=period,
+                ),
+            )
+        if any(h in q for h in ("homicide", "homicides", "murder", "murders")):
+            return PreparedMatch(
+                intent="crime_homicide_count",
+                sql=_sql_crime_homicide_count(
+                    days, calendar_year="this year" in q,
+                ),
+                answer_fn=lambda question, result: _format_count_answer(
+                    question, result, label="homicides", period=period,
+                ),
+            )
         return PreparedMatch(
             intent="crime_monthly_count",
             sql=_sql_crime_monthly_count(days),
@@ -694,6 +847,7 @@ def match_prepared_sql(question: str) -> Optional[PreparedMatch]:
     if not question or not question.strip():
         return None
     for matcher in (
+        _match_911,
         _match_event_by_name,
         _match_events_list,
         _match_events_by_source,

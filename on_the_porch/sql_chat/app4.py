@@ -775,16 +775,22 @@ def run_generic_events_query(
             "result": {"columns": [], "rows": [], "error": str(exc)},
         }
 
-    try:
-        answer = _llm_generate_answer(
-            question,
-            sql,
-            result,
-            GEMINI_SUMMARY_MODEL,
-            conversation_history,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠️ Events answer generation failed ({exc}); using template fallback")
+    use_llm_summary = os.getenv("PREPARED_SQL_USE_LLM_SUMMARY", "false").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if use_llm_summary:
+        try:
+            answer = _llm_generate_answer(
+                question,
+                sql,
+                result,
+                GEMINI_SUMMARY_MODEL,
+                conversation_history,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Events answer generation failed ({exc}); using template fallback")
+            answer = _format_events_answer_fallback(question, result)
+    else:
         answer = _format_events_answer_fallback(question, result)
 
     if not (answer or "").strip():

@@ -758,6 +758,20 @@ _SEMANTIC_TIME_WORDS = (
 )
 
 
+def _is_fast_sql_question(message: str) -> bool:
+    """Prepared or rule-routed SQL questions should skip semantic-cache embedding."""
+    try:
+        from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+        import intent_router  # noqa: WPS433
+
+        if match_prepared_sql(message):
+            return True
+        rule = intent_router.route_with_rules(message)
+        return bool(rule and rule.get("mode") == "sql")
+    except Exception:
+        return False
+
+
 def _semantic_cache_eligible(message: str, conversation_history: List[Dict[str, str]]) -> bool:
     """Only cache/serve fresh-topic, non-time-sensitive first-turn questions."""
     if not Config.SEMANTIC_CACHE_ENABLED:
@@ -765,6 +779,8 @@ def _semantic_cache_eligible(message: str, conversation_history: List[Dict[str, 
     if conversation_history:
         return False
     if _is_calendar_question(message):
+        return False
+    if _is_fast_sql_question(message):
         return False
     lowered = (message or "").lower()
     if any(word in lowered for word in _SEMANTIC_TIME_WORDS):
@@ -2741,18 +2757,28 @@ def post_conversation_message_stream(thread_id: str):
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
+                streamed_text = ""
                 for kind, data in stream_agent_response(message, conversation_history, thread_state):
                     if kind == "delta":
+                        streamed_text += data
                         yield _sse({"type": "delta", "text": data})
                     elif kind == "final":
-                        full_answer = data.get("answer", "")
+                        full_answer = data.get("answer", streamed_text)
                         mode = data.get("mode", "hybrid")
                         result_payload = data.get("result", {})
                         next_cache = data.get("retrieval_cache", thread_state)
+                if not full_answer and streamed_text:
+                    full_answer = streamed_text
+            if not full_answer and not cache_hit:
+                yield _sse({"type": "error", "error": "Generation failed."})
+                return
         except Exception as exc:  # noqa: BLE001
-            _log_exception("Error during streamed generation", exc)
-            yield _sse({"type": "error", "error": "Generation failed."})
-            return
+            if full_answer.strip():
+                _log_exception("Stream ended with partial answer after error", exc)
+            else:
+                _log_exception("Error during streamed generation", exc)
+                yield _sse({"type": "error", "error": "Generation failed."})
+                return
 
         if full_answer:
             blocking_boston = (

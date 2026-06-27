@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -143,6 +144,16 @@ def validate_production_config(
     issues: list[str] = []
     if not production_mode:
         return True, issues
+
+    default_secrets = {
+        "FLASK_SECRET_KEY": "agent-api-secret-2025",
+        "TOKEN_PEPPER": "agent-api-secret-2025",
+    }
+    for env_key, default_val in default_secrets.items():
+        if os.getenv(env_key, default_val) == default_val:
+            issues.append(
+                f"{env_key} is still the default value; set a strong secret in production"
+            )
 
     if cache_backend != "redis":
         issues.append("CACHE_BACKEND must be 'redis' when PRODUCTION_MODE=true")

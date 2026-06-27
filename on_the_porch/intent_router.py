@@ -30,7 +30,7 @@ _SCHEDULE_HINTS = (
 _CRIME_HINTS = (
     "crime", "crimes", "arrest", "arrests", "offense", "offenses",
     "homicide", "homicides", "shooting", "shootings", "shots fired",
-    "safety incident", "violence", "violent", "911", "police report",
+    "safety incident", "violence", "violent", "police report",
 )
 _311_HINTS = ("311", "service request", "service requests", "city complaint")
 _STATS_HINTS = (
@@ -160,14 +160,28 @@ def _looks_like_transcript_query(q: str) -> bool:
     )
 
 
+def _is_911_call_question(q: str) -> bool:
+    """True for 911 dispatch/call volume questions (we have no 911 call dataset)."""
+    if "911" not in q:
+        return False
+    if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+        return False
+    return any(h in q for h in ("call", "calls", "dispatch", "emergency"))
+
+
 def match_rules(question: str) -> Optional[Dict[str, Any]]:
     """Return a routing plan when rules match with sufficient confidence."""
     q = _q(question)
     if not q:
         return None
 
+    if _is_911_call_question(q):
+        return _base_plan(mode="sql", intent="911_unavailable", confidence=0.95, k=5)
+
     # 311 stats → sql (before events — "this week" appears in both)
-    if any(h in q for h in _311_HINTS):
+    if any(h in q for h in _311_HINTS) or any(
+        h in q for h in ("pothole", "potholes", "complaint", "complaints", "trash", "graffiti")
+    ):
         if _mentions_opinion(q) and _mentions_stats(q):
             return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
         return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)
