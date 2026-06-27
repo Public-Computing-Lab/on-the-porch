@@ -702,22 +702,9 @@ def is_generic_events_list_question(question: str) -> bool:
 
 
 def _events_list_days_ahead(question: str) -> int:
-    q = (question or "").lower()
-    if "today" in q:
-        return 1
-    if "tomorrow" in q:
-        return 2
-    if "this weekend" in q or ("weekend" in q and "next" not in q):
-        return 7
-    if "this week" in q:
-        return 7
-    if "next week" in q:
-        return 14
-    if "this month" in q:
-        return 30
-    if "next month" in q:
-        return 60
-    return 14
+    from query_plan import days_ahead_from_question  # noqa: WPS433
+
+    return days_ahead_from_question(question, default=14)
 
 
 def _fast_weekly_events_sql(days_ahead: int) -> str:

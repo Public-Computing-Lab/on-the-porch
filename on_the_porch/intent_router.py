@@ -57,8 +57,24 @@ _RSS_NEWS_HINTS = (
     "lately in", "dorchester reporter", "dotnews", "dot news",
 )
 _RSS_SOURCE_ALIASES = (
-    "dorchester reporter", "dotnews", "dot news", "csndc", "codman",
+    "dorchester reporter",
+    "dot reporter",
+    "dotnews",
+    "dot news",
+    "csndc",
+    "codman",
+    "codman square neighborhood development corporation",
+    "codman square library",
+    "bpl codman square",
+    "codman square health center",
+    "codman.org",
+    "codman square neighborhood council",
+    "codman council",
+    "south dorchester",
 )
+
+# Public alias for unified_chatbot and other consumers.
+RSS_SOURCE_ALIASES = _RSS_SOURCE_ALIASES
 
 
 def is_router_v2_enabled() -> bool:

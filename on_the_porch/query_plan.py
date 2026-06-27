@@ -95,16 +95,24 @@ def infer_metric(question: str) -> Optional[str]:
     return None
 
 
-def infer_sources(question: str, mode: str) -> List[str]:
-    metric = infer_metric(question)
-    sources: List[str] = []
-    if mode in ("sql", "hybrid"):
-        sources.append("sql")
-    if mode in ("rag", "hybrid"):
-        if metric == "transcripts" or "transcript" in (question or "").lower():
-            sources.append("transcript")
-        sources.extend(["policy", "rss", "boston_gov"])
-    return sources
+def days_ahead_from_question(question: str, default: int = 14) -> int:
+    """Forward-looking window for upcoming events/calendar queries."""
+    q = (question or "").lower()
+    if "today" in q:
+        return 1
+    if "tomorrow" in q:
+        return 2
+    if "this weekend" in q or ("weekend" in q and "next" not in q):
+        return 7
+    if "this week" in q:
+        return 7
+    if "next week" in q:
+        return 14
+    if "this month" in q:
+        return 30
+    if "next month" in q:
+        return 60
+    return default
 
 
 def build_query_plan(question: str, *, mode: str = "sql", default_days: int = 7) -> QueryPlan:
@@ -115,5 +123,5 @@ def build_query_plan(question: str, *, mode: str = "sql", default_days: int = 7)
         period_label=label,
         calendar_year="this year" in q,
         metric=infer_metric(question),
-        sources=infer_sources(question, mode),
+        sources=None,
     )

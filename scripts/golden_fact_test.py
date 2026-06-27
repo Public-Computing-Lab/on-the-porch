@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Golden fact checks for prepared SQL answers (Phase 0).
+Golden fact checks for prepared SQL answers and vectordb health.
 
 Validates numeric civic answers against the database — not just keywords.
 Does not call Gemini. Run: python scripts/golden_fact_test.py
@@ -17,6 +17,7 @@ from typing import Callable, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "on_the_porch"))
+sys.path.insert(0, str(ROOT / "on_the_porch" / "rag stuff"))
 
 from dotenv import load_dotenv
 
@@ -38,6 +39,25 @@ def _extract_int(text: str) -> Optional[int]:
     return int(m.group(1).replace(",", ""))
 
 
+def check_transcript_vectordb() -> tuple[bool, str]:
+    """Ensure meeting transcripts are present in the vector store."""
+    min_chunks = int(os.getenv("TRANSCRIPT_MIN_CHUNKS", "50"))
+    try:
+        import retrieval  # noqa: WPS433
+
+        retrieval.clear_query_embedding_cache()
+        db = retrieval.load_vectordb()
+        if db is None:
+            return False, "vector DB not loaded"
+        data = db.get(where={"doc_type": "transcript"}, include=[])
+        count = len(data.get("ids") or [])
+        if count < min_chunks:
+            return False, f"{count} transcript chunks < minimum {min_chunks}"
+        return True, f"{count} transcript chunks"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
 def _run_case(case: GoldenCase) -> tuple[bool, str]:
     from sql_chat import app4, prepared_sql
 
@@ -52,6 +72,9 @@ def _run_case(case: GoldenCase) -> tuple[bool, str]:
         return False, f"SQL error: {result['error']}"
 
     answer = hit.answer_fn(case.question, result)
+    answer = prepared_sql.validate_prepared_answer(
+        answer, result, prepared_intent=hit.intent,
+    )
     err = case.check(answer, result)
     if err:
         return False, err
@@ -101,8 +124,20 @@ GOLDEN_CASES: List[GoldenCase] = [
 def main() -> int:
     passed = 0
     failed: List[str] = []
-    print("Golden fact tests (prepared SQL)")
+
+    print("Golden fact tests (prepared SQL + vectordb)")
     print("=" * 60)
+
+    ok, detail = check_transcript_vectordb()
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] transcript_vectordb")
+    if not ok:
+        print(f"       {detail}")
+        failed.append("transcript_vectordb")
+    else:
+        print(f"       {detail}")
+        passed += 1
+
     for case in GOLDEN_CASES:
         ok, detail = _run_case(case)
         status = "PASS" if ok else "FAIL"
@@ -114,8 +149,10 @@ def main() -> int:
             print(f"       {detail}")
         if ok:
             passed += 1
+
+    total = 1 + len(GOLDEN_CASES)
     print("=" * 60)
-    print(f"{passed}/{len(GOLDEN_CASES)} passed")
+    print(f"{passed}/{total} passed")
     return 0 if not failed else 1
 
 

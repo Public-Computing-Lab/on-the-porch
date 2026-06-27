@@ -1230,8 +1230,28 @@ class BostonDataSyncer:
         log_file = Path(__file__).parent / "boston_sync_log.jsonl"
         with open(log_file, 'a') as f:
             f.write(json.dumps(all_stats) + '\n')
-        
+
+        self._run_post_sync_hooks()
+
         return all_stats
+
+    def _run_post_sync_hooks(self) -> None:
+        """Refresh derived data that depends on the sync we just finished."""
+        script = Path(__file__).resolve().parents[3] / "scripts" / "refresh_bpd_homicide_baseline.py"
+        if not script.is_file():
+            return
+        print("\n🔄 Refreshing BPD homicide/shootings baseline...")
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                check=False,
+            )
+            if result.returncode != 0:
+                print("⚠️  Homicide baseline refresh failed (non-fatal)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"⚠️  Homicide baseline refresh skipped: {exc}")
     
     def __enter__(self):
         """Context manager entry."""

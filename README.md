@@ -249,11 +249,9 @@ This project implements a **hybrid AI system** that combines:
 2. **Legacy API-key testing**
    - See `test_frontend/` (API-key based) or call `POST /chat` with header `RethinkAI-API-Key`
 
-3. **Data Updates**
+3. **Data updates** — one command covers Boston sync (crime, 311, shootings), RSS, Drive, and related jobs:
    ```bash
-   # Run data ingestion
-   cd on_the_porch/data_ingestion
-   python boston_data_sync/boston_data_sync.py
+   ./cron_ingest.sh
    ```
 
 3. **Database Setup**

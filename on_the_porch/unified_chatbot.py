@@ -27,7 +27,6 @@ if str(_RAG_DIR) not in sys.path:
 import retrieval  # type: ignore  # noqa: E402
 import boston_gov  # type: ignore  # noqa: E402
 import intent_router  # noqa: E402
-import answer_validator  # noqa: E402
 from query_plan import build_query_plan  # noqa: E402
 
 # Local Gemini client config (avoid importing app3 at module load)
@@ -933,10 +932,12 @@ def _has_transcript_chunks(metadatas: List[Dict[str, Any]]) -> bool:
 
 def _finalize_prepared_sql_out(out: Dict[str, Any]) -> Dict[str, Any]:
     """Validate numeric prepared-SQL answers against query results."""
+    from sql_chat.prepared_sql import validate_prepared_answer  # noqa: WPS433
+
     intent = out.get("prepared_intent")
     if not intent:
         return out
-    out["answer"] = answer_validator.validate_prepared_answer(
+    out["answer"] = validate_prepared_answer(
         out.get("answer", ""),
         out.get("result") or {},
         prepared_intent=intent,
@@ -1183,19 +1184,7 @@ def _is_calendar_question(question: str) -> bool:
     return any(kw in question_lower for kw in calendar_keywords)
 
 
-_RSS_SOURCE_ALIASES = (
-    "dot reporter",
-    "dotnews",
-    "csndc",
-    "codman square neighborhood development corporation",
-    "codman square library",
-    "bpl codman square",
-    "codman square health center",   
-    "codman.org",                   
-    "codman square neighborhood council", 
-    "codman council"
-    "south dorchester",                
-)
+_RSS_SOURCE_ALIASES = intent_router.RSS_SOURCE_ALIASES
 
 _RSS_NEWS_HINTS = (
     "what's new",

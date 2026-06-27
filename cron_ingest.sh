@@ -93,16 +93,10 @@ log "Cron ingestion job started (daily)"
 log "Using Python: $PYTHON"
 
 run_step \
-  "Boston Open Data sync (311 & 911)" \
+  "Boston Open Data sync (crime, 311, shootings)" \
   boston_sync \
   false \
   "$PYTHON" "on_the_porch/data_ingestion/boston_data_sync/boston_data_sync.py"
-
-run_step \
-  "BPD homicide/shootings baseline refresh" \
-  homicide_baseline \
-  true \
-  "$PYTHON" "scripts/refresh_bpd_homicide_baseline.py"
 
 run_step \
   "Materialized summary refresh" \

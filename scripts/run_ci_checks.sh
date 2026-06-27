@@ -20,12 +20,6 @@ if ! "$PYTHON" scripts/golden_fact_test.py; then
 fi
 
 echo ""
-echo "=== Transcript vectordb health ==="
-if ! "$PYTHON" scripts/check_transcript_vectordb.py; then
-  FAILED=1
-fi
-
-echo ""
 echo "=== Chat regression (HTTP ${API_BASE}) ==="
 if curl -sf "${API_BASE}/health" >/dev/null 2>&1; then
   if ! OTP_API_BASE_URL="$API_BASE" "$PYTHON" scripts/chat_regression_test.py; then
