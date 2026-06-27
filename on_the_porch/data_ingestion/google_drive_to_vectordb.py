@@ -23,19 +23,19 @@ import google.generativeai as genai
 # Document processing
 from langchain_community.vectorstores import Chroma
 
-# Local imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "rag stuff"))
-from retrieval import get_embeddings
-
-# SQL for events
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import sql_chat.app4 as app4
-
+# Local imports — load config first so retrieval sees EMBED_PROVIDER from .env
 import config
 from utils.document_processor import (
     process_file_to_documents,
     extract_pages_from_pdf
 )
+
+# SQL for events
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import sql_chat.app4 as app4
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "rag stuff"))
+from retrieval import get_embeddings
 
 
 def load_sync_state() -> dict:

@@ -46,7 +46,7 @@ def _days_from_question(question: str, default: int = 7) -> int:
     if "this month" in q:
         return 30
     if "last month" in q:
-        return 60
+        return 30
     if "this year" in q:
         return 365
     if "last year" in q:
@@ -58,12 +58,43 @@ def _days_from_question(question: str, default: int = 7) -> int:
     return default
 
 
+def _period_from_question(question: str, default: int = 7) -> tuple[int, str]:
+    """Map vague time phrases to (lookback_days, human-readable period label)."""
+    days = _days_from_question(question, default)
+    q = (question or "").lower()
+    if "this year" in q:
+        return days, "this year (calendar year to date)"
+    if "last year" in q:
+        return days, "last year"
+    if "last month" in q:
+        return 30, "the last 30 days"
+    if "this month" in q:
+        return 30, "the last 30 days"
+    if "last week" in q:
+        return 14, "the last 14 days"
+    if "this week" in q:
+        return 7, "the last 7 days"
+    if "this weekend" in q or ("weekend" in q and "last" not in q):
+        return 7, "this weekend"
+    if "today" in q:
+        return 1, "today"
+    if "yesterday" in q:
+        return 2, "yesterday"
+    return days, f"the last {days} days"
+
+
+def _data_source_note() -> str:
+    return "based on the latest synced Boston Open Data"
+
+
 def _format_count_answer(
     question: str,
     result: Dict[str, Any],
     *,
     label: str,
     period: str,
+    definition: Optional[str] = None,
+    zero_hint: Optional[str] = None,
 ) -> str:
     rows = result.get("rows") or []
     count = 0
@@ -73,14 +104,19 @@ def _format_count_answer(
         count = int(count)
     except (TypeError, ValueError):
         count = 0
+    defn = f" ({definition})" if definition else ""
     if count == 0:
-        return (
-            f"I didn't find any {label} in Dorchester for {period}. "
+        hint = zero_hint or (
+            "Boston Open Data may label these incidents differently than BPD homicide statistics. "
             "Try a wider date range or check back after the next data sync."
         )
+        return (
+            f"I found **0** {label} in Dorchester for {period}{defn} "
+            f"({_data_source_note()}). {hint}"
+        )
     return (
-        f"There were **{count:,}** {label} in Dorchester for {period} "
-        "(based on the latest synced Boston Open Data)."
+        f"There were **{count:,}** {label} in Dorchester for {period}{defn} "
+        f"({_data_source_note()})."
     )
 
 
@@ -532,23 +568,72 @@ def _sql_crime_monthly_count(days: int) -> str:
     )
 
 
-def _sql_crime_homicide_count(days: int, *, calendar_year: bool = False) -> str:
+def _sql_crime_homicide_date_clause(days: int, *, calendar_year: bool = False) -> str:
+    if calendar_year:
+        return "YEAR(`occurred_on_date`) = YEAR(CURDATE())"
     days = max(1, min(days, 365))
-    homicide = (
+    return f"`occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY)"
+
+
+def _sql_crime_homicide_labeled_expr() -> str:
+    return (
         "LOWER(COALESCE(`offense_description`, '')) LIKE '%homicide%' "
         "OR LOWER(COALESCE(`offense_code_group`, '')) LIKE '%homicide%' "
         "OR LOWER(COALESCE(`offense_description`, '')) LIKE '%murder%'"
     )
-    date_clause = (
-        "YEAR(`occurred_on_date`) = YEAR(CURDATE())"
-        if calendar_year
-        else f"`occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL {days} DAY)"
-    )
+
+
+def _sql_crime_homicide_proxy_expr() -> str:
     return (
-        "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
-        f"WHERE {_DORCHESTER_CRIME} "
-        f"AND {date_clause} "
-        f"AND ({homicide})"
+        "LOWER(COALESCE(`offense_description`, '')) LIKE '%death investigation%' "
+        "AND (`shooting` = 1 OR `shooting` = '1' OR UPPER(COALESCE(`shooting`, '')) = 'Y')"
+    )
+
+
+def _sql_crime_homicide_tiered(days: int, *, calendar_year: bool = False) -> str:
+    date_clause = _sql_crime_homicide_date_clause(days, calendar_year=calendar_year)
+    labeled = _sql_crime_homicide_labeled_expr()
+    proxy = _sql_crime_homicide_proxy_expr()
+    return (
+        "SELECT "
+        f"SUM(CASE WHEN ({labeled}) THEN 1 ELSE 0 END) AS labeled_cnt, "
+        f"SUM(CASE WHEN ({proxy}) THEN 1 ELSE 0 END) AS proxy_cnt "
+        "FROM `crime_incident_reports` "
+        f"WHERE {_DORCHESTER_CRIME} AND {date_clause}"
+    )
+
+
+def _format_homicide_answer(
+    question: str,
+    result: Dict[str, Any],
+    *,
+    period: str,
+) -> str:
+    rows = result.get("rows") or []
+    labeled = proxy = 0
+    if rows and isinstance(rows[0], dict):
+        labeled = int(rows[0].get("labeled_cnt") or 0)
+        proxy = int(rows[0].get("proxy_cnt") or 0)
+    labeled_def = "offense labeled homicide or murder in Boston Open Data"
+    proxy_def = "death investigations with a shooting flag in Boston Open Data"
+
+    if labeled > 0:
+        return (
+            f"There were **{labeled:,}** homicides in Dorchester for {period} "
+            f"({labeled_def}; {_data_source_note()})."
+        )
+    if proxy > 0:
+        return (
+            f"I found **0** homicides explicitly labeled in Boston Open Data for {period}, "
+            f"but **{proxy:,}** fatal-shooting death investigations in Dorchester "
+            f"({proxy_def}). Official BPD homicide counts may differ because rulings "
+            f"and offense labels are updated separately from this feed."
+        )
+    return (
+        f"I found **0** homicides in Dorchester for {period} using both labeled homicides "
+        f"and fatal-shooting death investigations in Boston Open Data ({_data_source_note()}). "
+        "Recent fatal shootings may not appear yet, or may be coded under other offense types "
+        "until BPD updates the record."
     )
 
 
@@ -733,8 +818,7 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     if not any(h in q for h in _311_DOMAIN_HINTS):
         return None
-    days = _days_from_question(question, 7)
-    period = f"the last {days} days"
+    days, period = _period_from_question(question, 7)
 
     if any(h in q for h in ("how many", "count", "number of", "total")):
         generic_311 = any(
@@ -795,26 +879,31 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     )
     if not any(h in q for h in crime_hints):
         return None
-    days = _days_from_question(question, 30)
-    period = "this year" if "this year" in q else f"the last {days} days"
+    days, period = _period_from_question(question, 30)
+    calendar_year = "this year" in q
 
     if any(h in q for h in ("how many", "count", "number of", "total", "stats")):
         if any(h in q for h in ("shooting", "shootings", "shots fired")):
+            shoot_def = "incidents flagged shooting=1 in BPD crime reports"
             return PreparedMatch(
                 intent="crime_shooting_count",
                 sql=_sql_crime_shooting_count(days),
                 answer_fn=lambda question, result: _format_count_answer(
-                    question, result, label="shootings", period=period,
+                    question,
+                    result,
+                    label="shootings",
+                    period=period,
+                    definition=shoot_def,
                 ),
             )
         if any(h in q for h in ("homicide", "homicides", "murder", "murders")):
             return PreparedMatch(
                 intent="crime_homicide_count",
-                sql=_sql_crime_homicide_count(
-                    days, calendar_year="this year" in q,
+                sql=_sql_crime_homicide_tiered(
+                    days, calendar_year=calendar_year,
                 ),
-                answer_fn=lambda question, result: _format_count_answer(
-                    question, result, label="homicides", period=period,
+                answer_fn=lambda question, result: _format_homicide_answer(
+                    question, result, period=period,
                 ),
             )
         return PreparedMatch(

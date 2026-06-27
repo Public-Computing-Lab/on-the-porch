@@ -36,7 +36,7 @@ VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_GEMIN
 _embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).
-_CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "3")))
+_CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "5")))
 # Tracks which vector-store paths have already had WAL mode enabled.
 _WAL_ENABLED_PATHS: set[str] = set()
 
@@ -48,7 +48,7 @@ _VECTORDB_SINGLETON_ENABLED = os.getenv("VECTORDB_SINGLETON", "true").strip().lo
 _vectordb_singleton = None
 _vectordb_singleton_path: str | None = None
 _embeddings_singleton = None
-_vectordb_lock = threading.Lock()
+_vectordb_lock = threading.RLock()
 # Per-request embedding reuse (Iteration 1): one embed per question across sources.
 _query_embed_local = threading.local()
 _STOPWORDS = {
@@ -191,6 +191,29 @@ def _is_locked_error(exc: Exception) -> bool:
         or "database is busy" in message
         or "disk i/o error" in message
     )
+
+
+def _is_transient_chroma_error(exc: Exception) -> bool:
+    """True when Chroma/SQLite may recover on retry (lock, segment, corrupt handle)."""
+    message = str(exc).lower()
+    return _is_locked_error(exc) or any(
+        token in message
+        for token in (
+            "failed to get segments",
+            "file is not a database",
+            "database disk image is malformed",
+            "notadb",
+            "code: 26",
+        )
+    )
+
+
+def _reset_vectordb_singleton() -> None:
+    """Drop cached Chroma client so the next read opens a fresh handle."""
+    global _vectordb_singleton, _vectordb_singleton_path
+    with _vectordb_lock:
+        _vectordb_singleton = None
+        _vectordb_singleton_path = None
 
 
 def _ensure_sqlite_wal() -> None:
@@ -405,12 +428,14 @@ def _score_keyword_match(query: str, document: str, metadata) -> float:
 
 
 def _load_raw_documents():
-    client = chromadb.PersistentClient(path=str(VECTORDB_DIR))
-    collection = client.get_collection("langchain")
-    count = collection.count()
-    if count <= 0:
-        return []
-    rows = collection.get(limit=count, include=["documents", "metadatas"])
+    _ensure_sqlite_wal()
+    with _vectordb_lock:
+        client = chromadb.PersistentClient(path=str(VECTORDB_DIR))
+        collection = client.get_collection("langchain")
+        count = collection.count()
+        if count <= 0:
+            return []
+        rows = collection.get(limit=count, include=["documents", "metadatas"])
     documents = rows.get("documents") or []
     metadatas = rows.get("metadatas") or []
     return list(zip(documents, metadatas))
@@ -589,8 +614,9 @@ def retrieve(
     # degrading to keyword search, wait out a transient lock and retry.
     for attempt in range(1, _CHROMA_MAX_ATTEMPTS + 1):
         try:
-            db = vectordb if vectordb is not None else load_vectordb()
-            result = _do_semantic_search(db)
+            with _vectordb_lock:
+                db = vectordb if vectordb is not None else load_vectordb()
+                result = _do_semantic_search(db)
             if BM25_HYBRID_ENABLED:
                 result = _merge_vector_and_bm25(
                     query,
@@ -602,12 +628,20 @@ def retrieve(
                 )
             return result
         except Exception as exc:
-            if _is_locked_error(exc) and attempt < _CHROMA_MAX_ATTEMPTS:
-                print(f"  ⏳ Vector store busy (attempt {attempt}/{_CHROMA_MAX_ATTEMPTS}): {exc}; retrying")
+            if _is_transient_chroma_error(exc) and attempt < _CHROMA_MAX_ATTEMPTS:
+                print(
+                    f"  ⏳ Vector store transient error "
+                    f"(attempt {attempt}/{_CHROMA_MAX_ATTEMPTS}): {exc}; retrying"
+                )
+                _reset_vectordb_singleton()
                 time.sleep(min(2 ** (attempt - 1), 4) * 0.25)
                 continue
             print(f"  ⚠️ Semantic retrieval failed, falling back to keyword search: {exc}")
-            return _keyword_retrieve(query, k=k, doc_type=doc_type, tags=tags, source=source)
+            try:
+                return _keyword_retrieve(query, k=k, doc_type=doc_type, tags=tags, source=source)
+            except Exception as kw_exc:
+                print(f"  ⚠️ Keyword retrieval failed: {kw_exc}")
+                return {"chunks": [], "metadata": [], "scores": None, "query": query}
 
 
 def retrieve_transcripts(query, tags=None, k=5, query_embedding=None):

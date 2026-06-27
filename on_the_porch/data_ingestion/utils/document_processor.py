@@ -98,6 +98,25 @@ CHUNK_SETTINGS = {
     'default': {'chunk_size': 1000, 'chunk_overlap': 200, 'page_wise': False},
 }
 
+_TRANSCRIPT_TAG_KEYWORDS = {
+    "community": ("community", "resident", "neighbor", "neighborhood"),
+    "displacement": ("displacement", "gentrification", "anti-displacement", "eviction"),
+    "housing": ("housing", "affordable housing", "rent", "tenant", "landlord"),
+    "safety": ("safety", "safe", "crime", "police"),
+    "violence": ("violence", "shooting", "gun", "homicide"),
+    "media": ("journalist", "reporter", "media", "press"),
+}
+
+
+def _infer_transcript_tags(text: str) -> str:
+    """Derive comma-separated tags from transcript chunk text for RAG filtering."""
+    lower = (text or "").lower()
+    tags = ["community"]
+    for tag, keywords in _TRANSCRIPT_TAG_KEYWORDS.items():
+        if any(keyword in lower for keyword in keywords):
+            tags.append(tag)
+    return ",".join(dict.fromkeys(tags))
+
 
 def process_file_to_documents(
     file_path: Path,
@@ -157,18 +176,21 @@ def process_file_to_documents(
     # Create documents with metadata
     documents = []
     for i, chunk in enumerate(chunks):
+        meta = {
+            'source': file_metadata.get('name', 'unknown'),
+            'doc_type': doc_type,
+            'folder_category': folder_category,
+            'chunk_id': i,
+            'drive_file_id': file_metadata.get('id', ''),
+            'modified_time': file_metadata.get('modifiedTime', ''),
+            'ingestion_date': datetime.now().isoformat(),
+            'file_extension': ext
+        }
+        if doc_type == 'transcript':
+            meta['tags'] = _infer_transcript_tags(chunk)
         doc = Document(
             page_content=chunk,
-            metadata={
-                'source': file_metadata.get('name', 'unknown'),
-                'doc_type': doc_type,
-                'folder_category': folder_category,
-                'chunk_id': i,
-                'drive_file_id': file_metadata.get('id', ''),
-                'modified_time': file_metadata.get('modifiedTime', ''),
-                'ingestion_date': datetime.now().isoformat(),
-                'file_extension': ext
-            }
+            metadata=meta,
         )
         documents.append(doc)
     

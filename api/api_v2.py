@@ -788,9 +788,16 @@ def _semantic_cache_eligible(message: str, conversation_history: List[Dict[str, 
     return True
 
 
-# =============================================================================
-# Utility helpers
-# =============================================================================
+def _is_cacheable_semantic_answer(answer: str) -> bool:
+    """Do not cache empty RAG failures — they may succeed after ingest or Chroma recovery."""
+    normalized = (answer or "").strip().lower()
+    if not normalized:
+        return False
+    if normalized == "no relevant information found.":
+        return False
+    if normalized.startswith("i couldn't find an answer"):
+        return False
+    return True
 
 def _cookie_kwargs(*, httponly: bool, expires: Optional[datetime.datetime] = None) -> Dict[str, Any]:
     kwargs: Dict[str, Any] = {
@@ -1946,7 +1953,7 @@ def _execute_agent_response(
     semantic_eligible = _semantic_cache_eligible(message, conversation_history)
     if semantic_eligible:
         cached = _semantic_cache.get(message)
-        if cached:
+        if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
             print(f"  ⚡ Semantic cache hit (similarity={cached.get('_similarity')})")
             out = {
                 "answer": cached["answer"],
@@ -2023,7 +2030,7 @@ def _execute_agent_response(
     sources = extract_sources(mode, result)
 
     # Store fresh first-turn answers for future near-duplicate questions.
-    if semantic_eligible and answer:
+    if semantic_eligible and _is_cacheable_semantic_answer(answer):
         _semantic_cache.put(
             message,
             {
@@ -2748,7 +2755,7 @@ def post_conversation_message_stream(thread_id: str):
 
         try:
             cached = _semantic_cache.get(message) if semantic_eligible else None
-            if cached:
+            if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
                 cache_hit = True
                 full_answer = cached.get("answer", "")
                 mode = cached.get("mode", "semantic_cache")
@@ -2794,7 +2801,11 @@ def post_conversation_message_stream(thread_id: str):
                 if enriched != full_answer:
                     yield _sse({"type": "correction", "text": enriched})
                     full_answer = enriched
-            if semantic_eligible and mode != "semantic_cache":
+            if (
+                semantic_eligible
+                and mode != "semantic_cache"
+                and _is_cacheable_semantic_answer(full_answer)
+            ):
                 sources_for_cache = extract_sources(mode, result_payload)
                 _semantic_cache.put(
                     message,

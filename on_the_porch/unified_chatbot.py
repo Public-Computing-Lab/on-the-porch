@@ -911,6 +911,34 @@ def _route_question(question: str) -> Dict[str, Any]:
     return _normalize_routing_plan(question, plan)
 
 
+def _is_transcript_focused_question(question: str) -> bool:
+    q = (question or "").lower()
+    if "transcript" in q:
+        return True
+    return "meeting" in q and any(
+        h in q for h in ("say", "said", "residents", "displacement", "community", "discuss")
+    )
+
+
+def _has_transcript_chunks(metadatas: List[Dict[str, Any]]) -> bool:
+    return any((m or {}).get("doc_type") == "transcript" for m in metadatas)
+
+
+def _try_fast_hybrid_stitch(
+    sql_part: Dict[str, Any],
+    rag_part: Dict[str, Any],
+) -> Optional[str]:
+    """When SQL used prepared facts, stitch RAG narrative without a merge LLM call."""
+    prepared_intent = sql_part.get("prepared_intent")
+    sql_answer = (sql_part.get("answer") or "").strip()
+    if not prepared_intent or not sql_answer:
+        return None
+    rag_answer = (rag_part.get("answer") or "").strip()
+    if not rag_answer or rag_answer == "No relevant information found.":
+        return sql_answer
+    return f"{sql_answer}\n\n{rag_answer}"
+
+
 def _build_rag_prompt(
     question: str,
     chunks: List[str],
@@ -933,20 +961,41 @@ def _build_rag_prompt(
         context_parts.append("")
     context = "\n".join(context_parts)
 
-    system_prompt = (
-        "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
-        "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
-        "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n"
-        "Use only the provided SOURCES and do not add information that is not supported by the text.\n\n"
-        "If the sources do not contain the user's exact answer, the first line of your response must begin with "
-        "'I did not find exact information about ...' and briefly name the missing topic. After that first line, "
-        "you may share closely related information from the sources if it is helpful.\n"
-        "When you cite sources, use the source name naturally in the sentence (e.g. 'According to CSNDC...'). "
-        "Do not use numbered source citations like (Source 1). Avoid technical jargon, and do not mention SQL, databases, RAG, "
-        "retrieval methods, or internal tools.\n"
-        "If the question involves numbers, be honest when the sources are limited and avoid inventing precise figures.\n"
-        + ("\n\nYou are in a conversation. Use previous messages for context when the current question references earlier topics or asks for follow-ups." if conversation_history else "")
+    transcript_focus = (
+        _is_transcript_focused_question(question) and _has_transcript_chunks(metadatas)
     )
+    if transcript_focus:
+        system_prompt = (
+            "You are a friendly assistant summarizing Dorchester community meeting transcripts.\n"
+            "Use only the provided SOURCES. Cite the source filename naturally "
+            "(e.g. 'In the October 2024 focus group meeting...').\n"
+            "Summarize what residents said about the topic in the question. "
+            "Do not claim transcripts are silent when the sources contain related comments.\n"
+            "Do not mention SQL, databases, RAG, or internal tools.\n"
+            + (
+                "\n\nYou are in a conversation. Use previous messages for context when helpful."
+                if conversation_history
+                else ""
+            )
+        )
+    else:
+        system_prompt = (
+            "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
+            "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
+            "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n"
+            "Use only the provided SOURCES and do not add information that is not supported by the text.\n\n"
+            "If the sources partially answer the question, lead with what they do say. "
+            "Only begin with 'I did not find exact information about ...' when the sources lack relevant content.\n"
+            "When you cite sources, use the source name naturally in the sentence (e.g. 'According to CSNDC...'). "
+            "Do not use numbered source citations like (Source 1). Avoid technical jargon, and do not mention SQL, databases, RAG, "
+            "retrieval methods, or internal tools.\n"
+            "If the question involves numbers, be honest when the sources are limited and avoid inventing precise figures.\n"
+            + (
+                "\n\nYou are in a conversation. Use previous messages for context when the current question references earlier topics or asks for follow-ups."
+                if conversation_history
+                else ""
+            )
+        )
 
     user_prompt = (
         "SOURCES:\n" + context + "\n\n" +
@@ -1450,9 +1499,9 @@ def _build_hybrid_merge_prompt(
         "Blend the numbers with the context so the user understands both what is happening and why it matters.\n"
         "Focus on what the information means for people in Dorchester, not on technical details or data sources.\n"
         "If you see any data from other neighborhoods, ignore it completely and only discuss Dorchester.\n\n"
-        "If the inputs do not contain the user's exact answer, the first line of your response must begin with "
-        "'I did not find exact information about ...' and briefly name the missing topic. After that first line, "
-        "you may give the most relevant related information from the inputs.\n"
+        "Lead with any numeric facts from sql_answer exactly as given — do not contradict or hedge them. "
+        "If sql_answer already contains a count, do not begin with 'I did not find exact information'.\n"
+        "Only use that opener when sql_answer is empty and rag_answer lacks the topic.\n"
         "Do NOT mention SQL, databases, RAG, retrieval, or any internal tools. Just speak as a helpful information bot.\n"
         "Never invent data or trends not present in the inputs."
         + ("\n\nYou are in a conversation. Reference previous questions naturally when it helps the user." if conversation_history else "")
@@ -1479,6 +1528,11 @@ def _build_hybrid_merge_prompt(
 
 def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     sql_part, rag_part = _run_hybrid_parts(question, plan, conversation_history)
+    fast = _try_fast_hybrid_stitch(sql_part, rag_part)
+    if fast:
+        answer = _apply_default_fallback_if_needed(question, fast)
+        return {"answer": answer, "sql": sql_part, "rag": rag_part}
+
     full_prompt = _build_hybrid_merge_prompt(question, sql_part, rag_part, conversation_history)
 
     client = _get_llm_client()
@@ -1679,21 +1733,27 @@ def stream_agent_response(
 
     # hybrid
     sql_part, rag_part = _run_hybrid_parts(message, plan, conversation_history)
-    prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
-    acc = []
-    try:
-        for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
-            acc.append(piece)
+    fast_hybrid = _try_fast_hybrid_stitch(sql_part, rag_part)
+    if fast_hybrid:
+        answer = fast_hybrid
+        for piece in _pseudo_stream(answer):
             yield ("delta", piece)
-    except Exception as exc:  # noqa: BLE001
-        if not acc:
-            raise
-        print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
-    answer = "".join(acc).strip()
-    if not answer:
-        answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
-        yield ("delta", answer)
-    result = {"answer": answer, "sql": sql_part, "rag": rag_part}
+    else:
+        prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
+        acc = []
+        try:
+            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
+                acc.append(piece)
+                yield ("delta", piece)
+        except Exception as exc:  # noqa: BLE001
+            if not acc:
+                raise
+            print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
+        answer = "".join(acc).strip()
+        if not answer:
+            answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
+            yield ("delta", answer)
+    result = {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
     next_cache = build_retrieval_cache(
         mode="hybrid", question=message, answer=answer,
         sql_result=sql_part.get("result"), sql_query=sql_part.get("sql"),
