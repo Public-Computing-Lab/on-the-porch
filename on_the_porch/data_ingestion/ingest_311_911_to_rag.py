@@ -48,7 +48,7 @@ load_dotenv(_ROOT_DIR / ".env")
 if str(_RAG_STUFF_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_STUFF_DIR))
 
-from retrieval import GeminiEmbeddings  # noqa: E402  (after path setup)
+from retrieval import get_embeddings, resolve_vectordb_dir  # noqa: E402  (after path setup)
 
 try:
     from langchain_chroma import Chroma
@@ -62,7 +62,7 @@ from langchain_core.documents import Document  # noqa: E402
 # ---------------------------------------------------------------------------
 
 # Default ChromaDB path (same DB used by the chatbot)
-DEFAULT_VECTORDB_DIR = _ON_THE_PORCH_DIR / "vectordb_new"
+DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 
 # MySQL connection — reads from env, matching api_v2.py and boston_data_sync.py
 MYSQL_CONFIG = {
@@ -571,7 +571,7 @@ def build_crime_aggregate_docs(
 def _get_vectordb(vectordb_dir: Optional[Path] = None) -> Chroma:
     """Load (or create) the ChromaDB vector store."""
     vdb_path = vectordb_dir or DEFAULT_VECTORDB_DIR
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
 
     if vdb_path.exists():
         return Chroma(

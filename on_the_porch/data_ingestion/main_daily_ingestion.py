@@ -1,7 +1,8 @@
 """
-Main Daily Ingestion Script
+Main Daily Ingestion Script (LEGACY — prefer cron_ingest.sh at repo root).
+
 Orchestrates Google Drive, Email, and Boston Open Data ingestion processes.
-Run this script once per day via cron job or task scheduler.
+Production cron should use: ./cron_ingest.sh
 """
 import sys
 from pathlib import Path
@@ -24,8 +25,7 @@ from dotnews_downloader import download_latest_pdf
 # Import newsletter processing function
 from google_drive_to_vectordb import process_newsletter_pdf, insert_events_to_db
 
-# Temporary: import vectordb builder from rag stuff (will be moved into this package later)
-# Import directly from the rag stuff directory to avoid conflict with local build_vectordb.py
+# Import vectordb builder from rag stuff (local duplicate removed).
 _RAG_STUFF_DIR = Path(__file__).parent.parent / "rag stuff"
 if str(_RAG_STUFF_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_STUFF_DIR))

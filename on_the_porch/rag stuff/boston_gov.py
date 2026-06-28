@@ -23,7 +23,7 @@ except ImportError:
     from langchain_community.vectorstores import Chroma  # type: ignore
 from langchain_core.documents import Document
 
-from retrieval import GeminiEmbeddings
+from retrieval import get_embeddings, resolve_vectordb_dir
 
 
 BOSTON_GOV_SEARCH_BASE_URL = "https://www.boston.gov/search"
@@ -35,7 +35,7 @@ BOSTON_GOV_SEARCH_PARAMS = {
     "anonymous": "true",
 }
 DEFAULT_TIMEOUT = 20
-DEFAULT_VECTORDB_DIR = (Path(__file__).resolve().parent / "../vectordb_new").resolve()
+DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -210,7 +210,7 @@ def add_boston_gov_answer_to_vectordb(
     doc_id = _stable_boston_gov_doc_id(question, answer)
 
     print(f"  💾 Boston.gov vectordb: saving answer under source=Boston.gov id={doc_id}")
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
     vectordb = Chroma(
         persist_directory=str(vdb_path),
         embedding_function=embeddings,

@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
@@ -25,6 +26,8 @@ if str(_RAG_DIR) not in sys.path:
 # Import RAG retrieval helpers; import SQL pipeline lazily only when needed
 import retrieval  # type: ignore  # noqa: E402
 import boston_gov  # type: ignore  # noqa: E402
+import intent_router  # noqa: E402
+from query_plan import build_query_plan  # noqa: E402
 
 # Local Gemini client config (avoid importing app3 at module load)
 try:
@@ -39,8 +42,12 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 # needs-new-data gate, relevance classification). Defaults to GEMINI_MODEL so
 # behavior is unchanged until you point it at a lighter model (e.g. a -lite).
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
+# Escalation model for low-confidence synthesis (Iteration 0+); wired in later iterations.
+GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "20"))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
+_llm_calls_local = threading.local()
 # Run independent retrievals (and hybrid SQL+RAG) concurrently for lower latency.
 _PARALLEL_RETRIEVAL = os.getenv("PARALLEL_RETRIEVAL", "true").strip().lower() in ("1", "true", "yes")
 FALLBACK_TRIGGER_PREFIX = "i did not find exact information"
@@ -97,16 +104,23 @@ def _normalize_small_talk(message: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _has_small_talk_domain_hint(lower: str) -> bool:
+    """True when the message mentions civic data topics (whole-word match)."""
+    return any(re.search(rf"\b{re.escape(hint)}\b", lower) for hint in _SMALL_TALK_DOMAIN_HINTS)
+
+
 def is_small_talk(message: str) -> bool:
     """True when the message is a brief greeting or pleasantry, not a data question."""
     raw = (message or "").strip()
     if not raw or len(raw) > 120:
         return False
-    lower = raw.lower()
-    if any(hint in lower for hint in _SMALL_TALK_DOMAIN_HINTS):
-        return False
     normalized = _normalize_small_talk(raw)
     if not normalized:
+        return False
+    if re.match(r"^(thanks|thank you|thx|ty)\b", normalized):
+        return True
+    lower = raw.lower()
+    if _has_small_talk_domain_hint(lower):
         return False
     if normalized in _SMALL_TALK_EXACT:
         return True
@@ -174,10 +188,12 @@ def _bootstrap_env() -> None:
 
 
 def _fix_retrieval_vectordb_path() -> None:
-    # retrieval.VECTORDB_DIR is relative; ensure it points to on_the_porch/vectordb_new
+    # Point retrieval at the active store (gemini or BGE) under on_the_porch/.
     try:
-        expected = _REAL_DIR / "vectordb_new"
-        retrieval.VECTORDB_DIR = expected  # type: ignore[attr-defined]
+        retrieval.configure_vectordb_paths(
+            gemini_dir=_REAL_DIR / "vectordb_new",
+            bge_dir=_REAL_DIR / "vectordb_bge_v1",
+        )
     except Exception:
         pass
 
@@ -191,19 +207,60 @@ def _get_llm_client():
     return genai
 
 
+def reset_llm_call_counter() -> None:
+    _llm_calls_local.count = 0
+
+
+def increment_llm_call_counter(count: int = 1) -> None:
+    current = getattr(_llm_calls_local, "count", 0)
+    _llm_calls_local.count = current + max(0, count)
+
+
+def get_llm_call_count() -> int:
+    return int(getattr(_llm_calls_local, "count", 0))
+
+
+_TRANSIENT_ERROR_MARKERS = (
+    "429", "rate limit", "quota", "resource exhausted", "exhausted",
+    "500", "502", "503", "504", "internal error", "unavailable",
+    "service unavailable", "deadline", "timeout", "timed out", "temporarily",
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
 def _generate_content(model, prompt, generation_config):
-    """Call Gemini with a per-request timeout when the SDK supports it."""
+    """Call Gemini with a per-request timeout and transient retries."""
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
-    if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        increment_llm_call_counter()
         try:
-            return model.generate_content(
-                prompt,
-                generation_config=generation_config,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
-            )
-        except TypeError:
-            _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
-    return model.generate_content(prompt, generation_config=generation_config)
+            if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+                try:
+                    return model.generate_content(
+                        prompt,
+                        generation_config=generation_config,
+                        request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                    )
+                except TypeError:
+                    _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
+            return model.generate_content(prompt, generation_config=generation_config)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                backoff = min(2 ** (attempt - 1), 8) * 0.5
+                print(
+                    f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
+                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    raise RuntimeError(f"Gemini call failed: {last_exc}")
 
 
 def _should_trigger_boston_gov_fallback(answer: str) -> bool:
@@ -373,8 +430,74 @@ def _build_boston_gov_fallback_answer(question: str, original_answer: str) -> st
     return _regenerate_with_boston_gov_context(question, original_answer, cleaned_ai_text)
 
 
+def _boston_gov_async_enabled() -> bool:
+    return os.getenv("BOSTON_GOV_ASYNC_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _boston_gov_blocking_enabled() -> bool:
+    """When false, Boston.gov enrichment never blocks the response path."""
+    if not _boston_gov_async_enabled():
+        return True
+    return os.getenv("BOSTON_GOV_BLOCKING", "false").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def should_apply_boston_gov_fallback(question: str, answer: str, mode: str) -> bool:
+    if not answer:
+        return False
+    if mode == "sql":
+        return _should_trigger_sql_fallback(answer)
+    if mode in {"rag", "hybrid", "history"}:
+        return _should_trigger_boston_gov_fallback(answer)
+    return False
+
+
+def _schedule_boston_gov_enrichment(question: str, original_answer: str) -> None:
+    """Warm Boston.gov cache in the background without blocking the user."""
+
+    def _job() -> None:
+        try:
+            _build_boston_gov_fallback_answer(question, original_answer)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Background Boston.gov enrichment failed: {exc}")
+
+    threading.Thread(target=_job, daemon=True).start()
+
+
+def try_boston_gov_enrichment(
+    question: str,
+    original_answer: str,
+    *,
+    timeout_seconds: float,
+) -> str:
+    """Attempt Boston.gov enrichment with a bounded wait (post-stream correction)."""
+    if not _should_trigger_boston_gov_fallback(original_answer):
+        return original_answer
+    result: Dict[str, Any] = {"answer": original_answer}
+
+    def _job() -> None:
+        try:
+            result["answer"] = _build_boston_gov_fallback_answer(
+                question, original_answer,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Boston.gov enrichment failed: {exc}")
+
+    worker = threading.Thread(target=_job, daemon=True)
+    worker.start()
+    worker.join(timeout=max(0.5, timeout_seconds))
+    return str(result.get("answer") or original_answer)
+
+
 def _apply_default_fallback_if_needed(question: str, answer: str) -> str:
     if not _should_trigger_boston_gov_fallback(answer):
+        return answer
+    if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
+        print("  🏛️ Boston.gov fallback: scheduled async enrichment (non-blocking)")
+        _schedule_boston_gov_enrichment(question, answer)
         return answer
     try:
         return _build_boston_gov_fallback_answer(question, answer)
@@ -385,6 +508,10 @@ def _apply_default_fallback_if_needed(question: str, answer: str) -> str:
 
 def _apply_sql_fallback_if_needed(question: str, answer: str) -> str:
     if not _should_trigger_sql_fallback(answer):
+        return answer
+    if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
+        print("  🏛️ Boston.gov SQL fallback: scheduled async enrichment (non-blocking)")
+        _schedule_boston_gov_enrichment(question, answer)
         return answer
     try:
         return _build_boston_gov_fallback_answer(question, answer)
@@ -495,6 +622,89 @@ def summarize_cache(cache: Optional[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+_TIME_SHIFT_HINTS = (
+    "last month", "last week", "next month", "next week", "last year",
+    "different year", "instead of", "compare to", "compared to", "versus",
+    "vs ", "different neighborhood", "other neighborhood",
+)
+
+_REFERENTIAL_PATTERNS = (
+    r"^(the\s+)?(first|second|third|fourth|fifth|last)\s+one\b",
+    r"^tell me more\b",
+    r"^more (about|on|info)\b",
+    r"^what about (that|it|them|this)\b",
+    r"^can you explain\b",
+    r"^could you explain\b",
+    r"^elaborate\b",
+    r"^expand on\b",
+    r"^go deeper\b",
+)
+
+
+def _fast_followup_needs_new_data(
+    question: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Rule-based follow-up gate (Iteration 1). Returns None to fall through to LLM."""
+    if os.getenv("FAST_FOLLOWUP_GATE_ENABLED", "true").strip().lower() not in (
+        "1", "true", "yes",
+    ):
+        return None
+
+    cache = retrieval_cache or {}
+    has_cache = bool(cache.get("mode"))
+    has_history = bool(conversation_history)
+    if not has_cache and not has_history:
+        return None
+
+    q = (question or "").strip().lower()
+    if not q:
+        return None
+
+    # Named event detail always needs a fresh weekly_events lookup (not cache/history).
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.is_named_event_detail(question):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: named event detail requires SQL lookup",
+            }
+    except Exception:
+        pass
+
+    if any(hint in q for hint in _TIME_SHIFT_HINTS):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: question requests a different time period or comparison",
+        }
+
+    cache_has_data = bool(
+        cache.get("sql_result")
+        or cache.get("rag_chunks")
+        or cache.get("answer")
+    )
+    if not cache_has_data:
+        return None
+
+    if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
+        return {
+            "needs_new_data": False,
+            "reason": "rule: referential follow-up answerable from cache",
+        }
+
+    if len(q) <= 80 and any(
+        word in q.split() for word in ("that", "those", "it", "them", "this", "there")
+    ):
+        return {
+            "needs_new_data": False,
+            "reason": "rule: short clarification follow-up answerable from cache",
+        }
+
+    return None
+
+
 def _check_if_needs_new_data(
     question: str,
     conversation_history: Optional[List[Dict[str, str]]] = None,
@@ -504,6 +714,10 @@ def _check_if_needs_new_data(
     Check if the question can be answered from conversation history and/or cached data.
     Returns: {"needs_new_data": bool, "reason": str}
     """
+    fast = _fast_followup_needs_new_data(question, conversation_history, retrieval_cache)
+    if fast is not None:
+        return fast
+
     # If no history and no cache, always need new data
     has_history = conversation_history and len(conversation_history) > 0
     has_cache = retrieval_cache and retrieval_cache.get("mode")
@@ -583,182 +797,179 @@ def _check_if_needs_new_data(
         return default_result
 
 
-def _route_question(question: str) -> Dict[str, Any]:
-    """
-    Decide whether to answer via SQL, RAG, or HYBRID.
-    Returns a dict like: {"mode": "sql|rag|hybrid", "transcript_tags": [..]|null, "policy_sources": [..]|null, "k": int}
-    """
-    client = _get_llm_client()
-
-    system_prompt = (
-        f"Today's date is {date.today().strftime('%A, %B %d, %Y')}.\n\n"
-        "You are a STRICT routing classifier for a chatbot that combines SQL (structured data) and RAG (text documents).\n"
-        "RAG includes transcripts, policy documents, RSS/news items, and cached Boston.gov answers.\n"
-        "Whenever a question is routed to RAG or hybrid, cached Boston.gov answers will be searched along with the other RAG sources.\n"
-        "You MUST classify the user's question into EXACTLY one of three modes: 'sql', 'rag', or 'hybrid'.\n"
-        "These rules are MANDATORY and NON-NEGOTIABLE. Follow them EXACTLY.\n\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n"
-        "CRITICAL ROUTING RULES - ABSOLUTE PRIORITY (CHECK IN THIS ORDER):\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n\n"
-        "RULE 0: NEIGHBORHOOD NEWS / RSS QUESTIONS → 'rag' or 'hybrid'\n"
-        "   - If question uses phrases like 'what's going on in [neighborhood]', 'what's new in', 'lately', 'recent news about', 'updates from [neighborhood]', 'what's happening in [neighborhood]' without asking for specific event schedules\n"
-        "   - AND does not mention a specific day/week/date → mode MUST be 'hybrid' (SQL for 311 activity + RAG for RSS news)\n"
-        "   - If question explicitly names a feed source (Dorchester Reporter, CSNDC, etc.) → mode MUST be 'rag'\n\n"
-        "RULE 1: CRIME-RELATED QUESTIONS → Route based on question type\n"
-        "   - If the question mentions ANY of: crime, crimes, arrest, arrests, offense, offenses, homicide, homicides, shooting, shootings, shots fired, safety incident, safety incidents, criminal activity, violence, violent\n"
-        "   - THEN apply these sub-rules:\n"
-        "     a) If asking for STATISTICS/NUMBERS ONLY (counts, trends, comparisons, breakdowns) → mode MUST be 'sql'\n"
-        "        Examples: 'How many arrests were there?', 'What is the trend in shots fired?', 'Show me crime statistics', 'Which areas have highest arrests?' → sql\n"
-        "     b) If asking for OPINIONS/CONTEXT ONLY (what people think/say about crime) → mode MUST be 'hybrid'\n"
-        "        Examples: 'What do people say about crime?', 'How do residents feel about safety?' → hybrid\n"
-        "     c) If asking for BOTH statistics AND context/opinions → mode MUST be 'hybrid'\n"
-        "        Examples: 'How many homicides and what concerns come up?', 'Show crime trends and community concerns' → hybrid\n"
-        "   - DO NOT use 'rag' alone for crime questions\n\n"
-        "RULE 2: EVENT/CALENDAR/ACTIVITY QUESTIONS → ALWAYS 'sql' mode\n"
-        "   - If the question contains the word 'event' or 'events' anywhere, mode MUST be 'sql' no matter what.\n"
-        "   - If the question mentions ANY of: event, events, happening, schedule, calendar, activity, activities, 'what's on', 'what is on', 'going on', meeting, meetings, workshop, workshops, 'this week', 'next week', 'today', 'tomorrow', 'weekend', day of week\n"
-        "   - THEN mode MUST be 'sql' (NO EXCEPTIONS)\n"
-        "   - DO NOT use 'rag' or 'hybrid' for event/calendar questions\n"
-        "   - Examples that MUST be 'sql':\n"
-        "     * 'What events are happening this week?' → sql\n"
-        "     * 'Show me fun activities for kids' → sql\n"
-        "     * 'What public meetings are scheduled?' → sql\n"
-        "     * 'What's happening on Saturday?' → sql\n"
-        "     * 'Are there any community events?' → sql\n\n"
-        "RULE 3: OPINION/PERSPECTIVE QUESTIONS → ALWAYS 'rag' mode\n"
-        "   - If the question asks for: opinions, perspectives, feelings, views, what people think/say/believe/feel/describe, community views, resident views\n"
-        "   - AND the question is NOT about crime (see Rule 1)\n"
-        "   - THEN mode MUST be 'rag' (NO EXCEPTIONS)\n"
-        "   - DO NOT use 'sql' or 'hybrid' for pure opinion questions\n"
-        "   - Examples that MUST be 'rag':\n"
-        "     * 'What do people think about displacement?' → rag\n"
-        "     * 'How do community members feel about housing?' → rag\n"
-        "     * 'What are people's opinions on media representation?' → rag\n"
-        "     * 'What do residents say about the neighborhood?' → rag\n\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n"
-        "SECONDARY ROUTING RULES (Apply if Rules 1-3 don't match):\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n\n"
-        "RULE 4: PURE STATISTICS/NUMBERS → 'sql' mode\n"
-        "   - Questions asking ONLY for: counts, numbers, statistics, trends, comparisons, breakdowns, aggregations\n"
-        "   - Questions that can be answered with numeric data from tables\n"
-        "   - This INCLUDES crime statistics (see Rule 1a)\n"
-        "   - Examples: 'How many 311 requests?', 'What is the trend in shots fired?', 'Which areas have highest arrests?', 'How many homicides last year?'\n"
-        "   - DO NOT use 'rag' or 'hybrid' if the question is purely numeric\n\n"
-        "RULE 5: POLICY/DOCUMENT CONTENT → 'rag' mode\n"
-        "   - Questions asking about: what a policy/document says, what a program aims to achieve, document content, newsletter content\n"
-        "   - Examples: 'What does Slow Streets aim to achieve?', 'What strategies does the Anti-Displacement Plan propose?', 'What was in the newsletter?'\n"
-        "   - DO NOT use 'sql' for document content questions\n\n"
-        "RULE 6: COMBINED DATA + CONTEXT → 'hybrid' mode\n"
-        "   - Questions that explicitly ask for BOTH numbers/data AND context/explanation\n"
-        "   - Examples: 'How many homicides and what concerns come up?', 'Show trends and how policies address them'\n"
-        "   - DO NOT use 'sql' or 'rag' alone if question explicitly requires both\n\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n"
-        "STRICT VALIDATION REQUIREMENTS:\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n\n"
-        "1. Mode MUST be exactly one of: 'sql', 'rag', or 'hybrid' (lowercase, no quotes in JSON)\n"
-        "2. If mode is 'sql': transcript_tags, policy_sources, and folder_categories MUST be null\n"
-        "3. If mode is 'rag' or 'hybrid':\n"
-        "   - transcript_tags: array of 0-2 strings OR null (valid tags: safety, violence, youth, media, community, displacement, government, structural racism)\n"
-        "   - policy_sources: array of strings OR null (valid: 'Boston Anti-Displacement Plan Analysis.txt', 'Boston Slow Streets Plan Analysis.txt', 'Imagine Boston 2030 Analysis.txt')\n"
-        "   - folder_categories: array of strings OR null (valid: newsletters, policy, transcripts)\n"
-        "   - k: integer between 3 and 10 (default 5, minimum 5 for event queries)\n"
-        "4. For crime questions using 'hybrid' mode (Rule 1b or 1c): transcript_tags MUST include at least one of: 'safety' or 'violence'\n"
-        "   For crime questions using 'sql' mode (Rule 1a): transcript_tags, policy_sources, and folder_categories MUST be null\n"
-        "5. For opinion questions (Rule 3): transcript_tags should include relevant tags like 'community', 'displacement', 'youth', 'media'\n"
-        "6. For event questions (Rule 2): k MUST be at least 5\n\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n"
-        "OUTPUT FORMAT (STRICT):\n"
-        "═══════════════════════════════════════════════════════════════════════════════\n\n"
-        "Return ONLY valid JSON with EXACTLY these keys: mode, transcript_tags, policy_sources, folder_categories, k\n"
-        "DO NOT include any explanatory text, markdown, code blocks, or additional content.\n"
-        "DO NOT use backticks or markdown formatting.\n"
-        "Example valid output:\n"
-        '{"mode": "hybrid", "transcript_tags": ["safety"], "policy_sources": null, "folder_categories": null, "k": 5}\n\n'
-        "NOTE: This system is configured for DORCHESTER ONLY. All SQL queries automatically filter to Dorchester data only."
-    )
-
-    user_prompt = (
-        "Question:\n" + question + "\n\n"
-        "Policy sources include: 'Boston Anti-Displacement Plan Analysis.txt', 'Boston Slow Streets Plan Analysis.txt', 'Imagine Boston 2030 Analysis.txt'.\n"
-        "Transcript tags include: safety, violence, youth, media, community, displacement, government, structural racism.\n"
-        "Folder categories (for client uploads): newsletters, policy, transcripts.\n"
-        "Output JSON only."
-    )
-
-    default_plan = {
-        "mode": "hybrid",
-        "transcript_tags": None,
-        "policy_sources": None,
-        "folder_categories": None,
-        "k": 5,
-    }
-
-    try:
-        model = client.GenerativeModel(GEMINI_FAST_MODEL)
-        prompt = f"{system_prompt}\n\n{user_prompt}"
-        resp = _generate_content(
-            model,
-            prompt,
-            generation_config={"temperature": 0},
-        )
-        content = (resp.text or "").strip()
-        # Remove code fences if present
-        if content.startswith("```"):
-            content = content.strip("`").strip()
-            # If the first line is a language tag, drop it
-            lines = content.splitlines()
-            if lines:
-                if lines[0].strip().lower() in ("json", "javascript", "js"):
-                    content = "\n".join(lines[1:]).strip()
-        plan = _safe_json_loads(content, default_plan)
-    except Exception:
-        plan = default_plan
-
-    # Normalize values
-    mode = str(plan.get("mode", "hybrid")).lower()
+def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate k/mode and apply RSS/calendar post-rules."""
+    mode = str(plan.get("mode", intent_router.infer_parse_failure_mode(question))).lower()
     if mode not in {"sql", "rag", "hybrid"}:
-        mode = "hybrid"  # Default to hybrid for safety
+        mode = intent_router.infer_parse_failure_mode(question)
     tags = plan.get("transcript_tags")
     sources = plan.get("policy_sources")
     folders = plan.get("folder_categories")
     k = plan.get("k", 5)
-    
-    # Normalize and validate k
+
     try:
         k = int(k)
     except (ValueError, TypeError):
         k = 5
-    
-    # Ensure k is at least 3 (minimum for useful retrieval)
     if k < 3:
         k = 3
-    
-    # Force higher k for calendar questions to ensure good event coverage
-    if _is_calendar_question(question):
-        # Ensure at least 5 results for calendar queries
-        if k < 5:
-            k = 5
-    
-    # Cap k at reasonable maximum (20)
+    if _is_calendar_question(question) and k < 5:
+        k = 5
     if k > 20:
         k = 20
 
-    print("Initial routing plan from LLM:", {"mode": mode, "transcript_tags": tags, "policy_sources": sources, "folder_categories": folders, "k": k})
     if _looks_like_rss_query(question):
-        if _question_mentions_rss_source(question):
+        if plan.get("intent") in _STRUCTURED_SQL_INTENTS and mode == "sql":
+            pass
+        elif _question_mentions_rss_source(question):
             mode = "rag"
         elif mode == "sql":
             mode = "hybrid"
         if not folders:
             folders = ["newsletters"]
-        print("Final routing plan from LLM:", {"mode": mode, "transcript_tags": tags, "policy_sources": sources, "folder_categories": folders, "k": k})
+
+    query_plan = plan.get("query_plan")
+    if not isinstance(query_plan, dict):
+        query_plan = build_query_plan(question, mode=mode).to_dict()
+
+    # DB-first: prepared catalog hits must use SQL execution, not RAG-only narration.
+    try:
+        from sql_chat import prepared_sql as _prep  # noqa: WPS433
+
+        if _prep.match_prepared_sql(question) and not _prep.has_opinion_angle(question):
+            mode = "sql"
+        elif _prep.match_prepared_sql(question) and mode == "rag":
+            mode = "hybrid"
+    except Exception:
+        pass
+
     return {
         "mode": mode,
         "transcript_tags": tags if isinstance(tags, list) or tags is None else None,
         "policy_sources": sources if isinstance(sources, list) or sources is None else None,
         "folder_categories": folders if isinstance(folders, list) or folders is None else None,
         "k": k,
+        "intent": plan.get("intent"),
+        "router": plan.get("router", "llm"),
+        "confidence": plan.get("confidence"),
+        "query_plan": query_plan,
     }
+
+
+def _route_question_llm(question: str) -> Dict[str, Any]:
+    """Slim LLM classifier when rule router does not match."""
+    client = _get_llm_client()
+    fallback_mode = intent_router.infer_parse_failure_mode(question)
+
+    system_prompt = (
+        f"Today's date is {date.today().strftime('%A, %B %d, %Y')}.\n\n"
+        "You are a routing classifier for a Dorchester civic chatbot.\n"
+        "Return EXACTLY one mode: sql, rag, or hybrid.\n"
+        "Events/calendar and numeric 311/crime stats → sql.\n"
+        "Policy, news, and community opinions → rag.\n"
+        "Both stats AND community voice → hybrid.\n"
+        "When unsure, prefer rag over hybrid.\n"
+        "Return ONLY JSON: mode, transcript_tags, policy_sources, "
+        "folder_categories, k.\n"
+    )
+    user_prompt = (
+        "Question:\n" + question + "\n\n"
+        "Transcript tags: safety, violence, youth, media, community, displacement.\n"
+        "Output JSON only."
+    )
+    default_plan = {
+        "mode": fallback_mode,
+        "transcript_tags": None,
+        "policy_sources": None,
+        "folder_categories": None,
+        "k": 5,
+        "router": "llm",
+        "intent": "llm_fallback",
+        "confidence": 0.5,
+    }
+    try:
+        model = client.GenerativeModel(GEMINI_FAST_MODEL)
+        resp = _generate_content(
+            model,
+            f"{system_prompt}\n\n{user_prompt}",
+            generation_config={"temperature": 0},
+        )
+        content = (resp.text or "").strip()
+        if content.startswith("```"):
+            content = content.strip("`").strip()
+            lines = content.splitlines()
+            if lines and lines[0].strip().lower() in ("json", "javascript", "js"):
+                content = "\n".join(lines[1:]).strip()
+        plan = _safe_json_loads(content, default_plan)
+        plan.setdefault("router", "llm")
+        plan.setdefault("intent", "llm_classified")
+        plan.setdefault("confidence", 0.7)
+    except Exception:
+        plan = default_plan
+    return plan
+
+
+def _route_question(question: str) -> Dict[str, Any]:
+    """Route to sql / rag / hybrid. Rules first (Iteration 2), LLM when ambiguous."""
+    if intent_router.is_router_v2_enabled():
+        rule_plan = intent_router.route_with_rules(question)
+        if rule_plan is not None:
+            print(
+                f"  🧭 Routing plan (rules): {rule_plan.get('intent')} "
+                f"→ {rule_plan.get('mode')}"
+            )
+            return _normalize_routing_plan(question, rule_plan)
+
+    plan = _route_question_llm(question)
+    print(
+        "  🧭 Routing plan (LLM):",
+        {"intent": plan.get("intent"), "mode": plan.get("mode")},
+    )
+    return _normalize_routing_plan(question, plan)
+
+
+def _is_transcript_focused_question(question: str) -> bool:
+    q = (question or "").lower()
+    if "transcript" in q:
+        return True
+    return "meeting" in q and any(
+        h in q for h in ("say", "said", "residents", "displacement", "community", "discuss")
+    )
+
+
+def _has_transcript_chunks(metadatas: List[Dict[str, Any]]) -> bool:
+    return any((m or {}).get("doc_type") == "transcript" for m in metadatas)
+
+
+def _finalize_prepared_sql_out(out: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate numeric prepared-SQL answers against query results."""
+    from sql_chat.prepared_sql import validate_prepared_answer  # noqa: WPS433
+
+    intent = out.get("prepared_intent")
+    if not intent:
+        return out
+    out["answer"] = validate_prepared_answer(
+        out.get("answer", ""),
+        out.get("result") or {},
+        prepared_intent=intent,
+    )
+    return out
+
+
+def _try_fast_hybrid_stitch(
+    sql_part: Dict[str, Any],
+    rag_part: Dict[str, Any],
+) -> Optional[str]:
+    """When SQL used DB-backed facts, stitch RAG narrative without a merge LLM call."""
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
+    db_backed = sql_part.get("db_backed") or sql_part.get("prepared_intent")
+    sql_answer = (sql_part.get("answer") or "").strip()
+    if not db_backed or not sql_answer:
+        return None
+    rag_answer = (rag_part.get("answer") or "").strip()
+    if not rag_answer or rag_answer == "No relevant information found.":
+        return sql_answer
+    return f"{sql_answer}\n\n{rag_answer}"
 
 
 def _build_rag_prompt(
@@ -783,20 +994,41 @@ def _build_rag_prompt(
         context_parts.append("")
     context = "\n".join(context_parts)
 
-    system_prompt = (
-        "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
-        "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
-        "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n"
-        "Use only the provided SOURCES and do not add information that is not supported by the text.\n\n"
-        "If the sources do not contain the user's exact answer, the first line of your response must begin with "
-        "'I did not find exact information about ...' and briefly name the missing topic. After that first line, "
-        "you may share closely related information from the sources if it is helpful.\n"
-        "When you cite sources, use the source name naturally in the sentence (e.g. 'According to CSNDC...'). "
-        "Do not use numbered source citations like (Source 1). Avoid technical jargon, and do not mention SQL, databases, RAG, "
-        "retrieval methods, or internal tools.\n"
-        "If the question involves numbers, be honest when the sources are limited and avoid inventing precise figures.\n"
-        + ("\n\nYou are in a conversation. Use previous messages for context when the current question references earlier topics or asks for follow-ups." if conversation_history else "")
+    transcript_focus = (
+        _is_transcript_focused_question(question) and _has_transcript_chunks(metadatas)
     )
+    if transcript_focus:
+        system_prompt = (
+            "You are a friendly assistant summarizing Dorchester community meeting transcripts.\n"
+            "Use only the provided SOURCES. Cite the source filename naturally "
+            "(e.g. 'In the October 2024 focus group meeting...').\n"
+            "Summarize what residents said about the topic in the question. "
+            "Do not claim transcripts are silent when the sources contain related comments.\n"
+            "Do not mention SQL, databases, RAG, or internal tools.\n"
+            + (
+                "\n\nYou are in a conversation. Use previous messages for context when helpful."
+                if conversation_history
+                else ""
+            )
+        )
+    else:
+        system_prompt = (
+            "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
+            "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
+            "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n"
+            "Use only the provided SOURCES and do not add information that is not supported by the text.\n\n"
+            "If the sources partially answer the question, lead with what they do say. "
+            "Only begin with 'I did not find exact information about ...' when the sources lack relevant content.\n"
+            "When you cite sources, use the source name naturally in the sentence (e.g. 'According to CSNDC...'). "
+            "Do not use numbered source citations like (Source 1). Avoid technical jargon, and do not mention SQL, databases, RAG, "
+            "retrieval methods, or internal tools.\n"
+            "If the question involves numbers, be honest when the sources are limited and avoid inventing precise figures.\n"
+            + (
+                "\n\nYou are in a conversation. Use previous messages for context when the current question references earlier topics or asks for follow-ups."
+                if conversation_history
+                else ""
+            )
+        )
 
     user_prompt = (
         "SOURCES:\n" + context + "\n\n" +
@@ -963,19 +1195,7 @@ def _is_calendar_question(question: str) -> bool:
     return any(kw in question_lower for kw in calendar_keywords)
 
 
-_RSS_SOURCE_ALIASES = (
-    "dot reporter",
-    "dotnews",
-    "csndc",
-    "codman square neighborhood development corporation",
-    "codman square library",
-    "bpl codman square",
-    "codman square health center",   
-    "codman.org",                   
-    "codman square neighborhood council", 
-    "codman council"
-    "south dorchester",                
-)
+_RSS_SOURCE_ALIASES = intent_router.RSS_SOURCE_ALIASES
 
 _RSS_NEWS_HINTS = (
     "what's new",
@@ -993,15 +1213,18 @@ _RSS_NEWS_HINTS = (
     "what is happening in",
     "what is going on in",
     "lately in",
-    "dorchester",
-    "south dorchester",
-    "codman square",
-    "csndc",
     "tell me about",
     "what has",
     "who is",
     "what is",
 )
+
+_STRUCTURED_SQL_INTENTS = frozenset({
+    "311_stats",
+    "crime_stats",
+    "events",
+    "311_hybrid",
+})
 _SCHEDULE_HINTS = (
     "event",
     "events",
@@ -1061,22 +1284,37 @@ def _retrieve_rag(
     sources = plan.get("policy_sources")
     folders = plan.get("folder_categories") if isinstance(plan.get("folder_categories"), list) else None
 
+    transcript_first = (
+        plan.get("intent") == "transcript"
+        or _is_transcript_focused_question(question)
+    )
+    transcript_k = min(k + 4, 15) if transcript_first else k
+
     combined_chunks: List[str] = []
     combined_meta: List[Dict[str, Any]] = []
+
+    retrieval.clear_query_embedding_cache()
+    query_embedding = retrieval.get_query_embedding(question)
 
     # Each retrieval source is independent, so run them concurrently. Returns
     # (label, chunks, metadata). These mostly wait on network (embeddings) and
     # the vector store, so threads give real concurrency.
     def _task_rss():
-        rss_res = retrieval.retrieve_rss(question, k=k)
+        rss_res = retrieval.retrieve_rss(
+            question, k=k, query_embedding=query_embedding,
+        )
         return ("📰 RSS", rss_res.get("chunks", []), rss_res.get("metadata", []))
 
     def _task_boston():
-        boston_res = retrieval.retrieve(question, k=k, doc_type="boston_gov_answer")
+        boston_res = retrieval.retrieve(
+            question, k=k, doc_type="boston_gov_answer", query_embedding=query_embedding,
+        )
         return ("🏛️ BostonGov", boston_res.get("chunks", []), boston_res.get("metadata", []))
 
     def _task_transcripts():
-        t_res = retrieval.retrieve_transcripts(question, tags=tags, k=k)
+        t_res = retrieval.retrieve_transcripts(
+            question, tags=tags, k=transcript_k, query_embedding=query_embedding,
+        )
         return ("📝 Transcripts", t_res.get("chunks", []), t_res.get("metadata", []))
 
     def _task_policies():
@@ -1084,21 +1322,29 @@ def _retrieve_rag(
         meta: List[Dict[str, Any]] = []
         if sources:
             for src in sources:
-                p_res = retrieval.retrieve_policies(question, k=k, source=src)
+                p_res = retrieval.retrieve_policies(
+                    question, k=k, source=src, query_embedding=query_embedding,
+                )
                 chunks.extend(p_res.get("chunks", []))
                 meta.extend(p_res.get("metadata", []))
         else:
-            p_res = retrieval.retrieve_policies(question, k=k)
+            p_res = retrieval.retrieve_policies(
+                question, k=k, query_embedding=query_embedding,
+            )
             chunks = p_res.get("chunks", [])
             meta = p_res.get("metadata", [])
         return ("📋 Policies", chunks, meta)
 
     # Fixed order so combined results are deterministic regardless of which task
-    # finishes first.
+    # finishes first. Transcript-focused questions prioritize meeting transcripts.
     tasks = []
+    if transcript_first:
+        tasks.append(_task_transcripts)
     if _should_include_rss(question, folders):
         tasks.append(_task_rss)
-    tasks.extend([_task_boston, _task_transcripts, _task_policies])
+    if not transcript_first:
+        tasks.append(_task_transcripts)
+    tasks.extend([_task_boston, _task_policies])
 
     def _safe_run(fn):
         try:
@@ -1141,6 +1387,33 @@ def _run_sql(
 ) -> Dict[str, Any]:
     # Import app4 (MySQL) only when SQL path is actually used
     import sql_chat.app4 as app4  # noqa: WPS433
+    from sql_chat import prepared_sql  # noqa: WPS433
+
+    prepared = prepared_sql.run_prepared_sql(
+        question,
+        app4._execute_sql,
+        conversation_history=conversation_history,
+    )
+    if prepared is not None:
+        return _finalize_prepared_sql_out(prepared)
+
+    # Factual civic counts must come from the database — never LLM-invented SQL or numbers.
+    if prepared_sql.is_factual_db_question(question):
+        if app4.is_generic_events_list_question(question):
+            try:
+                out = app4.run_generic_events_query(question, conversation_history)
+                out["db_backed"] = True
+                if apply_fallback:
+                    out["answer"] = _apply_sql_fallback_if_needed(question, out.get("answer", ""))
+                return out
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ⚠️ Fast events path failed ({exc})")
+        return {
+            "answer": prepared_sql.factual_no_match_message(question),
+            "sql": "",
+            "result": {"columns": [], "rows": []},
+            "db_backed": False,
+        }
 
     if app4.is_generic_events_list_question(question):
         try:
@@ -1238,7 +1511,8 @@ def _run_sql(
             )
     if apply_fallback:
         answer = _apply_sql_fallback_if_needed(question, answer)
-    return {"answer": answer, "sql": final_sql, "result": result}
+    answer = prepared_sql.validate_sql_numeric_answer(answer, result)
+    return {"answer": answer, "sql": final_sql, "result": result, "db_backed": bool(result.get("rows"))}
 
 
 def _run_hybrid_parts(
@@ -1275,9 +1549,9 @@ def _build_hybrid_merge_prompt(
         "Blend the numbers with the context so the user understands both what is happening and why it matters.\n"
         "Focus on what the information means for people in Dorchester, not on technical details or data sources.\n"
         "If you see any data from other neighborhoods, ignore it completely and only discuss Dorchester.\n\n"
-        "If the inputs do not contain the user's exact answer, the first line of your response must begin with "
-        "'I did not find exact information about ...' and briefly name the missing topic. After that first line, "
-        "you may give the most relevant related information from the inputs.\n"
+        "Lead with any numeric facts from sql_answer exactly as given — do not contradict or hedge them. "
+        "If sql_answer already contains a count, do not begin with 'I did not find exact information'.\n"
+        "Only use that opener when sql_answer is empty and rag_answer lacks the topic.\n"
         "Do NOT mention SQL, databases, RAG, retrieval, or any internal tools. Just speak as a helpful information bot.\n"
         "Never invent data or trends not present in the inputs."
         + ("\n\nYou are in a conversation. Reference previous questions naturally when it helps the user." if conversation_history else "")
@@ -1304,6 +1578,12 @@ def _build_hybrid_merge_prompt(
 
 def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     sql_part, rag_part = _run_hybrid_parts(question, plan, conversation_history)
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
+    fast = _try_fast_hybrid_stitch(sql_part, rag_part)
+    if fast:
+        answer = _apply_default_fallback_if_needed(question, fast)
+        return {"answer": answer, "sql": sql_part, "rag": rag_part}
+
     full_prompt = _build_hybrid_merge_prompt(question, sql_part, rag_part, conversation_history)
 
     client = _get_llm_client()
@@ -1319,13 +1599,41 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
         answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
 
     answer = _apply_default_fallback_if_needed(question, answer)
-    return {"answer": answer, "sql": sql_part, "rag": rag_part}
+    return {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
 
 
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
-    """Yield text deltas from a streaming Gemini generation. Defensive on errors."""
+    """Yield text deltas from a streaming Gemini generation with retries."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        yielded = False
+        try:
+            for piece in _stream_model_text_once(model_name, prompt, temperature):
+                yielded = True
+                yield piece
+            if yielded:
+                return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                backoff = min(2 ** (attempt - 1), 8) * 0.5
+                print(
+                    f"  ⚠️ Stream transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
+                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
+                )
+                time.sleep(backoff)
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Gemini stream returned no content")
+
+
+def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
+    """Single streaming attempt (no retry)."""
     client = _get_llm_client()
     model = client.GenerativeModel(model_name)
+    increment_llm_call_counter()
     try:
         try:
             stream = model.generate_content(
@@ -1342,7 +1650,7 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
             )
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Streaming generation failed to start: {exc}")
-        return
+        raise
     for chunk in stream:
         try:
             piece = getattr(chunk, "text", "") or ""
@@ -1443,7 +1751,14 @@ def stream_agent_response(
             mode="sql", question=message, answer=answer,
             sql_result=out.get("result"), sql_query=out.get("sql"),
         )
-        yield ("final", {"answer": answer, "mode": "sql", "result": out, "retrieval_cache": next_cache})
+        yield ("final", {
+            "answer": answer,
+            "mode": "sql",
+            "result": out,
+            "retrieval_cache": next_cache,
+            "prepared_intent": out.get("prepared_intent"),
+            "query_plan": plan.get("query_plan"),
+        })
         return
 
     if mode == "rag":
@@ -1454,9 +1769,14 @@ def stream_agent_response(
             yield ("delta", answer)
         else:
             acc = []
-            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
-                acc.append(piece)
-                yield ("delta", piece)
+            try:
+                for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
+                    acc.append(piece)
+                    yield ("delta", piece)
+            except Exception as exc:  # noqa: BLE001
+                if not acc:
+                    raise
+                print(f"  ⚠️ RAG stream ended early: {exc.__class__.__name__}")
             answer = "".join(acc).strip()
             if not answer:
                 answer = "\n\n".join(context_parts[:10])
@@ -1471,16 +1791,34 @@ def stream_agent_response(
 
     # hybrid
     sql_part, rag_part = _run_hybrid_parts(message, plan, conversation_history)
-    prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
-    acc = []
-    for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
-        acc.append(piece)
-        yield ("delta", piece)
-    answer = "".join(acc).strip()
-    if not answer:
-        answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
-        yield ("delta", answer)
-    result = {"answer": answer, "sql": sql_part, "rag": rag_part}
+    sql_part = _finalize_prepared_sql_out(dict(sql_part))
+    fast_hybrid = _try_fast_hybrid_stitch(sql_part, rag_part)
+    if fast_hybrid:
+        answer = fast_hybrid
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+    else:
+        prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
+        acc = []
+        try:
+            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
+                acc.append(piece)
+                yield ("delta", piece)
+        except Exception as exc:  # noqa: BLE001
+            if not acc:
+                raise
+            print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
+        answer = "".join(acc).strip()
+        if not answer:
+            answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
+            yield ("delta", answer)
+    result = {
+        "answer": answer,
+        "sql": sql_part,
+        "rag": rag_part,
+        "prepared_intent": sql_part.get("prepared_intent"),
+        "query_plan": plan.get("query_plan"),
+    }
     next_cache = build_retrieval_cache(
         mode="hybrid", question=message, answer=answer,
         sql_result=sql_part.get("result"), sql_query=sql_part.get("sql"),
@@ -1489,13 +1827,29 @@ def stream_agent_response(
     yield ("final", {"answer": answer, "mode": "hybrid", "result": result, "retrieval_cache": next_cache})
 
 
-def apply_post_stream_fallback(question: str, answer: str, mode: str) -> str:
-    """Apply Boston.gov fallback after streaming completes (mirrors non-streaming path)."""
+def apply_post_stream_fallback(
+    question: str,
+    answer: str,
+    mode: str,
+    *,
+    prepared_intent: Optional[str] = None,
+) -> str:
+    """Apply Boston.gov fallback after streaming completes."""
+    if prepared_intent:
+        return answer
     if not answer:
         return answer
     if mode == "sql":
+        if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
+            if _should_trigger_sql_fallback(answer):
+                _schedule_boston_gov_enrichment(question, answer)
+            return answer
         return _apply_sql_fallback_if_needed(question, answer)
     if mode in {"rag", "hybrid", "history"}:
+        if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
+            if _should_trigger_boston_gov_fallback(answer):
+                _schedule_boston_gov_enrichment(question, answer)
+            return answer
         return _apply_default_fallback_if_needed(question, answer)
     return answer
 

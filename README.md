@@ -133,7 +133,10 @@ The project uses a **single `.env` file at the repo root**.
 - `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` – production server tuning
 - `RATE_LIMIT_*`, `GUEST_CLEANUP_ENABLED` – abuse protection and guest DB hygiene
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB` – MySQL connection
-- `VECTORDB_DIR` – path to the ChromaDB/vector DB directory
+- `VECTORDB_DIR` – Gemini-embedded Chroma store (`vectordb_new`)
+- `VECTORDB_BGE_DIR`, `EMBED_PROVIDER` – local BGE embeddings (Iteration 3; see below)
+- `VECTOR_DB_PROVIDER`, `QDRANT_*`, `BM25_HYBRID_ENABLED` – Qdrant + BM25 hybrid retrieval (Iteration 4)
+- `MATERIALIZED_VIEWS_ENABLED`, `INGEST_QUEUE_ENABLED`, `BOSTON_311_STALE_HOURS` – summary tables, ingest tracking, 311 freshness (Iteration 5)
 - `GOOGLE_DRIVE_FOLDER_ID` and related `GOOGLE_*/GMAIL_*` settings – data ingestion
 
 **Frontend production config** (`public/config.js`):
@@ -246,11 +249,9 @@ This project implements a **hybrid AI system** that combines:
 2. **Legacy API-key testing**
    - See `test_frontend/` (API-key based) or call `POST /chat` with header `RethinkAI-API-Key`
 
-3. **Data Updates**
+3. **Data updates** — one command covers Boston sync (crime, 311, shootings), RSS, Drive, and related jobs:
    ```bash
-   # Run data ingestion
-   cd on_the_porch/data_ingestion
-   python boston_data_sync/boston_data_sync.py
+   ./cron_ingest.sh
    ```
 
 3. **Database Setup**
@@ -277,11 +278,35 @@ This project implements a **hybrid AI system** that combines:
 1. Copy `example_env.txt` → `.env` and set strong `FLASK_SECRET_KEY` + `TOKEN_PEPPER`
 2. Set `FLASK_DEBUG=false` and `FLASK_SESSION_COOKIE_SECURE=true` behind HTTPS
 3. Configure `ALLOWED_ORIGINS` for your real frontend domain
-4. Run **Redis** and set `CACHE_BACKEND=redis` when using `GUNICORN_WORKERS > 1`
-5. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
-6. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
-7. Schedule `./cron_ingest.sh` for data sync; set `GUEST_CLEANUP_ENABLED=true`
-8. Verify `GET /health` reports `database`, `redis`, and `chroma` as healthy
+4. Set `PRODUCTION_MODE=true`, `CACHE_BACKEND=redis`, and `SEMANTIC_CACHE_ENABLED=true`
+5. **Local embeddings (Iteration 3):** build the BGE index, then flip the provider:
+   ```bash
+   pip install sentence-transformers
+   python "on_the_porch/rag stuff/reindex_bge_vectordb.py" --validate
+   # In .env: EMBED_PROVIDER=local
+   ```
+   RAG retrieval and the semantic cache then use local `BAAI/bge-base-en-v1.5` (no embedding API calls). Roll back with `EMBED_PROVIDER=gemini`.
+6. **Qdrant vector DB (Iteration 4):** migrate off Chroma SQLite to remove ingest/API lock contention:
+   ```bash
+   pip install qdrant-client rank-bm25
+   python "on_the_porch/rag stuff/migrate_chroma_to_qdrant.py" --validate
+   # In .env: VECTOR_DB_PROVIDER=qdrant
+   # Optional server mode: ./start_qdrant.sh and QDRANT_MODE=server
+   ```
+   Retrieval uses dense vectors + **BM25** reciprocal-rank fusion (`BM25_HYBRID_ENABLED=true`) for better street-name recall. Cron ingest can target a staging collection (`QDRANT_INGEST_STAGING=true`) and promote with `--promote-staging`.
+7. **Materialized summaries (Iteration 5):** migration `008_materialized_summaries.sql` runs on API startup. Refresh after Boston sync:
+   ```bash
+   python scripts/refresh_materialized_views.py
+   ```
+   `/events` reads `events_materialized` when enabled; prepared SQL uses `mv_311_weekly` / `mv_crime_monthly`. `/health` reports ingest job status and 311 freshness (`BOSTON_311_STALE_HOURS=2`).
+8. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
+9. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
+10. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
+11. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
+12. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
+13. Set `GUEST_CLEANUP_ENABLED=true` in production
+14. Verify `GET /health` reports `database`, `redis`, `qdrant` (or `chroma`), `ingestion`, `ingest_jobs`, and `boston_311_freshness`
+15. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`, includes `request_id`, `tier`, `cache_layer`)
 
 ### Local production-like stack
 
@@ -298,9 +323,14 @@ See `scripts/dreamhost/` for older deployment scripts. They may be out of date w
 ### Production considerations
 
 - Use gunicorn (`./start_api.sh`) — the Flask dev server is not suitable for production
-- Redis shares session cache and rate limits across gunicorn workers
-- Set up MySQL + ChromaDB backups
-- Monitor Gemini API usage and costs
+- Redis shares session cache, rate limits, and **semantic response cache** across gunicorn workers
+- **Prepared SQL** (`PREPARED_SQL_ENABLED=true`) answers common 311/crime/events questions without LLM SQL generation
+- **Intent router v2** (`INTENT_ROUTER_V2_ENABLED=true`) routes most questions with rules instead of an LLM call
+- **Async Boston.gov** (`BOSTON_GOV_ASYNC_ENABLED=true`) keeps enrichment off the hot path; streaming may send a late `correction` event
+- **Local BGE embeddings** (`EMBED_PROVIDER=local`) remove per-query embedding API latency/cost after `reindex_bge_vectordb.py`
+- **Qdrant + BM25** (`VECTOR_DB_PROVIDER=qdrant`) removes Chroma SQLite lock contention during `cron_ingest.sh`
+- Set up MySQL + vector store backups (Chroma or Qdrant)
+- Monitor Gemini API usage and structured chat metrics (`"event": "chat_request"` in logs)
 
 ## 📝 License
 

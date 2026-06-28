@@ -37,9 +37,9 @@ load_dotenv(_ROOT_DIR / ".env")
 if str(_RAG_DIR) not in sys.path:
     sys.path.insert(0, str(_RAG_DIR))
 
-from retrieval import GeminiEmbeddings  # noqa: E402
+from retrieval import get_embeddings, resolve_vectordb_dir  # noqa: E402
 
-DEFAULT_VECTORDB_DIR = (_RAG_DIR / "../vectordb_new").resolve()
+DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 
 MYSQL_CONFIG = {
     "host": os.getenv("MYSQL_HOST", "127.0.0.1"),
@@ -58,7 +58,7 @@ def _connect() -> pymysql.connections.Connection:
 
 
 def _get_vectordb(vectordb_dir: Path) -> Chroma:
-    embeddings = GeminiEmbeddings()
+    embeddings = get_embeddings()
     if not vectordb_dir.exists():
         print(f"Vector DB not found at {vectordb_dir}; creating it now.")
         vectordb_dir.mkdir(parents=True, exist_ok=True)

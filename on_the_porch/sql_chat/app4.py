@@ -145,6 +145,12 @@ def _generate_content(model, prompt, generation_config):
     fall back to a plain call so an unexpected kwarg never crashes a request.
     """
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
+    try:
+        from unified_chatbot import increment_llm_call_counter  # type: ignore
+
+        increment_llm_call_counter()
+    except Exception:
+        pass
     if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
         try:
             return model.generate_content(
@@ -680,7 +686,7 @@ def is_generic_events_list_question(question: str) -> bool:
 
     if any(m in q for m in ("tell me about", "more about", "details about", "when is the", "where is the")):
         return False
-    if '"' in q or "'" in q:
+    if re.search(r"""['"]([^'"]{4,})['"]""", q):
         return False
 
     time_hints = (
@@ -696,22 +702,9 @@ def is_generic_events_list_question(question: str) -> bool:
 
 
 def _events_list_days_ahead(question: str) -> int:
-    q = (question or "").lower()
-    if "today" in q:
-        return 1
-    if "tomorrow" in q:
-        return 2
-    if "this weekend" in q or ("weekend" in q and "next" not in q):
-        return 7
-    if "this week" in q:
-        return 7
-    if "next week" in q:
-        return 14
-    if "this month" in q:
-        return 30
-    if "next month" in q:
-        return 60
-    return 14
+    from query_plan import days_ahead_from_question  # noqa: WPS433
+
+    return days_ahead_from_question(question, default=14)
 
 
 def _fast_weekly_events_sql(days_ahead: int) -> str:
@@ -769,16 +762,22 @@ def run_generic_events_query(
             "result": {"columns": [], "rows": [], "error": str(exc)},
         }
 
-    try:
-        answer = _llm_generate_answer(
-            question,
-            sql,
-            result,
-            GEMINI_SUMMARY_MODEL,
-            conversation_history,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠️ Events answer generation failed ({exc}); using template fallback")
+    use_llm_summary = os.getenv("PREPARED_SQL_USE_LLM_SUMMARY", "false").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if use_llm_summary:
+        try:
+            answer = _llm_generate_answer(
+                question,
+                sql,
+                result,
+                GEMINI_SUMMARY_MODEL,
+                conversation_history,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Events answer generation failed ({exc}); using template fallback")
+            answer = _format_events_answer_fallback(question, result)
+    else:
         answer = _format_events_answer_fallback(question, result)
 
     if not (answer or "").strip():

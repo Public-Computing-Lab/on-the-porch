@@ -32,6 +32,12 @@ logs/
 **/chroma.sqlite3
 vectordb_new/
 on_the_porch/vectordb_new/
+vectordb_bge_v1/
+on_the_porch/vectordb_bge_v1/
+qdrant_data/
+on_the_porch/qdrant_data/
+qdrant_data_test/
+on_the_porch/qdrant_data_test/
 **/vectordb_new.zip
 
 
@@ -109,6 +115,8 @@ on_the_porch/data_ingestion/gmail_credentials.json
 on_the_porch/data_ingestion/.email_sync_state.json
 on_the_porch/data_ingestion/.sync_state.json
 on_the_porch/data_ingestion/ingestion_log.jsonl
+on_the_porch/data_ingestion/boston_data_sync/boston_sync_log.jsonl
+on_the_porch/data_ingestion/boston_data_sync/bpd_homicide_baseline.json
 on_the_porch/data_ingestion/ontheporch-ebc5a60fc214.json
 on_the_porch/data_ingestion/temp_downloads
 on_the_porch/data_ingestion/reset_table.sql

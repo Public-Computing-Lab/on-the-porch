@@ -47,12 +47,23 @@ IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
 # ============================================================================
 # File Paths Configuration
 # ============================================================================
-# Vector DB directory (main documents)
-_VECTORDB_DIR_RAW = os.getenv("VECTORDB_DIR", "../vectordb_new")
+# Vector DB directory (main documents) — resolve under on_the_porch/ so ingestion
+# and retrieval use the same store regardless of cwd (matches retrieval.py).
+_ON_THE_PORCH_DIR = _THIS_DIR.parent
+_VECTORDB_DIR_RAW = os.getenv("VECTORDB_DIR", "vectordb_new")
 if Path(_VECTORDB_DIR_RAW).is_absolute():
     VECTORDB_DIR = Path(_VECTORDB_DIR_RAW)
 else:
-    VECTORDB_DIR = (_THIS_DIR / _VECTORDB_DIR_RAW).resolve()
+    VECTORDB_DIR = (_ON_THE_PORCH_DIR / Path(_VECTORDB_DIR_RAW).name).resolve()
+
+_VECTORDB_BGE_RAW = os.getenv("VECTORDB_BGE_DIR", "vectordb_bge_v1")
+if Path(_VECTORDB_BGE_RAW).is_absolute():
+    VECTORDB_BGE_DIR = Path(_VECTORDB_BGE_RAW)
+else:
+    VECTORDB_BGE_DIR = (_ON_THE_PORCH_DIR / Path(_VECTORDB_BGE_RAW).name).resolve()
+
+EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
+ACTIVE_VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_DIR
 
 # NOTE: Calendar events are now SQL-only (weekly_events table), no vector DB needed.
 

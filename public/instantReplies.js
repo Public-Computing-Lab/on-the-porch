@@ -45,10 +45,11 @@
   function isInstant(message) {
     const raw = String(message || '').trim();
     if (!raw || raw.length > 120) return false;
-    const lower = raw.toLowerCase();
-    if (DOMAIN_HINTS.some((hint) => lower.includes(hint))) return false;
     const n = normalize(raw);
     if (!n) return false;
+    if (/^(thanks|thank you|thx|ty)\b/.test(n)) return true;
+    const lower = raw.toLowerCase();
+    if (DOMAIN_HINTS.some((hint) => new RegExp(`\\b${hint}\\b`).test(lower))) return false;
     if (EXACT.has(n)) return true;
     return PATTERNS.some((pat) => pat.test(n));
   }
