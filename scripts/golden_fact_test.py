@@ -61,20 +61,20 @@ def check_transcript_vectordb() -> tuple[bool, str]:
 def _run_case(case: GoldenCase) -> tuple[bool, str]:
     from sql_chat import app4, prepared_sql
 
-    hit = prepared_sql.match_prepared_sql(case.question)
-    if hit is None:
-        return False, f"no prepared match (expected {case.expect_intent})"
-    if hit.intent != case.expect_intent:
-        return False, f"intent {hit.intent!r} != {case.expect_intent!r}"
+    out = prepared_sql.run_prepared_sql(case.question, app4._execute_sql)
+    if out is None:
+        hit = prepared_sql.match_prepared_sql(case.question)
+        if hit is None:
+            return False, f"no prepared match (expected {case.expect_intent})"
+        return False, f"prepared run failed (expected {case.expect_intent})"
+    if out.get("prepared_intent") != case.expect_intent:
+        return False, f"intent {out.get('prepared_intent')!r} != {case.expect_intent!r}"
 
-    result = app4._execute_sql(hit.sql)
+    result = out.get("result") or {}
     if result.get("error"):
         return False, f"SQL error: {result['error']}"
 
-    answer = hit.answer_fn(case.question, result)
-    answer = prepared_sql.validate_prepared_answer(
-        answer, result, prepared_intent=hit.intent,
-    )
+    answer = out.get("answer", "")
     err = case.check(answer, result)
     if err:
         return False, err

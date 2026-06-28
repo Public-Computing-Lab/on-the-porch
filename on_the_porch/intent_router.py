@@ -35,6 +35,11 @@ _CRIME_HINTS = (
     "safety incident", "violence", "violent", "police report",
 )
 _311_HINTS = ("311", "service request", "service requests", "city complaint")
+_311_ISSUE_HINTS = (
+    "pothole", "potholes", "complaint", "complaints", "trash", "graffiti",
+    "rodent", "rodents", "rats", "rat ", " rat", "snow", "ice", "plow",
+    "streetlight", "street light", "missed pickup", "illegal dumping", "dumping",
+)
 _STATS_HINTS = (
     "how many", "count", "number of", "total", "statistics", "stats",
     "trend", "trends", "rate", "compare", "comparison", "breakdown",
@@ -197,9 +202,7 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
         return _base_plan(mode="sql", intent="911_unavailable", confidence=0.95, k=5)
 
     # 311 stats → sql (before events — "this week" appears in both)
-    if any(h in q for h in _311_HINTS) or any(
-        h in q for h in ("pothole", "potholes", "complaint", "complaints", "trash", "graffiti")
-    ):
+    if any(h in q for h in _311_HINTS) or any(h in q for h in _311_ISSUE_HINTS):
         if _mentions_opinion(q) and _mentions_stats(q):
             return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
         return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)

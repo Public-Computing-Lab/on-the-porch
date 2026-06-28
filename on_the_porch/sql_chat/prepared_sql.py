@@ -767,6 +767,11 @@ _311_DOMAIN_HINTS = (
     "illegal dumping",
 )
 
+_STATS_COUNT_HINTS = (
+    "how many", "how much", "count", "number of", "total",
+    "a lot of", "are there a lot", "are there many", "how bad", "how common",
+)
+
 
 def _match_911(question: str) -> Optional[PreparedMatch]:
     """Boston 911 dispatch data is not in our database — return a clear static answer."""
@@ -801,15 +806,15 @@ def _sql_crime_shooting_count(days: int) -> str:
 
 def _match_311(question: str) -> Optional[PreparedMatch]:
     q = (question or "").lower()
-    if not any(h in q for h in _311_DOMAIN_HINTS):
+    issue_terms = _issue_search_terms(question)
+    if not any(h in q for h in _311_DOMAIN_HINTS) and not issue_terms:
         return None
     days, period = _period_from_question(question, 7)
 
-    if any(h in q for h in ("how many", "count", "number of", "total")):
+    if any(h in q for h in _STATS_COUNT_HINTS):
         generic_311 = any(
             h in q for h in ("311", "service request", "service requests", "city complaint")
         )
-        issue_terms = _issue_search_terms(question)
         if issue_terms and not generic_311:
             label = issue_terms[0].replace("_", " ") + " 311 requests"
             return PreparedMatch(
@@ -827,6 +832,15 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
                     question, result, label="311 service requests", period=period,
                 ),
             )
+    if issue_terms and any(h in q for h in ("problem", "issues", "bad", "worse", "common")):
+        label = issue_terms[0].replace("_", " ") + " 311 requests"
+        return PreparedMatch(
+            intent="311_issue_count",
+            sql=_sql_311_issue_count(issue_terms, days),
+            answer_fn=lambda question, result: _format_count_answer(
+                question, result, label=label, period=period,
+            ),
+        )
     if any(h in q for h in ("top", "most common", "common", "breakdown", "types", "issues")):
         return PreparedMatch(
             intent="311_top_types",
@@ -867,7 +881,10 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     days, period = _period_from_question(question, 30)
     calendar_year = "this year" in q
 
-    if any(h in q for h in ("how many", "count", "number of", "total", "stats")):
+    stats_asked = any(h in q for h in _STATS_COUNT_HINTS) or any(
+        h in q for h in ("recently", "lately", "these days")
+    )
+    if stats_asked:
         if any(h in q for h in ("shooting", "shootings", "shots fired", "gun violence")):
             shoot_def = "incidents flagged shooting=1 in BPD crime reports"
             return PreparedMatch(
@@ -934,6 +951,73 @@ def match_prepared_sql(question: str) -> Optional[PreparedMatch]:
     return None
 
 
+_COUNT_INTENTS = frozenset({
+    "311_weekly_count",
+    "311_issue_count",
+    "311_top_types",
+    "311_open",
+    "311_recent",
+    "crime_monthly_count",
+    "crime_shooting_count",
+    "crime_homicide_count",
+    "crime_by_offense",
+    "911_unavailable",
+})
+
+_OPINION_MARKERS = (
+    "what do people", "what do residents", "how do people", "how do residents",
+    "what are people saying", "residents say", "residents raise", "what concerns",
+    "concerns do", "community feel", "opinion", "perspective",
+)
+
+
+def has_opinion_angle(question: str) -> bool:
+    q = (question or "").lower()
+    return any(h in q for h in _OPINION_MARKERS)
+
+
+def is_factual_db_question(question: str) -> bool:
+    """Questions that must be answered from executed SQL, never invented by an LLM."""
+    if match_prepared_sql(question):
+        return True
+    if has_opinion_angle(question):
+        return False
+    q = (question or "").lower()
+    civic = any(h in q for h in _311_DOMAIN_HINTS) or any(
+        h in q
+        for h in (
+            "crime", "crimes", "shooting", "shootings", "gun violence", "homicide",
+            "incident", "offense", "assault", "robbery", "911",
+        )
+    )
+    stats = any(h in q for h in _STATS_COUNT_HINTS)
+    return civic and stats
+
+
+def factual_no_match_message(question: str) -> str:
+    return (
+        "I can answer that from synced Boston Open Data, but I need a clearer civic "
+        "topic or time range. For example: 'How many pothole complaints in Dorchester "
+        "this month?' or 'How many shootings in Dorchester in the last 30 days?'"
+    )
+
+
+def validate_sql_numeric_answer(answer: str, result: Dict[str, Any]) -> str:
+    """Align any SQL-backed answer's lead count with query results."""
+    count = _first_count_from_result(result)
+    if count is None:
+        return answer
+    bold = _bold_counts_in_answer(answer)
+    if bold and bold[0] == count:
+        return answer
+    if not bold:
+        return answer
+    return (
+        f"The database shows **{count:,}** matching records in Dorchester "
+        "(based on the latest synced Boston Open Data)."
+    )
+
+
 def is_prepared_sql_enabled() -> bool:
     return os.getenv("PREPARED_SQL_ENABLED", "true").strip().lower() in (
         "1", "true", "yes",
@@ -961,9 +1045,11 @@ def run_prepared_sql(
         print(f"  ⚠️ Prepared SQL failed ({hit.intent}): {exc}")
         return None
 
-    use_llm = os.getenv("PREPARED_SQL_USE_LLM_SUMMARY", "false").strip().lower() in (
-        "1", "true", "yes",
-    ) or hit.intent == "event_by_name"
+    use_llm = hit.intent == "event_by_name" or (
+        hit.intent not in _COUNT_INTENTS
+        and os.getenv("PREPARED_SQL_USE_LLM_SUMMARY", "false").strip().lower()
+        in ("1", "true", "yes")
+    )
     answer = ""
     if use_llm:
         try:
@@ -993,6 +1079,7 @@ def run_prepared_sql(
         "sql": hit.sql,
         "result": result,
         "prepared_intent": hit.intent,
+        "db_backed": True,
     }
     if hit.intent == "event_by_name":
         out["event_sources"] = build_event_sources(result.get("rows") or [], question)

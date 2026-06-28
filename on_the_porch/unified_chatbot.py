@@ -832,6 +832,17 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
     if not isinstance(query_plan, dict):
         query_plan = build_query_plan(question, mode=mode).to_dict()
 
+    # DB-first: prepared catalog hits must use SQL execution, not RAG-only narration.
+    try:
+        from sql_chat import prepared_sql as _prep  # noqa: WPS433
+
+        if _prep.match_prepared_sql(question) and not _prep.has_opinion_angle(question):
+            mode = "sql"
+        elif _prep.match_prepared_sql(question) and mode == "rag":
+            mode = "hybrid"
+    except Exception:
+        pass
+
     return {
         "mode": mode,
         "transcript_tags": tags if isinstance(tags, list) or tags is None else None,
@@ -949,11 +960,11 @@ def _try_fast_hybrid_stitch(
     sql_part: Dict[str, Any],
     rag_part: Dict[str, Any],
 ) -> Optional[str]:
-    """When SQL used prepared facts, stitch RAG narrative without a merge LLM call."""
+    """When SQL used DB-backed facts, stitch RAG narrative without a merge LLM call."""
     sql_part = _finalize_prepared_sql_out(dict(sql_part))
-    prepared_intent = sql_part.get("prepared_intent")
+    db_backed = sql_part.get("db_backed") or sql_part.get("prepared_intent")
     sql_answer = (sql_part.get("answer") or "").strip()
-    if not prepared_intent or not sql_answer:
+    if not db_backed or not sql_answer:
         return None
     rag_answer = (rag_part.get("answer") or "").strip()
     if not rag_answer or rag_answer == "No relevant information found.":
@@ -1386,6 +1397,24 @@ def _run_sql(
     if prepared is not None:
         return _finalize_prepared_sql_out(prepared)
 
+    # Factual civic counts must come from the database — never LLM-invented SQL or numbers.
+    if prepared_sql.is_factual_db_question(question):
+        if app4.is_generic_events_list_question(question):
+            try:
+                out = app4.run_generic_events_query(question, conversation_history)
+                out["db_backed"] = True
+                if apply_fallback:
+                    out["answer"] = _apply_sql_fallback_if_needed(question, out.get("answer", ""))
+                return out
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ⚠️ Fast events path failed ({exc})")
+        return {
+            "answer": prepared_sql.factual_no_match_message(question),
+            "sql": "",
+            "result": {"columns": [], "rows": []},
+            "db_backed": False,
+        }
+
     if app4.is_generic_events_list_question(question):
         try:
             out = app4.run_generic_events_query(question, conversation_history)
@@ -1482,7 +1511,8 @@ def _run_sql(
             )
     if apply_fallback:
         answer = _apply_sql_fallback_if_needed(question, answer)
-    return {"answer": answer, "sql": final_sql, "result": result}
+    answer = prepared_sql.validate_sql_numeric_answer(answer, result)
+    return {"answer": answer, "sql": final_sql, "result": result, "db_backed": bool(result.get("rows"))}
 
 
 def _run_hybrid_parts(
