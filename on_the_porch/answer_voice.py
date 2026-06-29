@@ -333,6 +333,17 @@ def fix_unavailable_data_claims(
     return out.strip()
 
 
+def _prepared_intent_mentions_911(prepared_intent: Optional[str]) -> bool:
+    if not prepared_intent:
+        return False
+    if prepared_intent == "911_unavailable":
+        return True
+    if prepared_intent.startswith("compound:"):
+        topics = prepared_intent.split(":", 1)[-1]
+        return any(topic.strip() == "911" for topic in topics.split(","))
+    return False
+
+
 def polish_conversational_answer(
     answer: str,
     conversation_history: Optional[List[Dict[str, str]]] = None,
@@ -341,7 +352,7 @@ def polish_conversational_answer(
     prepared_intent: Optional[str] = None,
 ) -> str:
     blocks: List[Dict[str, Any]] = list(synthesis_blocks or [])
-    if prepared_intent and "911" in str(prepared_intent):
+    if _prepared_intent_mentions_911(prepared_intent):
         if not any(b.get("intent") == "911_unavailable" for b in blocks):
             blocks.append({
                 "intent": "911_unavailable",

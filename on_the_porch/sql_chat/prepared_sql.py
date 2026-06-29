@@ -490,10 +490,31 @@ def _sql_311_weekly_count(window: PeriodWindow) -> str:
     )
 
 
-def _sql_311_top_types(window: PeriodWindow) -> str:
-    if window.calendar_ym and os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
+def _sql_311_top_types_live(window: PeriodWindow) -> str:
+    """Top 311 issue types from the live table (bypasses mv_311_weekly)."""
+    issue = "COALESCE(NULLIF(`service_name`, ''), NULLIF(`case_topic`, ''))"
+    return (
+        f"SELECT {issue} AS issue_type, COUNT(*) AS cnt "
+        "FROM `service_requests_311` "
+        f"WHERE {_DORCHESTER_311} "
+        f"AND {_date_column_filter('open_date', window)} "
+        f"AND {issue} IS NOT NULL AND {issue} <> '' "
+        f"GROUP BY {issue} ORDER BY cnt DESC LIMIT 10"
+    )
+
+
+def _materialized_311_views_enabled() -> bool:
+    return os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
         "1", "true", "yes",
-    ):
+    )
+
+
+def _sql_uses_mv_311_weekly(sql: str) -> bool:
+    return "mv_311_weekly" in (sql or "")
+
+
+def _sql_311_top_types(window: PeriodWindow) -> str:
+    if window.calendar_ym and _materialized_311_views_enabled():
         year, month = window.calendar_ym.split("-")
         next_y, next_m = int(year), int(month) + 1
         if next_m > 12:
@@ -508,9 +529,7 @@ def _sql_311_top_types(window: PeriodWindow) -> str:
             "GROUP BY issue_type ORDER BY cnt DESC LIMIT 10"
         )
     days = max(1, min(window.days, 365))
-    if os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    ):
+    if _materialized_311_views_enabled():
         weeks = max(1, min((days + 6) // 7, 52))
         return (
             "SELECT issue_type, SUM(request_count) AS cnt "
@@ -519,15 +538,37 @@ def _sql_311_top_types(window: PeriodWindow) -> str:
             "AND issue_type IS NOT NULL AND issue_type <> '' "
             "GROUP BY issue_type ORDER BY cnt DESC LIMIT 10"
         )
-    issue = "COALESCE(NULLIF(`service_name`, ''), NULLIF(`case_topic`, ''))"
-    return (
-        f"SELECT {issue} AS issue_type, COUNT(*) AS cnt "
-        "FROM `service_requests_311` "
-        f"WHERE {_DORCHESTER_311} "
-        f"AND {_date_column_filter('open_date', window)} "
-        f"AND {issue} IS NOT NULL AND {issue} <> '' "
-        f"GROUP BY {issue} ORDER BY cnt DESC LIMIT 10"
+    return _sql_311_top_types_live(window)
+
+
+def _maybe_fallback_mv_311_sql(
+    sql: str,
+    question: str,
+) -> Optional[str]:
+    """When mv_311_weekly is empty, query service_requests_311 instead."""
+    if not _sql_uses_mv_311_weekly(sql):
+        return None
+    window = _resolve_period(question, 7)
+    return _sql_311_top_types_live(window)
+
+
+def _execute_sql_with_mv_311_fallback(
+    execute_sql: Callable[[str], Dict[str, Any]],
+    sql: str,
+    question: str,
+) -> tuple[Dict[str, Any], str]:
+    result = execute_sql(sql)
+    rows = result.get("rows") or []
+    if rows or not _sql_uses_mv_311_weekly(sql):
+        return result, sql
+    fallback_sql = _maybe_fallback_mv_311_sql(sql, question)
+    if not fallback_sql or fallback_sql == sql:
+        return result, sql
+    print(
+        "\n[Prepared SQL — mv_311_weekly empty, falling back to service_requests_311]\n"
+        f"{fallback_sql}\n"
     )
+    return execute_sql(fallback_sql), fallback_sql
 
 
 def _sql_311_issue_recent(terms: tuple, window: PeriodWindow) -> str:
@@ -1132,6 +1173,27 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
                 question, result, label=label, period=period,
             ),
         )
+    generic_311 = any(
+        h in q for h in ("311", "service request", "service requests", "city complaint")
+    )
+    exploratory = any(
+        phrase in q
+        for phrase in (
+            "tell me about", "about the", "what are the", "what's going on",
+            "whats going on", "give me an overview", "overview of",
+        )
+    )
+    if exploratory and generic_311 and any(
+        h in q for h in ("issue", "issues", "request", "requests", "complaint", "complaints")
+    ):
+        return PreparedMatch(
+            intent="311_count_with_types",
+            sql=_sql_311_weekly_count(window),
+            supplemental_sql=_sql_311_top_types(window),
+            answer_fn=lambda question, result: _format_count_answer(
+                question, result, label="311 service requests", period=period,
+            ),
+        )
     if any(h in q for h in ("top", "most common", "common", "breakdown", "types", "issues")):
         return PreparedMatch(
             intent="311_top_types",
@@ -1436,11 +1498,13 @@ def _execute_prepared_hit(
     *,
     supplemental_sql: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    result = execute_sql(hit.sql)
+    result, _sql_used = _execute_sql_with_mv_311_fallback(execute_sql, hit.sql, question)
     supplemental_result: Optional[Dict[str, Any]] = None
     extra_sql = supplemental_sql or hit.supplemental_sql
     if extra_sql:
-        supplemental_result = execute_sql(extra_sql)
+        supplemental_result, _ = _execute_sql_with_mv_311_fallback(
+            execute_sql, extra_sql, question,
+        )
     return result, supplemental_result
 
 
@@ -1704,22 +1768,16 @@ def run_prepared_sql(
         return None
 
     print(f"\n[Prepared SQL — {hit.intent}]\n{hit.sql}\n")
-    try:
-        result = execute_sql(hit.sql)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠️ Prepared SQL failed ({hit.intent}): {exc}")
-        return None
-
-    supplemental_result: Optional[Dict[str, Any]] = None
     supplemental_sql = hit.supplemental_sql
     if supplemental_sql is None and should_include_311_breakdown(question, hit.intent):
         supplemental_sql = _sql_311_top_types(_resolve_period(question, 7))
-    if supplemental_sql:
-        try:
-            print(f"\n[Prepared SQL — {hit.intent} supplemental]\n{supplemental_sql}\n")
-            supplemental_result = execute_sql(supplemental_sql)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Prepared SQL supplemental failed ({hit.intent}): {exc}")
+    try:
+        result, supplemental_result = _execute_prepared_hit(
+            hit, question, execute_sql, supplemental_sql=supplemental_sql,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Prepared SQL failed ({hit.intent}): {exc}")
+        return None
 
     use_llm = _prepared_should_use_llm(hit)
     answer = ""

@@ -1,7 +1,8 @@
 """Gunicorn configuration for the RethinkAI API (production server).
 
 Run with:
-    gunicorn -c api/gunicorn_conf.py api_v2:app
+    gunicorn -c api/gunicorn.conf.py api_v2:app
+    gunicorn -c gunicorn.conf.py api_v2:app   # DreamHost / legacy cwd
 or simply:
     ./start_api.sh
 
