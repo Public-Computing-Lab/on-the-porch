@@ -88,10 +88,10 @@ GOLDEN_CASES: List[GoldenCase] = [
         "crime_shooting_count",
         lambda answer, result: (
             None
-            if "30 days" in answer.lower()
+            if "last month" in answer.lower()
             and _extract_int(answer) is not None
             and "did not find exact" not in answer.lower()
-            else "expected 30-day period and a bold count without hedging opener"
+            else "expected last-month phrasing and a bold count without hedging opener"
         ),
     ),
     GoldenCase(

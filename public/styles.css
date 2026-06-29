@@ -1382,8 +1382,11 @@ body[data-events-collapsed='true'] .events-resizer {
 }
 
 .message.user {
-  justify-content: flex-end;
+  align-self: flex-end;
+  justify-content: flex-start;
   flex-direction: row-reverse;
+  width: auto;
+  max-width: 100%;
 }
 
 .message.assistant {
@@ -2514,9 +2517,14 @@ body[data-theme='light'] ::-webkit-scrollbar-thumb {
     justify-content: flex-start;
   }
 
-  .message,
-  .message.user {
+  .message {
     width: 100%;
+  }
+
+  .message.user {
+    align-self: flex-end;
+    width: auto;
+    max-width: 100%;
   }
 
   .conversation-empty-grid {

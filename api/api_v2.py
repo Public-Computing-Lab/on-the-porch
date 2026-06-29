@@ -73,10 +73,13 @@ from unified_chatbot import (  # noqa: E402
     _run_rag,
     _run_sql,
     build_retrieval_cache,
+    build_retrieval_cache_from_result,
     build_small_talk_result,
     create_empty_cache,
     is_small_talk,
     apply_post_stream_fallback,
+    resolve_effective_question,
+    run_execution_pipeline,
     should_apply_boston_gov_fallback,
     stream_agent_response,
     try_boston_gov_enrichment,
@@ -1940,7 +1943,7 @@ def _execute_agent_response(
     has_cache = bool(cache and cache.get("mode"))
 
     if is_small_talk(message):
-        result = build_small_talk_result(message, cache)
+        result = build_small_talk_result(message, cache, conversation_history)
         _log_agent_metrics(
             mode=result.get("mode", "chitchat"),
             cache_hit=False,
@@ -1971,8 +1974,17 @@ def _execute_agent_response(
             return out
 
     if has_history or has_cache:
-        history_check = _check_if_needs_new_data(message, conversation_history, cache)
+        effective_message, force_fresh = resolve_effective_question(
+            message, conversation_history, cache,
+        )
+        if force_fresh:
+            history_check = {"needs_new_data": True, "reason": "rewritten follow-up"}
+        else:
+            history_check = _check_if_needs_new_data(
+                effective_message, conversation_history, cache,
+            )
     else:
+        effective_message, force_fresh = message, False
         history_check = {"needs_new_data": True, "reason": "No history or cache"}
 
     if not history_check.get("needs_new_data", True) and (has_history or has_cache):
@@ -1992,10 +2004,51 @@ def _execute_agent_response(
         )
         return out
 
-    plan = _route_question(message)
+    plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
+
+    pipeline_out = run_execution_pipeline(
+        effective_message, conversation_history, routing_plan=plan,
+    )
+    if pipeline_out is not None:
+        mode, result, pipeline_metrics = pipeline_out
+        answer = result.get("answer", "I couldn't find an answer to your question.")
+        next_cache = build_retrieval_cache_from_result(mode, message, result)
+        sources = extract_sources(mode, result)
+        if semantic_eligible and _is_cacheable_semantic_answer(answer):
+            _semantic_cache.put(
+                message,
+                {
+                    "answer": answer,
+                    "mode": mode,
+                    "sources": sources,
+                    "agent_result": result,
+                },
+            )
+        _log_agent_metrics(
+            mode=mode,
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+            extra={
+                k: v
+                for k, v in {
+                    **pipeline_metrics,
+                    "prepared_intent": result.get("prepared_intent"),
+                }.items()
+                if v is not None and v != ""
+            } or None,
+        )
+        return {
+            "answer": answer,
+            "mode": mode,
+            "sources": sources,
+            "result": result,
+            "retrieval_cache": next_cache,
+        }
+
     if mode == "sql":
-        result = _run_sql(message, conversation_history)
+        result = _run_sql(effective_message, conversation_history)
         next_cache = build_retrieval_cache(
             mode="sql",
             question=message,
@@ -2004,7 +2057,7 @@ def _execute_agent_response(
             sql_query=result.get("sql"),
         )
     elif mode == "rag":
-        result = _run_rag(message, plan, conversation_history)
+        result = _run_rag(effective_message, plan, conversation_history)
         next_cache = build_retrieval_cache(
             mode="rag",
             question=message,
@@ -2013,7 +2066,7 @@ def _execute_agent_response(
             rag_metadata=result.get("metadata"),
         )
     else:
-        result = _run_hybrid(message, plan, conversation_history)
+        result = _run_hybrid(effective_message, plan, conversation_history)
         sql_part = result.get("sql", {}) if isinstance(result.get("sql"), dict) else {}
         rag_part = result.get("rag", {}) if isinstance(result.get("rag"), dict) else {}
         next_cache = build_retrieval_cache(
@@ -2791,19 +2844,16 @@ def post_conversation_message_stream(thread_id: str):
                 return
 
         if full_answer:
-            blocking_boston = (
-                not Config.BOSTON_GOV_ASYNC_ENABLED or Config.BOSTON_GOV_BLOCKING
+            enriched = apply_post_stream_fallback(
+                message,
+                full_answer,
+                mode,
+                prepared_intent=result_payload.get("prepared_intent"),
+                conversation_history=conversation_history,
             )
-            if blocking_boston:
-                enriched = apply_post_stream_fallback(
-                    message,
-                    full_answer,
-                    mode,
-                    prepared_intent=result_payload.get("prepared_intent"),
-                )
-                if enriched != full_answer:
-                    yield _sse({"type": "correction", "text": enriched})
-                    full_answer = enriched
+            if enriched != full_answer:
+                yield _sse({"type": "correction", "text": enriched})
+                full_answer = enriched
             if (
                 semantic_eligible
                 and mode != "semantic_cache"

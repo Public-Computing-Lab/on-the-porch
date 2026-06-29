@@ -129,46 +129,19 @@ def is_small_talk(message: str) -> bool:
 
 def small_talk_response(message: str) -> str:
     """Instant reply for greetings and other brief non-data messages."""
-    n = _normalize_small_talk(message)
-    if any(x in n for x in ("how are you", "how r u", "how is it going", "how's it going")):
-        return (
-            "I'm doing well — thanks for asking! I'm here to help with Dorchester community "
-            "info: events, 311 activity, safety trends, and neighborhood news. "
-            "What would you like to know?"
-        )
-    if n.startswith(("thanks", "thank you", "thx", "ty")) or n in ("thanks", "thank you", "thx", "ty"):
-        return (
-            "You're welcome! Ask anytime about events, city services, safety, or what's "
-            "happening in the neighborhood."
-        )
-    if n.startswith(("bye", "goodbye", "cya", "see ya", "see you")):
-        return "Goodbye! Come back anytime you have questions about Dorchester."
-    if "who are you" in n or "what are you" in n or "what can you" in n or "what do you do" in n:
-        return (
-            "I'm your Dorchester community assistant. I can help with local events, 311 requests, "
-            "safety data, and neighborhood news. Try “Events this week” or “311 activity” to get started."
-        )
-    if n.startswith("good "):
-        return (
-            "Good to see you! Ask me about Dorchester events, services, safety, or neighborhood trends — "
-            "what's on your mind?"
-        )
-    if n in ("help",) or "what can you help" in n or "how does this work" in n or "how do i use this" in n or n == "what is this":
-        return (
-            "I can answer questions about Dorchester events, 311 service requests, safety trends, "
-            "and community news. Try one of the suggestion chips below, or ask in your own words."
-        )
-    return (
-        "Hi! I'm here to help with Dorchester community questions — events, services, safety, "
-        "and local news. What would you like to know?"
-    )
+    from answer_voice import base_chitchat_reply  # noqa: WPS433
+
+    return base_chitchat_reply(message)
 
 
 def build_small_talk_result(
     message: str,
     retrieval_cache: Optional[Dict[str, Any]] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    answer = small_talk_response(message)
+    from answer_voice import contextual_chitchat_reply  # noqa: WPS433
+
+    answer = contextual_chitchat_reply(message, conversation_history)
     cache = retrieval_cache or create_empty_cache()
     return {
         "answer": answer,
@@ -624,14 +597,105 @@ def summarize_cache(cache: Optional[Dict[str, Any]]) -> str:
 
 _TIME_SHIFT_HINTS = (
     "last month", "last week", "next month", "next week", "last year",
+    "this week", "this weekend", "this month", "today", "tomorrow",
     "different year", "instead of", "compare to", "compared to", "versus",
     "vs ", "different neighborhood", "other neighborhood",
 )
 
+_EVENT_QUESTION_HINTS = (
+    "event", "events", "happening", "going on", "what's on", "whats on",
+    "calendar", "things to do", "workshop", "workshops", "what is on",
+)
+_SCHEDULE_QUESTION_HINTS = (
+    "this week", "next week", "this weekend", "weekend", "today", "tomorrow",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+)
+_311_QUESTION_HINTS = (
+    "311", "service request", "service requests", "pothole", "potholes",
+    "missed trash", "streetlight", "street light", "city complaint",
+)
+_CRIME_QUESTION_HINTS = (
+    "crime", "shooting", "shootings", "homicide", "homicides", "murder",
+    "assault", "robbery", "gun violence", "shots fired",
+)
+_STATS_QUESTION_HINTS = (
+    "how many", "count", "number of", "total", "statistics", "stats",
+)
+
+
+def _looks_like_events_question(question: str) -> bool:
+    q = (question or "").lower()
+    if any(h in q for h in _EVENT_QUESTION_HINTS):
+        return True
+    if any(h in q for h in _SCHEDULE_QUESTION_HINTS):
+        return any(h in q for h in ("what", "happening", "going on", "event", "on"))
+    return False
+
+
+def _looks_like_311_stats_question(question: str) -> bool:
+    q = (question or "").lower()
+    if not any(h in q for h in _311_QUESTION_HINTS):
+        return False
+    return any(h in q for h in _STATS_QUESTION_HINTS) or "how many" in q
+
+
+def _looks_like_crime_stats_question(question: str) -> bool:
+    q = (question or "").lower()
+    if not any(h in q for h in _CRIME_QUESTION_HINTS):
+        return False
+    return any(h in q for h in _STATS_QUESTION_HINTS)
+
+
+def _sql_query_text(cache: Dict[str, Any]) -> str:
+    return (cache.get("sql_query") or "").lower()
+
+
+def _cache_has_events_data(cache: Dict[str, Any]) -> bool:
+    sql = _sql_query_text(cache)
+    if "weekly_events" in sql or "events_materialized" in sql:
+        return True
+    result = cache.get("sql_result") or {}
+    rows = result.get("rows") or []
+    if not rows:
+        return False
+    if isinstance(rows[0], dict):
+        return any(k in rows[0] for k in ("event_name", "start_date", "event_date"))
+    return False
+
+
+def _cache_has_311_data(cache: Dict[str, Any]) -> bool:
+    sql = _sql_query_text(cache)
+    if "service_requests_311" in sql or "mv_311" in sql:
+        return True
+    result = cache.get("sql_result") or {}
+    rows = result.get("rows") or []
+    if not rows or not isinstance(rows[0], dict):
+        return False
+    return any(k in rows[0] for k in ("cnt", "count", "issue_type"))
+
+
+def _cache_has_crime_data(cache: Dict[str, Any]) -> bool:
+    sql = _sql_query_text(cache)
+    if "crime_incident_reports" in sql:
+        return True
+    return False
+
+
+def _followup_topic_requires_fresh_data(
+    question: str,
+    cache: Dict[str, Any],
+) -> Optional[str]:
+    """Return a reason when the cache topic cannot answer the new question."""
+    if _looks_like_events_question(question) and not _cache_has_events_data(cache):
+        return "rule: events question but cache has no events data"
+    if _looks_like_311_stats_question(question) and not _cache_has_311_data(cache):
+        return "rule: 311 question but cache has no 311 data"
+    if _looks_like_crime_stats_question(question) and not _cache_has_crime_data(cache):
+        return "rule: crime stats question but cache has no crime data"
+    return None
+
 _REFERENTIAL_PATTERNS = (
     r"^(the\s+)?(first|second|third|fourth|fifth|last)\s+one\b",
-    r"^tell me more\b",
-    r"^more (about|on|info)\b",
     r"^what about (that|it|them|this)\b",
     r"^can you explain\b",
     r"^could you explain\b",
@@ -639,6 +703,72 @@ _REFERENTIAL_PATTERNS = (
     r"^expand on\b",
     r"^go deeper\b",
 )
+
+_311_EXPANSION_PATTERNS = (
+    r"tell me more",
+    r"more (about|on|info)",
+    r"break.*down",
+    r"what (else|were they|types)",
+    r"go deeper",
+    r"expand on",
+)
+
+
+def _period_from_conversation_context(
+    retrieval_cache: Optional[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> str:
+    prior = (retrieval_cache or {}).get("question") or ""
+    if not prior and conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") == "user":
+                prior = msg.get("content", "")
+                break
+    pl = (prior or "").lower()
+    if "last month" in pl:
+        return "last month"
+    if "this month" in pl:
+        return "this month"
+    if "last week" in pl:
+        return "last week"
+    if "this week" in pl:
+        return "this week"
+    return "in the last 30 days"
+
+
+def resolve_effective_question(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, bool]:
+    """Rewrite vague follow-ups into concrete queries. Returns (question, force_fresh)."""
+    q = (message or "").strip()
+    ql = q.lower()
+    if not ql:
+        return q, False
+
+    if any(re.search(pat, ql) for pat in _311_EXPANSION_PATTERNS):
+        if any(h in ql for h in ("311", "service request", "those requests", "these requests")):
+            period = _period_from_conversation_context(retrieval_cache, conversation_history)
+            rewritten = (
+                f"What are the top 311 issue types reported in Dorchester {period}, "
+                "with counts?"
+            )
+            return rewritten, True
+
+    return q, False
+
+
+def _looks_like_issue_specific_311(question: str) -> bool:
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps._issue_search_terms(question):
+            ql = (question or "").lower()
+            return any(h in ql for h in ("recent", "latest", "reports", "any "))
+    except Exception:
+        pass
+    return False
 
 
 def _fast_followup_needs_new_data(
@@ -680,6 +810,10 @@ def _fast_followup_needs_new_data(
             "reason": "rule: question requests a different time period or comparison",
         }
 
+    topic_mismatch = _followup_topic_requires_fresh_data(question, cache)
+    if topic_mismatch:
+        return {"needs_new_data": True, "reason": topic_mismatch}
+
     cache_has_data = bool(
         cache.get("sql_result")
         or cache.get("rag_chunks")
@@ -687,6 +821,25 @@ def _fast_followup_needs_new_data(
     )
     if not cache_has_data:
         return None
+
+    if any(re.search(pat, q) for pat in _311_EXPANSION_PATTERNS):
+        if any(h in q for h in ("311", "service request", "those requests", "these requests")):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: expand 311 breakdown requires fresh lookup",
+            }
+
+    if _looks_like_issue_specific_311(question):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: issue-specific 311 lookup",
+        }
+
+    if any(re.search(pat, q) for pat in (r"^tell me more\b", r"^more (about|on|info)\b")):
+        return {
+            "needs_new_data": False,
+            "reason": "rule: referential follow-up answerable from cache",
+        }
 
     if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
         return {
@@ -867,8 +1020,9 @@ def _route_question_llm(question: str) -> Dict[str, Any]:
         "Return EXACTLY one mode: sql, rag, or hybrid.\n"
         "Events/calendar and numeric 311/crime stats → sql.\n"
         "Policy, news, and community opinions → rag.\n"
+        "Safety concerns or crime overview questions (what are the main safety issues) → hybrid.\n"
         "Both stats AND community voice → hybrid.\n"
-        "When unsure, prefer rag over hybrid.\n"
+        "When unsure about safety or crime topics, prefer hybrid over rag.\n"
         "Return ONLY JSON: mode, transcript_tags, policy_sources, "
         "folder_categories, k.\n"
     )
@@ -956,6 +1110,110 @@ def _finalize_prepared_sql_out(out: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def run_execution_pipeline(
+    question: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    routing_plan: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Plan → execute → synthesize. Returns (mode, result, metrics) or None for legacy."""
+    from plan_builder import build_execution_plan, is_execution_pipeline_enabled  # noqa: WPS433
+    from plan_executor import execute_plan  # noqa: WPS433
+    from answer_synthesizer import synthesize_and_validate  # noqa: WPS433
+    import sql_chat.app4 as app4  # noqa: WPS433
+
+    if not is_execution_pipeline_enabled():
+        return None
+
+    routing = routing_plan or _route_question(question)
+    plan_started = time.perf_counter()
+    plan = build_execution_plan(question, routing)
+    plan_ms = int((time.perf_counter() - plan_started) * 1000)
+    if plan is None:
+        return None
+
+    facts = execute_plan(
+        plan,
+        question,
+        execute_sql=app4._execute_sql,
+        retrieve_rag=_retrieve_rag,
+    )
+
+    synth_started = time.perf_counter()
+    display_q = question
+    if conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") == "user" and (msg.get("content") or "").strip():
+                display_q = msg["content"].strip()
+                break
+    answer = synthesize_and_validate(
+        question,
+        facts,
+        conversation_history=conversation_history,
+        display_question=display_q,
+    )
+    synth_ms = int((time.perf_counter() - synth_started) * 1000)
+
+    mode = plan.legacy_mode()
+    if mode == "sql":
+        answer = _apply_sql_fallback_if_needed(question, answer)
+    elif mode in {"rag", "hybrid"}:
+        answer = _apply_default_fallback_if_needed(question, answer)
+
+    result = facts.to_legacy_result(answer)
+    if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
+        result["answer"] = answer
+
+    metrics: Dict[str, Any] = {
+        "pipeline_tier": plan.tier,
+        "plan_ms": plan_ms,
+        "execute_ms": facts.execute_ms,
+        "synthesize_ms": synth_ms,
+        "prepared_intent": facts.prepared_intent,
+        "intent": routing.get("intent"),
+        "router": routing.get("router"),
+        "period_days": (routing.get("query_plan") or {}).get("period_days"),
+        "period_label": (routing.get("query_plan") or {}).get("period_label"),
+        "metric": (routing.get("query_plan") or {}).get("metric"),
+    }
+    return mode, result, metrics
+
+
+def build_retrieval_cache_from_result(
+    mode: str,
+    question: str,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Build session cache from a pipeline or legacy agent result."""
+    answer = result.get("answer", "")
+    if mode == "sql":
+        return build_retrieval_cache(
+            mode="sql",
+            question=question,
+            answer=answer,
+            sql_result=result.get("result"),
+            sql_query=result.get("sql"),
+        )
+    if mode == "rag":
+        return build_retrieval_cache(
+            mode="rag",
+            question=question,
+            answer=answer,
+            rag_chunks=result.get("chunks"),
+            rag_metadata=result.get("metadata"),
+        )
+    sql_part = result.get("sql", {}) if isinstance(result.get("sql"), dict) else {}
+    rag_part = result.get("rag", {}) if isinstance(result.get("rag"), dict) else {}
+    return build_retrieval_cache(
+        mode="hybrid",
+        question=question,
+        answer=answer,
+        sql_result=sql_part.get("result"),
+        sql_query=sql_part.get("sql"),
+        rag_chunks=rag_part.get("chunks"),
+        rag_metadata=rag_part.get("metadata"),
+    )
+
+
 def _try_fast_hybrid_stitch(
     sql_part: Dict[str, Any],
     rag_part: Dict[str, Any],
@@ -997,51 +1255,21 @@ def _build_rag_prompt(
     transcript_focus = (
         _is_transcript_focused_question(question) and _has_transcript_chunks(metadatas)
     )
+    from answer_voice import format_conversation_prefix, resident_question_block, system_prompt  # noqa: WPS433
+
     if transcript_focus:
-        system_prompt = (
-            "You are a friendly assistant summarizing Dorchester community meeting transcripts.\n"
-            "Use only the provided SOURCES. Cite the source filename naturally "
-            "(e.g. 'In the October 2024 focus group meeting...').\n"
-            "Summarize what residents said about the topic in the question. "
-            "Do not claim transcripts are silent when the sources contain related comments.\n"
-            "Do not mention SQL, databases, RAG, or internal tools.\n"
-            + (
-                "\n\nYou are in a conversation. Use previous messages for context when helpful."
-                if conversation_history
-                else ""
-            )
-        )
+        system_prompt_text = system_prompt("rag_transcript", conversation_history)
     else:
-        system_prompt = (
-            "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
-            "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
-            "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n"
-            "Use only the provided SOURCES and do not add information that is not supported by the text.\n\n"
-            "If the sources partially answer the question, lead with what they do say. "
-            "Only begin with 'I did not find exact information about ...' when the sources lack relevant content.\n"
-            "When you cite sources, use the source name naturally in the sentence (e.g. 'According to CSNDC...'). "
-            "Do not use numbered source citations like (Source 1). Avoid technical jargon, and do not mention SQL, databases, RAG, "
-            "retrieval methods, or internal tools.\n"
-            "If the question involves numbers, be honest when the sources are limited and avoid inventing precise figures.\n"
-            + (
-                "\n\nYou are in a conversation. Use previous messages for context when the current question references earlier topics or asks for follow-ups."
-                if conversation_history
-                else ""
-            )
-        )
+        system_prompt_text = system_prompt("rag_general", conversation_history)
 
     user_prompt = (
         "SOURCES:\n" + context + "\n\n" +
-        "QUESTION: " + question + "\n\n" +
-        "Please answer for the user in clear, everyday language:"
+        resident_question_block(question) + "\n" +
+        "Please answer in clear, everyday language:"
     )
 
-    full_prompt = system_prompt + "\n\n"
-    if conversation_history:
-        for msg in conversation_history[-10:]:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            full_prompt += f"{role.upper()}: {content}\n\n"
+    full_prompt = system_prompt_text + "\n\n"
+    full_prompt += format_conversation_prefix(conversation_history)
     full_prompt += user_prompt
     return full_prompt, context_parts
 
@@ -1105,24 +1333,16 @@ def _build_history_prompt(
     if has_cache:
         cache_context = _build_cache_context_for_answer(retrieval_cache)
 
-    system_prompt = (
-        "You are a friendly, non-technical assistant helping people understand Dorchester community data and policies.\n"
-        "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
-        "Use clear, everyday language and imagine you are talking to a neighbor, not a technical expert.\n\n"
-        "Answer the user's question based on the conversation history and cached data provided. "
-        "Do not mention that you're using cached data or conversation history - just answer naturally as if continuing the conversation.\n"
-        "If the question asks about specific items (e.g., 'tell me more about event #2', 'what about the first one'), "
-        "use the cached data to provide detailed information about those specific items.\n"
-        "If the question references previous answers, numbers, or statistics, use those in your response.\n"
-        "If you cannot answer the user's exact question from the available information, the first line of your response must begin "
-        "with 'I did not find exact information about ...' and briefly name the missing topic. After that first line, you may share "
-        "closely related information from the available context if it helps.\n"
-        "Avoid technical jargon, and do not mention SQL, databases, RAG, retrieval methods, or internal tools."
+    from answer_voice import (  # noqa: WPS433
+        format_conversation_prefix,
+        resident_question_block,
+        system_prompt,
     )
 
+    system_prompt_text = system_prompt("history_followup", conversation_history)
     history_text = ""
     if conversation_history:
-        for msg in conversation_history[-20:]:  # Last 20 messages for context
+        for msg in conversation_history[-20:]:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role and content:
@@ -1133,10 +1353,10 @@ def _build_history_prompt(
         user_prompt += "Conversation History:\n" + history_text + "\n\n"
     if cache_context:
         user_prompt += "Available Data (from recent retrieval):\n" + cache_context + "\n\n"
-    user_prompt += "Current Question: " + question + "\n\n"
-    user_prompt += "Please answer the current question using the available information:"
+    user_prompt += resident_question_block(question)
+    user_prompt += "\nPlease answer using the available information:"
 
-    return system_prompt + "\n\n" + user_prompt
+    return system_prompt_text + "\n\n" + user_prompt
 
 
 def _build_cache_context_for_answer(cache: Dict[str, Any]) -> str:
@@ -1540,22 +1760,9 @@ def _build_hybrid_merge_prompt(
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Build the hybrid merge prompt that blends the SQL and RAG answers."""
-    merge_system = (
-        "You are a friendly, non-technical assistant explaining information about DORCHESTER ONLY to a general audience.\n"
-        "This system is configured for DORCHESTER ONLY. All data queries are automatically filtered to Dorchester only.\n"
-        "Use clear, everyday language and speak as if you are talking directly to the user.\n"
-        "You have access to both numeric data (counts, trends, patterns) and contextual information (people's experiences, policy documents, community perspectives).\n\n"
-        "Weave these together naturally into a single, cohesive answer that tells a complete story.\n"
-        "Blend the numbers with the context so the user understands both what is happening and why it matters.\n"
-        "Focus on what the information means for people in Dorchester, not on technical details or data sources.\n"
-        "If you see any data from other neighborhoods, ignore it completely and only discuss Dorchester.\n\n"
-        "Lead with any numeric facts from sql_answer exactly as given — do not contradict or hedge them. "
-        "If sql_answer already contains a count, do not begin with 'I did not find exact information'.\n"
-        "Only use that opener when sql_answer is empty and rag_answer lacks the topic.\n"
-        "Do NOT mention SQL, databases, RAG, retrieval, or any internal tools. Just speak as a helpful information bot.\n"
-        "Never invent data or trends not present in the inputs."
-        + ("\n\nYou are in a conversation. Reference previous questions naturally when it helps the user." if conversation_history else "")
-    )
+    from answer_voice import format_conversation_prefix, resident_question_block, system_prompt  # noqa: WPS433
+
+    merge_system = system_prompt("hybrid", conversation_history)
     blob = {
         "sql_answer": sql_part.get("answer"),
         "sql_result": sql_part.get("result"),
@@ -1563,15 +1770,11 @@ def _build_hybrid_merge_prompt(
         "rag_sources": [m.get("source", "?") for m in rag_part.get("metadata", [])][:10],
     }
     merge_user = (
-        "Question:\n" + question + "\n\n" +
+        resident_question_block(question) + "\n\n" +
         "Inputs (JSON):\n" + json.dumps(blob, ensure_ascii=False, default=str)
     )
     full_prompt = merge_system + "\n\n"
-    if conversation_history:
-        for msg in conversation_history[-10:]:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            full_prompt += f"{role.upper()}: {content}\n\n"
+    full_prompt += format_conversation_prefix(conversation_history)
     full_prompt += merge_user
     return full_prompt
 
@@ -1688,7 +1891,9 @@ def stream_agent_response(
     cache = retrieval_cache or create_empty_cache()
 
     if is_small_talk(message):
-        answer = small_talk_response(message)
+        from answer_voice import contextual_chitchat_reply  # noqa: WPS433
+
+        answer = contextual_chitchat_reply(message, conversation_history)
         yield ("delta", answer)
         yield ("final", {
             "answer": answer,
@@ -1702,8 +1907,17 @@ def stream_agent_response(
     has_cache = bool(cache and cache.get("mode"))
 
     if has_history or has_cache:
-        history_check = _check_if_needs_new_data(message, conversation_history, cache)
+        effective_message, force_fresh = resolve_effective_question(
+            message, conversation_history, cache,
+        )
+        if force_fresh:
+            history_check = {"needs_new_data": True}
+        else:
+            history_check = _check_if_needs_new_data(
+                effective_message, conversation_history, cache,
+            )
     else:
+        effective_message, force_fresh = message, False
         history_check = {"needs_new_data": True}
 
     # Follow-up that can be answered from history/cache.
@@ -1721,11 +1935,35 @@ def stream_agent_response(
             if not answer:
                 answer = "I encountered an error answering from the available information. Could you rephrase your question?"
                 yield ("delta", answer)
+            else:
+                from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+                answer = polish_conversational_answer(answer, conversation_history)
         yield ("final", {"answer": answer, "mode": "history", "result": {"answer": answer}, "retrieval_cache": cache})
         return
 
-    plan = _route_question(message)
+    plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
+
+    pipeline_out = run_execution_pipeline(
+        effective_message, conversation_history, routing_plan=plan,
+    )
+    if pipeline_out is not None:
+        mode, out, pipeline_metrics = pipeline_out
+        answer = out.get("answer", "")
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+        next_cache = build_retrieval_cache_from_result(mode, message, out)
+        yield ("final", {
+            "answer": answer,
+            "mode": mode,
+            "result": out,
+            "retrieval_cache": next_cache,
+            "prepared_intent": out.get("prepared_intent"),
+            "query_plan": plan.get("query_plan"),
+            "pipeline_metrics": pipeline_metrics,
+        })
+        return
 
     if mode == "sql":
         try:
@@ -1833,8 +2071,14 @@ def apply_post_stream_fallback(
     mode: str,
     *,
     prepared_intent: Optional[str] = None,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Apply Boston.gov fallback after streaming completes."""
+    from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+    answer = polish_conversational_answer(
+        answer, conversation_history, prepared_intent=prepared_intent,
+    )
     if prepared_intent:
         return answer
     if not answer:

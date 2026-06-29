@@ -50,6 +50,8 @@ _OPINION_HINTS = (
     "what are people saying", "community feel", "community thinks",
     "perspective", "opinion", "opinions", "sentiment", "concerned about",
     "what concerns", "concerns do", "residents raise", "residents say",
+    "safety concern", "safety concerns", "main concern", "main concerns",
+    "main safety", "public safety",
 )
 _POLICY_HINTS = (
     "policy", "policies", "plan", "plans", "ordinance", "zoning",
@@ -102,6 +104,8 @@ def infer_parse_failure_mode(question: str) -> str:
         if any(h in q for h in _OPINION_HINTS):
             return "hybrid"
         return "sql"
+    if "safety" in q and any(h in q for h in ("concern", "concerns", "issue", "issues", "problem")):
+        return "hybrid"
     if any(h in q for h in _POLICY_HINTS + _OPINION_HINTS + _RSS_NEWS_HINTS):
         return "rag"
     return "rag"
@@ -144,6 +148,20 @@ def _mentions_stats(q: str) -> bool:
 
 def _mentions_opinion(q: str) -> bool:
     return any(h in q for h in _OPINION_HINTS)
+
+
+def _looks_like_safety_overview(q: str) -> bool:
+    """Broad safety questions — recent crime stats plus community/transcript context."""
+    if "safety" not in q:
+        return False
+    return any(
+        h in q
+        for h in (
+            "concern", "concerns", "issue", "issues", "problem", "problems",
+            "how safe", "is it safe", "main concern", "biggest concern",
+            "public safety",
+        )
+    )
 
 
 def _mentions_rss_source(q: str) -> bool:
@@ -282,6 +300,16 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
             confidence=0.85,
             k=5,
             folder_categories=["newsletters"],
+        )
+
+    # Safety overview (before policy RAG — avoids stale plan documents)
+    if _looks_like_safety_overview(q):
+        return _base_plan(
+            mode="hybrid",
+            intent="safety_overview",
+            confidence=0.9,
+            k=5,
+            transcript_tags=["safety", "violence", "community"],
         )
 
     # Policy documents → rag

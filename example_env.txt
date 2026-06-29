@@ -35,6 +35,12 @@ AUTH_LOGIN_LOCK_THRESHOLD=5
 AUTH_LOGIN_LOCK_MINUTES=15
 AUTH_ADMIN_EMAILS=
 
+# Google OAuth sign-in (optional; leave blank to disable Google login)
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_DISCOVERY_URL=https://accounts.google.com/.well-known/openid-configuration
+GOOGLE_OAUTH_REDIRECT_URI=http://127.0.0.1:8888/auth/google/callback
+
 # Guest sessions (tab-scoped Bearer tokens; shorter TTL than registered users)
 GUEST_SESSION_HOURS=24
 SESSION_TOUCH_DEBOUNCE_SECONDS=300
@@ -91,6 +97,19 @@ SEMANTIC_CACHE_MAX=200
 # Iteration 1: prepared SQL catalog + smarter follow-up gate
 PREPARED_SQL_ENABLED=true
 PREPARED_SQL_USE_LLM_SUMMARY=false
+# Rewrite DB-backed count answers with Gemini (keeps **numbers** exact via validator)
+PREPARED_SQL_CONVERSATIONAL=true
+# Answer multi-topic questions (e.g. 311 AND 911) with one query per topic
+PREPARED_SQL_MULTI_PART=true
+# Include top 311 issue types whenever reporting a generic 311 count
+PREPARED_SQL_311_INCLUDE_TYPES=true
+
+# Plan → execute → synthesize pipeline (rules-first planner, code-only executor)
+EXECUTION_PIPELINE_ENABLED=true
+EXECUTION_LLM_PLANNER_ENABLED=true
+EXECUTION_PIPELINE_LOG=true
+EXECUTION_PIPELINE_MAX_WORKERS=4
+ANSWER_SYNTHESIS_ENABLED=true
 FAST_FOLLOWUP_GATE_ENABLED=true
 
 # Iteration 2: rule-first intent router + async Boston.gov enrichment
@@ -167,6 +186,15 @@ LANGCHAIN_API_KEY=
 LANGSMITH_API_KEY=
 LANGCHAIN_PROJECT=rethinkai-community-sentiment
 LANGSMITH_PROJECT=rethinkai-community-sentiment
+
+# ============================================================================
+# RSS ingestion
+# ============================================================================
+# Dorchester Reporter (dotnews.com) RSS — disabled until feed issues are resolved.
+RSS_DOT_REPORTER_ENABLED=false
+
+# Optional: limit DotNews PDF backfill to issues on/after this date (YYYY-MM-DD)
+# DOTNEWS_CUTOFF_DATE=2024-01-01
 
 # ============================================================================
 # Data ingestion (Google Drive + email)

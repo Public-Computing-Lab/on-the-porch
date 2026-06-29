@@ -45,10 +45,12 @@ from retrieval import get_embeddings, resolve_vectordb_dir  # noqa: E402  (same 
 # Resolve relative to this file so it always points at on_the_porch/vectordb_new
 # regardless of the process working directory (the cron runs from the repo root).
 DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
+DOT_REPORTER_SOURCE = "Dorchester Reporter"
+
 RSS_FEEDS: list[dict] = [
     {
-        "url":    "https://www.dotnews.com/feed/",         
-        "source": "Dorchester Reporter",
+        "url":    "https://www.dotnews.com/feed/",
+        "source": DOT_REPORTER_SOURCE,
         "tag":    "dorchester,news",
     },
     {
@@ -69,6 +71,26 @@ RSS_FEEDS: list[dict] = [
 ]
  
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _dot_reporter_rss_enabled() -> bool:
+    """Temporarily off by default while dotnews.com feed issues are resolved."""
+    raw = os.getenv("RSS_DOT_REPORTER_ENABLED", "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def active_rss_feeds(feeds: list[dict] | None = None) -> list[dict]:
+    """Return feeds that should run this ingest cycle (logic kept; feed may be skipped)."""
+    feeds = feeds if feeds is not None else RSS_FEEDS
+    active: list[dict] = []
+    for feed_meta in feeds:
+        if feed_meta.get("source") == DOT_REPORTER_SOURCE and not _dot_reporter_rss_enabled():
+            continue
+        if feed_meta.get("enabled", True) is False:
+            continue
+        active.append(feed_meta)
+    return active
+
+
 def _strip_html(text: str) -> str:
     """Strip HTML tags and collapse whitespace."""
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', text)).strip()
@@ -168,7 +190,19 @@ def ingest_rss(
     print("\n" + "=" * 70)
     print("RSS Ingestion Pipeline")
     print("=" * 70)
- 
+
+    feeds = active_rss_feeds(feeds)
+    if not _dot_reporter_rss_enabled() and any(
+        f.get("source") == DOT_REPORTER_SOURCE for f in RSS_FEEDS
+    ):
+        print(
+            "Skipping Dorchester Reporter RSS "
+            "(set RSS_DOT_REPORTER_ENABLED=true to re-enable)"
+        )
+    if not feeds:
+        print("\nNo RSS feeds enabled.  Nothing to do.")
+        return
+
     # ── fetch all feeds ───────────────────────────────────────────────────────
     all_items: list[tuple[str, Document]] = []
     for feed_meta in feeds:
