@@ -4,10 +4,6 @@ Central configuration for ml-misi-community-sentiment.
 Loads .env from the project root. All apps (API, chatbot, ingestion) should
 import settings from this module.
 
-Environment-specific overrides:
-  Set ENVIRONMENT=local or ENVIRONMENT=production, then use prefixed keys
-  (LOCAL_MYSQL_HOST / PROD_MYSQL_HOST). Unprefixed keys are used as fallback.
-
 CLI:
   python config.py              # print summary
   python config.py -t           # test external connections
@@ -59,19 +55,9 @@ def log_error(msg: str) -> None:
 
 
 # ============================================================================
-# Environment detection
+# Env helpers
 # ============================================================================
-ENVIRONMENT = os.getenv("ENVIRONMENT", "local").strip().lower()
-IS_PRODUCTION = ENVIRONMENT == "production"
-IS_LOCAL = not IS_PRODUCTION
-
-
 def _env(key: str, default: str = "") -> str:
-    """LOCAL_/PROD_-prefixed value, then unprefixed, then default."""
-    prefix = "PROD_" if IS_PRODUCTION else "LOCAL_"
-    value = os.getenv(f"{prefix}{key}")
-    if value:
-        return value
     value = os.getenv(key)
     if value:
         return value
@@ -372,8 +358,7 @@ def validate_config(test_connections: bool = False) -> list[str]:
         errors.append("GEMINI_API_KEY is not set")
 
     if not MYSQL_HOST:
-        prefix = "PROD" if IS_PRODUCTION else "LOCAL"
-        errors.append(f"MYSQL_HOST is not set (looked for {prefix}_MYSQL_HOST)")
+        errors.append("MYSQL_HOST is not set")
 
     if not MYSQL_USER:
         errors.append("MYSQL_USER is not set")
@@ -555,11 +540,13 @@ def _test_gmail_connection() -> Optional[str]:
 
 def print_config_summary(test_connections: bool = False) -> bool:
     log("=" * 80)
-    log(f"Configuration Summary  [ENVIRONMENT: {ENVIRONMENT.upper()}]")
+    log(f"Configuration Summary  [PRODUCTION_MODE={PRODUCTION_MODE}]")
     log("=" * 80)
     log(f"Project root: {PROJECT_ROOT}")
+    log(f"App URL: {APP_BASE_URL}  API URL: {API_BASE_URL}")
     log(f"MySQL: {MYSQL_USER}@{MYSQL_HOST}:{MYSQL_PORT}/{MYSQL_DB}")
-    log(f"API: {HOST}:{PORT}  production_mode={PRODUCTION_MODE}")
+    log(f"API bind: {HOST}:{PORT}  production_mode={PRODUCTION_MODE}")
+    log(f"Cache: {CACHE_BACKEND}  CORS: {', '.join(ALLOWED_ORIGINS)}")
     log(f"Embeddings: {EMBED_PROVIDER}  active_vectordb={ACTIVE_VECTORDB_DIR}")
     log(f"Gemini: {GEMINI_MODEL}")
     log(f"Ingestion temp dir: {TEMP_DOWNLOAD_DIR}")
