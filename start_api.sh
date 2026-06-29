@@ -47,4 +47,4 @@ if [ "${PRODUCTION_MODE:-false}" = "true" ] || [ "${PRODUCTION_MODE:-false}" = "
   fi
 fi
 
-exec "$GUNICORN" -c "$ROOT_DIR/api/gunicorn_conf.py" api_v2:app
+exec "$GUNICORN" -c "$ROOT_DIR/api/gunicorn.conf.py" api_v2:app
