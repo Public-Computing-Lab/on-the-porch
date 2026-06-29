@@ -322,7 +322,7 @@ BOSTON_CKAN_API = _env("BOSTON_CKAN_API", "https://data.boston.gov/api/3/action"
 GUNICORN_BIND = _env("GUNICORN_BIND", f"{HOST}:{PORT}")
 GUNICORN_WORKERS = _int("GUNICORN_WORKERS", 3)
 GUNICORN_THREADS = _int("GUNICORN_THREADS", 8)
-GUNICORN_TIMEOUT = _int("GUNICORN_TIMEOUT", 120)
+GUNICORN_TIMEOUT = _int("GUNICORN_TIMEOUT", 180)
 GUNICORN_WORKER_CLASS = _env("GUNICORN_WORKER_CLASS", "gthread")
 
 # ============================================================================

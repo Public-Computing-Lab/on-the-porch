@@ -39,7 +39,7 @@ threads = int(os.getenv("GUNICORN_THREADS", "8"))
 # A chat request can legitimately take a while (several LLM calls). Keep the
 # worker timeout generous so a slow-but-valid request is not killed, but finite
 # so a truly hung worker is recycled instead of wedged forever.
-timeout = int(os.getenv("GUNICORN_TIMEOUT", "120"))
+timeout = int(os.getenv("GUNICORN_TIMEOUT", "180"))
 graceful_timeout = int(os.getenv("GUNICORN_GRACEFUL_TIMEOUT", "30"))
 keepalive = int(os.getenv("GUNICORN_KEEPALIVE", "5"))
 

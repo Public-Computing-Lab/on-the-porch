@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import queue
 import re
 import sys
 import threading
@@ -168,6 +169,41 @@ def _stream_generation_error(exc: Exception) -> str:
     if any(marker in message for marker in ("deadline", "timeout", "timed out")):
         return "The answer took too long to generate. Please try again."
     return "Generation failed."
+
+
+_SSE_KEEPALIVE_INTERVAL = float(os.getenv("SSE_KEEPALIVE_INTERVAL", "12"))
+
+
+def _iter_stream_agent_with_keepalive(
+    message: str,
+    conversation_history: List[Dict[str, str]],
+    thread_state: Dict[str, Any],
+):
+    """Run stream_agent_response in a worker thread; emit None while waiting."""
+    done = object()
+    event_queue: queue.Queue = queue.Queue()
+
+    def _worker() -> None:
+        try:
+            for item in stream_agent_response(message, conversation_history, thread_state):
+                event_queue.put(item)
+        except Exception as exc:  # noqa: BLE001
+            event_queue.put(exc)
+        finally:
+            event_queue.put(done)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        try:
+            item = event_queue.get(timeout=_SSE_KEEPALIVE_INTERVAL)
+        except queue.Empty:
+            yield None
+            continue
+        if item is done:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
 
 
 def _log_exception(prefix: str, exc: Exception) -> None:
@@ -2676,7 +2712,13 @@ def post_conversation_message_stream(thread_id: str):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
                 streamed_text = ""
-                for kind, data in stream_agent_response(message, conversation_history, thread_state):
+                for item in _iter_stream_agent_with_keepalive(
+                    message, conversation_history, thread_state,
+                ):
+                    if item is None:
+                        yield ": keepalive\n\n"
+                        continue
+                    kind, data = item
                     if kind == "delta":
                         streamed_text += data
                         yield _sse({"type": "delta", "text": data})
@@ -2813,7 +2855,11 @@ def post_conversation_message_stream(thread_id: str):
     return Response(
         stream_with_context(_generate()),
         mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -81,7 +81,9 @@ RETHINKAI_API_KEYS=legacy-api-key-1,legacy-api-key-2
 GUNICORN_BIND=127.0.0.1:8888
 GUNICORN_WORKERS=3
 GUNICORN_THREADS=8
-GUNICORN_TIMEOUT=120
+GUNICORN_TIMEOUT=180
+# SSE keepalive interval (seconds) while waiting on LLM/SQL during /messages/stream
+SSE_KEEPALIVE_INTERVAL=12
 GUNICORN_WORKER_CLASS=gthread
 # Optional tuning (defaults shown in api/gunicorn_conf.py):
 # GUNICORN_GRACEFUL_TIMEOUT=30

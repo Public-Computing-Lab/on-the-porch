@@ -809,6 +809,11 @@ def _fast_followup_needs_new_data(
                 "needs_new_data": True,
                 "reason": "rule: named event detail requires SQL lookup",
             }
+        if _ps.match_prepared_sql(question):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: prepared civic SQL lookup",
+            }
     except Exception:
         pass
 
