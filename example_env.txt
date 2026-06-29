@@ -9,9 +9,9 @@
 #   GUEST_CLEANUP_ENABLED=true, FLASK_SESSION_COOKIE_SECURE=true,
 #   ALLOWED_ORIGINS=https://your-frontend-domain
 
-# ============================================================================
-# Gemini AI configuration
-# ============================================================================
+# Optional ENVIRONMENT=local|production with LOCAL_* / PROD_* prefixed overrides.
+ENVIRONMENT=local
+
 GEMINI_API_KEY=your-gemini-api-key
 # Production: use Flash Lite for cost control; Pro only as fallback.
 GEMINI_MODEL=gemini-2.5-flash-lite

@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-from dotenv import load_dotenv
 from flask import Flask, Response, g, has_request_context, jsonify, request, session, stream_with_context
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
@@ -51,7 +50,10 @@ from security import (
 _THIS_FILE = Path(__file__).resolve()
 _API_DIR = _THIS_FILE.parent
 _ROOT_DIR = _API_DIR.parent
-load_dotenv(_ROOT_DIR / ".env")
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
+from config import Config  # noqa: E402
+
 _ON_THE_PORCH_DIR = _ROOT_DIR / "on_the_porch"
 
 if str(_ON_THE_PORCH_DIR) not in sys.path:
@@ -150,162 +152,6 @@ def _remove_from_chroma(entry_id: int) -> None:
 # The legacy /chat session cache is provided by a pluggable backend defined
 # after Config (see `_session_cache`). Set CACHE_BACKEND=redis to share it
 # across gunicorn workers; it defaults to a thread-safe in-process cache.
-
-
-class Config:
-    API_VERSION = "v3.0"
-
-    _raw_keys = os.getenv("RETHINKAI_API_KEYS", "").split(",")
-    RETHINKAI_API_KEYS = [key.strip() for key in _raw_keys if key.strip()]
-
-    HOST = os.getenv("API_HOST", "127.0.0.1")
-    PORT = int(os.getenv("API_PORT", "8888"))
-    # Debug mode must be OFF in production (it enables the reloader and an
-    # interactive debugger that can execute arbitrary code). Opt in explicitly.
-    DEBUG = os.getenv("FLASK_DEBUG", "false").strip().lower() in ("1", "true", "yes")
-
-    # Legacy /chat session cache backend:
-    #   "memory" -> per-process, thread-safe, bounded by TTL+LRU (default)
-    #   "redis"  -> shared across all gunicorn workers, per-key TTL
-    CACHE_BACKEND = os.getenv("CACHE_BACKEND", "memory").strip().lower()
-    REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-    CACHE_TTL_MINUTES = int(os.getenv("CACHE_TTL_MINUTES", "60"))
-    CACHE_MAX_SESSIONS = int(os.getenv("CACHE_MAX_SESSIONS", "100"))
-    CACHE_KEY_PREFIX = os.getenv("CACHE_KEY_PREFIX", "rethinkai:chatcache:")
-
-    # Semantic response cache (OFF by default). Answers near-duplicate first-turn
-    # questions instantly from a recent cached answer.
-    SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "false").strip().lower() in ("1", "true", "yes")
-    SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.95"))
-    SEMANTIC_CACHE_TTL_SECONDS = int(os.getenv("SEMANTIC_CACHE_TTL_SECONDS", "900"))
-    SEMANTIC_CACHE_MAX = int(os.getenv("SEMANTIC_CACHE_MAX", "200"))
-    _semantic_default_backend = (
-        "redis" if os.getenv("CACHE_BACKEND", "memory").strip().lower() == "redis" else "memory"
-    )
-    SEMANTIC_CACHE_BACKEND = os.getenv(
-        "SEMANTIC_CACHE_BACKEND", _semantic_default_backend,
-    ).strip().lower()
-    SEMANTIC_CACHE_KEY = os.getenv(
-        "SEMANTIC_CACHE_KEY", "rethinkai:semantic_cache:entries",
-    )
-
-    # Iteration 1: prepared SQL + follow-up gate
-    PREPARED_SQL_ENABLED = os.getenv("PREPARED_SQL_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    )
-    FAST_FOLLOWUP_GATE_ENABLED = os.getenv(
-        "FAST_FOLLOWUP_GATE_ENABLED", "true",
-    ).strip().lower() in ("1", "true", "yes")
-
-    # Iteration 2: rule-first routing + async Boston.gov enrichment
-    INTENT_ROUTER_V2_ENABLED = os.getenv(
-        "INTENT_ROUTER_V2_ENABLED", "true",
-    ).strip().lower() in ("1", "true", "yes")
-    ROUTER_RULE_CONFIDENCE_THRESHOLD = float(
-        os.getenv("ROUTER_RULE_CONFIDENCE_THRESHOLD", "0.75")
-    )
-    BOSTON_GOV_ASYNC_ENABLED = os.getenv(
-        "BOSTON_GOV_ASYNC_ENABLED", "true",
-    ).strip().lower() in ("1", "true", "yes")
-    BOSTON_GOV_BLOCKING = os.getenv(
-        "BOSTON_GOV_BLOCKING", "false",
-    ).strip().lower() in ("1", "true", "yes")
-    BOSTON_GOV_ASYNC_TIMEOUT_SECONDS = float(
-        os.getenv("BOSTON_GOV_ASYNC_TIMEOUT_SECONDS", "8"),
-    )
-
-    # Iteration 3: local BGE embeddings + blue-green vector stores
-    EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "gemini").strip().lower()
-    LOCAL_EMBED_MODEL = os.getenv("LOCAL_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
-    LOCAL_EMBED_DEVICE = os.getenv("LOCAL_EMBED_DEVICE", "cpu")
-
-    # Iteration 4: Qdrant vector DB + BM25 hybrid retrieval
-    VECTOR_DB_PROVIDER = os.getenv("VECTOR_DB_PROVIDER", "chroma").strip().lower()
-    BM25_HYBRID_ENABLED = os.getenv("BM25_HYBRID_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    )
-    QDRANT_MODE = os.getenv("QDRANT_MODE", "local").strip().lower()
-    QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333")
-    QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "otp_documents")
-
-    # Iteration 5: materialized summaries, ingest job tracking, SLO metrics
-    MATERIALIZED_VIEWS_ENABLED = os.getenv(
-        "MATERIALIZED_VIEWS_ENABLED", "true",
-    ).strip().lower() in ("1", "true", "yes")
-    INGEST_QUEUE_ENABLED = os.getenv("INGEST_QUEUE_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    )
-    BOSTON_311_STALE_HOURS = float(os.getenv("BOSTON_311_STALE_HOURS", "2"))
-
-    # Iteration 0: production profile and observability
-    PRODUCTION_MODE = os.getenv("PRODUCTION_MODE", "false").strip().lower() in ("1", "true", "yes")
-    INGEST_STALE_HOURS = max(1, int(os.getenv("INGEST_STALE_HOURS", "26")))
-    REQUEST_METRICS_ENABLED = os.getenv("REQUEST_METRICS_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    )
-    GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
-
-    # Response streaming endpoint (OFF by default on the client; the endpoint is
-    # always available). See /conversations/<id>/messages/stream.
-    STREAMING_ENABLED = os.getenv("STREAMING_ENABLED", "true").strip().lower() in ("1", "true", "yes")
-
-    SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "agent-api-secret-2025")
-    SESSION_COOKIE_SECURE = os.getenv("FLASK_SESSION_COOKIE_SECURE", "False").lower() == "true"
-    AUTH_SESSION_COOKIE_NAME = os.getenv("AUTH_SESSION_COOKIE_NAME", "otp_session")
-    AUTH_CSRF_COOKIE_NAME = os.getenv("AUTH_CSRF_COOKIE_NAME", "otp_csrf")
-    SESSION_MAX_AGE_DAYS = int(os.getenv("AUTH_SESSION_MAX_AGE_DAYS", "7"))
-    SESSION_SAMESITE = os.getenv("AUTH_SESSION_SAMESITE", "Lax")
-    GUEST_SESSION_HOURS = max(1, int(os.getenv("GUEST_SESSION_HOURS", "24")))
-    SESSION_TOUCH_DEBOUNCE_SECONDS = max(
-        0, int(os.getenv("SESSION_TOUCH_DEBOUNCE_SECONDS", "300"))
-    )
-
-    RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").strip().lower() in (
-        "1", "true", "yes",
-    )
-    RATE_LIMIT_KEY_PREFIX = os.getenv("RATE_LIMIT_KEY_PREFIX", "rethinkai:ratelimit:")
-    RATE_LIMIT_GUEST_CREATE_PER_IP = max(
-        1, int(os.getenv("RATE_LIMIT_GUEST_CREATE_PER_IP", "30"))
-    )
-    RATE_LIMIT_GUEST_CREATE_WINDOW_SECONDS = max(
-        60, int(os.getenv("RATE_LIMIT_GUEST_CREATE_WINDOW_SECONDS", "3600"))
-    )
-    RATE_LIMIT_CHAT_PER_SESSION = max(
-        1, int(os.getenv("RATE_LIMIT_CHAT_PER_SESSION", "60"))
-    )
-    RATE_LIMIT_CHAT_WINDOW_SECONDS = max(
-        60, int(os.getenv("RATE_LIMIT_CHAT_WINDOW_SECONDS", "3600"))
-    )
-    RATE_LIMIT_AUTH_PER_IP = max(1, int(os.getenv("RATE_LIMIT_AUTH_PER_IP", "30")))
-    RATE_LIMIT_AUTH_WINDOW_SECONDS = max(
-        60, int(os.getenv("RATE_LIMIT_AUTH_WINDOW_SECONDS", "900"))
-    )
-
-    MAX_MESSAGE_LENGTH = max(500, int(os.getenv("MAX_MESSAGE_LENGTH", "8000")))
-    MAX_COMMUNITY_NOTE_LENGTH = max(500, int(os.getenv("MAX_COMMUNITY_NOTE_LENGTH", "4000")))
-
-    APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000")
-    API_BASE_URL = os.getenv("API_BASE_URL", f"http://{HOST}:{PORT}")
-    _allowed_origins = os.getenv(
-        "ALLOWED_ORIGINS",
-        "http://127.0.0.1:8000,http://localhost:8000",
-    ).split(",")
-    ALLOWED_ORIGINS = [origin.strip() for origin in _allowed_origins if origin.strip()]
-
-    MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
-    MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-    MYSQL_USER = os.getenv("MYSQL_USER", "root")
-    MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-    MYSQL_DB = os.getenv("MYSQL_DB", "rethink_ai_boston")
-    # Connection pool tuning. pool_size is capped at 32 by mysql-connector.
-    MYSQL_POOL_SIZE = max(1, min(32, int(os.getenv("MYSQL_POOL_SIZE", "10"))))
-    MYSQL_CONNECT_TIMEOUT = int(os.getenv("MYSQL_CONNECT_TIMEOUT", "10"))
-
-    LOGIN_WINDOW_MINUTES = int(os.getenv("AUTH_LOGIN_WINDOW_MINUTES", "15"))
-    LOGIN_LOCK_THRESHOLD = int(os.getenv("AUTH_LOGIN_LOCK_THRESHOLD", "5"))
-    LOGIN_LOCK_MINUTES = int(os.getenv("AUTH_LOGIN_LOCK_MINUTES", "15"))
-    _raw_admin_emails = os.getenv("AUTH_ADMIN_EMAILS", "").split(",")
-    AUTH_ADMIN_EMAILS = {normalize_email(email) for email in _raw_admin_emails if normalize_email(email)}
 
 
 DOC_TYPE_DIRS = {
