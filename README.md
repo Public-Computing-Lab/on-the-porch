@@ -14,12 +14,11 @@ This platform enables:
 
 ```
 ml-misi-community-sentiment/
-├── api/                          # Flask REST API (session auth + legacy API keys)
-│   ├── api_v2.py                 # Main API endpoint (agent-powered)
-│   ├── api.py                    # Legacy API (deprecated)
+├── api/                          # Flask REST API
+│   ├── api_v2.py                 # Production API (gunicorn entrypoint)
 │   ├── datastore/                # Static data files
 │   ├── prompts/                  # LLM prompt templates
-│   └── requirements.txt          # API dependencies
+│   └── requirements.txt          # Includes repo-root requirements
 │
 ├── on_the_porch/                 # Core chatbot and data processing
 │   ├── unified_chatbot.py        # Main chatbot orchestration
@@ -32,7 +31,6 @@ ml-misi-community-sentiment/
 ├── dataset-documentation/        # Dataset documentation (see below)
 ├── test_frontend/                # Frontend testing interface
 ├── public/                      # Static frontend assets
-└── Old_exp/                     # Legacy experiments (ignored in git)
 ```
 
 ## 🚀 Quick Start
@@ -349,4 +347,4 @@ See `LICENSE.md` for license information.
 
 ---
 
-**Note**: The `Old_exp/` folder contains legacy experiments and is excluded from version control. Focus on the `api/` and `on_the_porch/` directories for active development.
+**Note**: Use `api/api_v2.py` (or `./start_api.sh`) and `cron_ingest.sh` at the repo root. Focus on `api/` and `on_the_porch/` for active development.

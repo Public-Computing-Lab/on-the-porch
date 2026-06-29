@@ -3,6 +3,8 @@ Google Drive to Vector DB Ingestion
 Downloads new files from a shared Google Drive folder and adds them to the vector database.
 For newsletters: extracts events page-by-page using LLM and stores in SQL.
 """
+# DotNews/inprint newsletter PDFs on Drive — disabled (see cron_ingest.sh).
+PROCESS_NEWSLETTER_PDFS = False
 import json
 import re
 import sys
@@ -941,7 +943,22 @@ def sync_google_drive_to_vectordb() -> dict:
                 folder_cat = file_meta.get('folder_category', 'root')
                 file_ext = Path(file_meta['name']).suffix.lower()
                 print(f"\n[{i}/{len(new_files)}] Processing: {file_meta['name']} (from '{folder_cat}')")
-                
+
+                if folder_cat == 'newsletters' and file_ext == '.pdf' and not PROCESS_NEWSLETTER_PDFS:
+                    print("  ↪ Skipping newsletter PDF (dotnews/inprint ingestion disabled)")
+                    processed_files[file_meta['id']] = {
+                        'name': file_meta['name'],
+                        'folder_category': folder_cat,
+                        'modifiedTime': file_meta.get('modifiedTime', ''),
+                        'processed_at': datetime.now().isoformat(),
+                        'skipped': True,
+                        'skip_reason': 'dotnews_disabled',
+                        'chunks': 0,
+                        'events': 0,
+                    }
+                    stats['files_processed'] += 1
+                    continue
+
                 # Download file
                 local_path = download_file(service, file_meta['id'], file_meta['name'])
                 print(f"  ✓ Downloaded to {local_path.name}")

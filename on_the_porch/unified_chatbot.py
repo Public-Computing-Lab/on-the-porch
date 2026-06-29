@@ -29,7 +29,7 @@ import boston_gov  # type: ignore  # noqa: E402
 import intent_router  # noqa: E402
 from query_plan import build_query_plan  # noqa: E402
 
-# Local Gemini client config (avoid importing app3 at module load)
+# Gemini client is configured locally (sql_chat uses app4, not legacy app3).
 try:
     import google.generativeai as genai  # type: ignore
 except Exception:  # pragma: no cover

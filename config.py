@@ -313,7 +313,6 @@ DOTNEWS_SYNC_STATE_FILE = DATA_INGESTION_DIR / ".sync_state_dotnews.json"
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".txt", ".md"})
 
 BOSTON_CKAN_API = _env("BOSTON_CKAN_API", "https://data.boston.gov/api/3/action")
-RSS_DOT_REPORTER_ENABLED = _truthy("RSS_DOT_REPORTER_ENABLED", "false")
 
 # ============================================================================
 # Gunicorn (read by api/gunicorn_conf.py)
@@ -449,21 +448,24 @@ def _test_gemini_connection() -> Optional[str]:
     if not GEMINI_API_KEY:
         return "API key not configured"
     try:
-        from google import genai
-        from google.genai import types
+        import google.generativeai as genai
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents="Reply with only: All Good!",
-            config=types.GenerateContentConfig(temperature=0, max_output_tokens=10),
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            "Reply with only: All Good!",
+            generation_config=genai.types.GenerationConfig(
+                temperature=0,
+                max_output_tokens=10,
+            ),
         )
-        if response and getattr(response, "candidates", None):
+        text = (response.text or "").strip()
+        if text:
             log_success(f"Gemini API: model '{GEMINI_MODEL}' responded")
             return None
-        return "API responded but returned no candidates"
+        return "API responded but returned empty content"
     except ImportError:
-        return "google-genai not installed"
+        return "google-generativeai not installed"
     except Exception as exc:
         msg = str(exc)
         if "API_KEY_INVALID" in msg or "401" in msg or "API key not valid" in msg:

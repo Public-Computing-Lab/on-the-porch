@@ -201,8 +201,7 @@ LANGSMITH_PROJECT=rethinkai-community-sentiment
 # ============================================================================
 # RSS ingestion
 # ============================================================================
-# Dorchester Reporter (dotnews.com) RSS — disabled until feed issues are resolved.
-RSS_DOT_REPORTER_ENABLED=false
+# Dorchester Reporter feed is commented out in on_the_porch/rag stuff/ingest_rss.py
 # DOTNEWS_CUTOFF_DATE=2024-01-01
 
 # ============================================================================

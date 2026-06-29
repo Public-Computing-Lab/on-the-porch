@@ -216,10 +216,11 @@ python email_to_calendar_sql.py
 ### Run Full Daily Ingestion
 
 ```bash
-python main_daily_ingestion.py
+cd /path/to/ml-misi-community-sentiment
+./cron_ingest.sh
 ```
 
-This runs both sync processes and logs results to `ingestion_log.jsonl`.
+This runs Boston sync, events, RSS, Google Drive, and related jobs. Logs go to `logs/cron_ingest.log`.
 
 ## Scheduling
 
@@ -232,7 +233,7 @@ crontab -e
 
 2. Add daily run at 2 AM:
 ```bash
-0 2 * * * cd /path/to/on_the_porch/data_ingestion && /path/to/python main_daily_ingestion.py >> logs/cron.log 2>&1
+0 2 * * * cd /path/to/ml-misi-community-sentiment && ./cron_ingest.sh >> logs/cron_ingest.log 2>&1
 ```
 
 3. Create logs directory:
@@ -245,8 +246,8 @@ mkdir logs
 1. Create batch script `run_daily_ingestion.bat`:
 ```batch
 @echo off
-cd C:\path\to\on_the_porch\data_ingestion
-C:\path\to\python.exe main_daily_ingestion.py >> logs\cron.log 2>&1
+cd C:\path\to\ml-misi-community-sentiment
+C:\path\to\bash.exe cron_ingest.sh >> logs\cron_ingest.log 2>&1
 ```
 
 2. Open Task Scheduler
@@ -326,7 +327,7 @@ data_ingestion/
 ├── config.py                      # Configuration loader
 ├── google_drive_to_vectordb.py   # Google Drive sync script
 ├── email_to_calendar_sql.py      # Email sync script (OAuth 2.0)
-├── main_daily_ingestion.py       # Main orchestrator
+├── cron_ingest.sh (repo root)    # Production daily orchestrator
 ├── requirements.txt               # Python dependencies
 ├── env.example                    # Environment template
 ├── .env                          # Your configuration (not in git)

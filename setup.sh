@@ -40,8 +40,9 @@ echo "Running daily ingestion (Boston sync, civic data, RSS, Drive, ...)..."
 echo "Running monthly RSS backfill (first-time setup)..."
 ./cron_ingest_monthly.sh
 
-echo "Running DotNews first-time backfill..."
-"$PYTHON" "on_the_porch/data_ingestion/run_dotnews_ingest_v2.py" --first-time
+# DotNews / inprint PDF backfill — disabled until dotnews.com is stable.
+# echo "Running DotNews first-time backfill..."
+# "$PYTHON" "on_the_porch/data_ingestion/run_dotnews_ingest_v2.py" --first-time
 
 echo
 echo "Setup complete. Schedule ./cron_ingest.sh daily (and ./cron_ingest_monthly.sh monthly)."
