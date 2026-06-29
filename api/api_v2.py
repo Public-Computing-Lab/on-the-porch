@@ -162,6 +162,14 @@ DOC_TYPE_DIRS = {
 }
 
 
+def _stream_generation_error(exc: Exception) -> str:
+    """User-facing message for streamed chat failures."""
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    if any(marker in message for marker in ("deadline", "timeout", "timed out")):
+        return "The answer took too long to generate. Please try again."
+    return "Generation failed."
+
+
 def _log_exception(prefix: str, exc: Exception) -> None:
     """
     Log exceptions without leaking secrets (e.g., DB usernames/passwords).
@@ -2656,6 +2664,7 @@ def post_conversation_message_stream(thread_id: str):
         cached_sources: List[Dict[str, str]] = []
 
         try:
+            yield ": keepalive\n\n"
             cached = _semantic_cache.get(message) if semantic_eligible else None
             if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
                 cache_hit = True
@@ -2686,7 +2695,7 @@ def post_conversation_message_stream(thread_id: str):
                 _log_exception("Stream ended with partial answer after error", exc)
             else:
                 _log_exception("Error during streamed generation", exc)
-                yield _sse({"type": "error", "error": "Generation failed."})
+                yield _sse({"type": "error", "error": _stream_generation_error(exc)})
                 return
 
         if full_answer:

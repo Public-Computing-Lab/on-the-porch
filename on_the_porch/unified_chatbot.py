@@ -44,8 +44,11 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
 # Escalation model for low-confidence synthesis (Iteration 0+); wired in later iterations.
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
-GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "20"))
-GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
+GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "60"))
+GEMINI_STREAM_TIMEOUT = int(
+    os.getenv("GEMINI_STREAM_TIMEOUT", str(max(GEMINI_REQUEST_TIMEOUT, 90)))
+)
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
 _llm_calls_local = threading.local()
 # Run independent retrievals (and hybrid SQL+RAG) concurrently for lower latency.
@@ -203,6 +206,11 @@ _TRANSIENT_ERROR_MARKERS = (
 def _is_transient_error(exc: Exception) -> bool:
     message = f"{exc.__class__.__name__} {exc}".lower()
     return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    return any(marker in message for marker in ("deadline", "timeout", "timed out"))
 
 
 def _generate_content(model, prompt, generation_config):
@@ -1124,58 +1132,62 @@ def run_execution_pipeline(
     if not is_execution_pipeline_enabled():
         return None
 
-    routing = routing_plan or _route_question(question)
-    plan_started = time.perf_counter()
-    plan = build_execution_plan(question, routing)
-    plan_ms = int((time.perf_counter() - plan_started) * 1000)
-    if plan is None:
+    try:
+        routing = routing_plan or _route_question(question)
+        plan_started = time.perf_counter()
+        plan = build_execution_plan(question, routing)
+        plan_ms = int((time.perf_counter() - plan_started) * 1000)
+        if plan is None:
+            return None
+
+        facts = execute_plan(
+            plan,
+            question,
+            execute_sql=app4._execute_sql,
+            retrieve_rag=_retrieve_rag,
+        )
+
+        synth_started = time.perf_counter()
+        display_q = question
+        if conversation_history:
+            for msg in reversed(conversation_history):
+                if msg.get("role") == "user" and (msg.get("content") or "").strip():
+                    display_q = msg["content"].strip()
+                    break
+        answer = synthesize_and_validate(
+            question,
+            facts,
+            conversation_history=conversation_history,
+            display_question=display_q,
+        )
+        synth_ms = int((time.perf_counter() - synth_started) * 1000)
+
+        mode = plan.legacy_mode()
+        if mode == "sql":
+            answer = _apply_sql_fallback_if_needed(question, answer)
+        elif mode in {"rag", "hybrid"}:
+            answer = _apply_default_fallback_if_needed(question, answer)
+
+        result = facts.to_legacy_result(answer)
+        if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
+            result["answer"] = answer
+
+        metrics: Dict[str, Any] = {
+            "pipeline_tier": plan.tier,
+            "plan_ms": plan_ms,
+            "execute_ms": facts.execute_ms,
+            "synthesize_ms": synth_ms,
+            "prepared_intent": facts.prepared_intent,
+            "intent": routing.get("intent"),
+            "router": routing.get("router"),
+            "period_days": (routing.get("query_plan") or {}).get("period_days"),
+            "period_label": (routing.get("query_plan") or {}).get("period_label"),
+            "metric": (routing.get("query_plan") or {}).get("metric"),
+        }
+        return mode, result, metrics
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Execution pipeline failed: {exc.__class__.__name__}: {exc}")
         return None
-
-    facts = execute_plan(
-        plan,
-        question,
-        execute_sql=app4._execute_sql,
-        retrieve_rag=_retrieve_rag,
-    )
-
-    synth_started = time.perf_counter()
-    display_q = question
-    if conversation_history:
-        for msg in reversed(conversation_history):
-            if msg.get("role") == "user" and (msg.get("content") or "").strip():
-                display_q = msg["content"].strip()
-                break
-    answer = synthesize_and_validate(
-        question,
-        facts,
-        conversation_history=conversation_history,
-        display_question=display_q,
-    )
-    synth_ms = int((time.perf_counter() - synth_started) * 1000)
-
-    mode = plan.legacy_mode()
-    if mode == "sql":
-        answer = _apply_sql_fallback_if_needed(question, answer)
-    elif mode in {"rag", "hybrid"}:
-        answer = _apply_default_fallback_if_needed(question, answer)
-
-    result = facts.to_legacy_result(answer)
-    if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
-        result["answer"] = answer
-
-    metrics: Dict[str, Any] = {
-        "pipeline_tier": plan.tier,
-        "plan_ms": plan_ms,
-        "execute_ms": facts.execute_ms,
-        "synthesize_ms": synth_ms,
-        "prepared_intent": facts.prepared_intent,
-        "intent": routing.get("intent"),
-        "router": routing.get("router"),
-        "period_days": (routing.get("query_plan") or {}).get("period_days"),
-        "period_label": (routing.get("query_plan") or {}).get("period_label"),
-        "metric": (routing.get("query_plan") or {}).get("metric"),
-    }
-    return mode, result, metrics
 
 
 def build_retrieval_cache_from_result(
@@ -1805,6 +1817,18 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
     return {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
 
 
+def _generate_text_non_stream(model_name: str, prompt: str, temperature: float) -> str:
+    """Single non-streaming Gemini call (fallback when streaming deadlines are tight)."""
+    client = _get_llm_client()
+    model = client.GenerativeModel(model_name)
+    resp = _generate_content(
+        model,
+        prompt,
+        generation_config={"temperature": temperature},
+    )
+    return (resp.text or "").strip()
+
+
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
     """Yield text deltas from a streaming Gemini generation with retries."""
     last_exc: Optional[Exception] = None
@@ -1826,7 +1850,17 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
                 )
                 time.sleep(backoff)
                 continue
-            raise
+            break
+    if last_exc is not None and _is_timeout_error(last_exc):
+        try:
+            text = _generate_text_non_stream(model_name, prompt, temperature)
+            if text:
+                print("  ↪ Stream deadline hit; using non-streaming Gemini fallback")
+                for piece in _pseudo_stream(text):
+                    yield piece
+                return
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Non-streaming fallback failed: {exc.__class__.__name__}")
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("Gemini stream returned no content")
@@ -1843,7 +1877,7 @@ def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
                 prompt,
                 generation_config={"temperature": temperature},
                 stream=True,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                request_options={"timeout": GEMINI_STREAM_TIMEOUT},
             )
         except TypeError:
             stream = model.generate_content(
@@ -1928,9 +1962,17 @@ def stream_agent_response(
             yield ("delta", answer)
         else:
             acc: List[str] = []
-            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
-                acc.append(piece)
-                yield ("delta", piece)
+            try:
+                for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
+                    acc.append(piece)
+                    yield ("delta", piece)
+            except Exception as exc:  # noqa: BLE001
+                if not acc:
+                    print(f"  ⚠️ History stream failed: {exc.__class__.__name__}")
+                    answer = _answer_from_history(message, conversation_history, cache)
+                    if answer:
+                        yield ("delta", answer)
+                        acc = [answer]
             answer = "".join(acc).strip()
             if not answer:
                 answer = "I encountered an error answering from the available information. Could you rephrase your question?"
@@ -1945,9 +1987,13 @@ def stream_agent_response(
     plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
 
-    pipeline_out = run_execution_pipeline(
-        effective_message, conversation_history, routing_plan=plan,
-    )
+    try:
+        pipeline_out = run_execution_pipeline(
+            effective_message, conversation_history, routing_plan=plan,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Execution pipeline raised: {exc.__class__.__name__}")
+        pipeline_out = None
     if pipeline_out is not None:
         mode, out, pipeline_metrics = pipeline_out
         answer = out.get("answer", "")

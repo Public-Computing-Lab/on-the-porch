@@ -172,8 +172,12 @@ def synthesize_and_validate(
     )
     if not answer.strip():
         answer = _fallback_answer(bundle)
-    return validate_answer(
-        answer,
-        bundle,
-        conversation_history=conversation_history,
-    )
+    try:
+        return validate_answer(
+            answer,
+            bundle,
+            conversation_history=conversation_history,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Answer validation failed: {exc}")
+        return answer.strip() or _fallback_answer(bundle)

@@ -224,7 +224,9 @@ GEMINI_SUMMARY_MODEL = _env("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = _env("GEMINI_FAST_MODEL", GEMINI_MODEL)
 GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 GEMINI_EMBED_MODEL = _env("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
-GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 20)
+GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 60)
+# Streaming calls may wait longer for the first token on slow hosts / large prompts.
+GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 90)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 3)
 
 # ============================================================================
