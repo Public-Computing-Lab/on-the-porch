@@ -6,8 +6,8 @@ routing/retrieval/generation pipeline.
 
 Backends:
 - In-memory (default): per-process, suitable for single-worker dev.
-- Redis (Iteration 1): shared across gunicorn workers when CACHE_BACKEND=redis.
-- Uses the same embedding provider as RAG (Iteration 3: local BGE when EMBED_PROVIDER=local).
+- Redis: shared across gunicorn workers when CACHE_BACKEND=redis.
+- MySQL: shared across workers when CACHE_BACKEND=mysql (no Redis required).
 
 Conservative by design (SEMANTIC_CACHE_ENABLED=false by default):
 - Only first-turn questions are cached/served (follow-ups depend on conversation
@@ -95,6 +95,38 @@ class _RedisSemanticBackend:
             print(f"  ⚠️ Semantic cache redis write failed: {exc}")
 
 
+class _MySQLSemanticBackend:
+    """Store cache entries as a JSON blob in MySQL (shared across workers)."""
+
+    def __init__(self, store, key: str) -> None:
+        self._store = store
+        self._key = key
+        self._lock = threading.Lock()
+
+    def list_entries(self, now: float) -> List[Dict[str, Any]]:
+        try:
+            raw = self._store.get(self._key)
+            if not raw:
+                return []
+            entries = json.loads(raw)
+            if not isinstance(entries, list):
+                return []
+            alive = [e for e in entries if e.get("expires_at", 0) > now]
+            if len(alive) != len(entries):
+                self.save_entries(alive)
+            return alive
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Semantic cache mysql read failed: {exc}")
+            return []
+
+    def save_entries(self, entries: List[Dict[str, Any]]) -> None:
+        try:
+            payload = json.dumps(entries, ensure_ascii=False)
+            self._store.set(self._key, payload, ttl_seconds=86400)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Semantic cache mysql write failed: {exc}")
+
+
 class SemanticResponseCache:
     def __init__(
         self,
@@ -177,7 +209,10 @@ def build_semantic_cache_backend(
     backend_name: str,
     redis_client=None,
     redis_key: str,
+    mysql_store=None,
 ) -> SemanticCacheBackend:
     if backend_name == "redis" and redis_client is not None:
         return _RedisSemanticBackend(redis_client, redis_key)
+    if backend_name == "mysql" and mysql_store is not None:
+        return _MySQLSemanticBackend(mysql_store, redis_key)
     return _InMemorySemanticBackend()

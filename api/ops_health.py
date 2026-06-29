@@ -155,8 +155,11 @@ def validate_production_config(
                 f"{env_key} is still the default value; set a strong secret in production"
             )
 
-    if cache_backend != "redis":
-        issues.append("CACHE_BACKEND must be 'redis' when PRODUCTION_MODE=true")
+    if cache_backend not in {"redis", "mysql"}:
+        issues.append(
+            "CACHE_BACKEND must be 'redis' or 'mysql' when PRODUCTION_MODE=true "
+            "(use mysql when Redis is unavailable)"
+        )
 
     if not semantic_cache_enabled:
         issues.append(

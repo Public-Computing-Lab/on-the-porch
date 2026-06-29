@@ -10,8 +10,15 @@ from typing import Optional, Tuple
 class RateLimiter:
     """Fixed-window counter. Redis when available; thread-safe memory otherwise."""
 
-    def __init__(self, redis_client=None, *, key_prefix: str = "rethinkai:ratelimit:") -> None:
+    def __init__(
+        self,
+        redis_client=None,
+        *,
+        mysql_store=None,
+        key_prefix: str = "rethinkai:ratelimit:",
+    ) -> None:
         self._redis = redis_client
+        self._mysql = mysql_store
         self._prefix = key_prefix
         self._memory: dict[str, tuple[int, float]] = {}
         self._lock = threading.Lock()
@@ -25,6 +32,11 @@ class RateLimiter:
             return True, 0
 
         key = self._key(bucket, identifier)
+        if self._mysql is not None:
+            try:
+                return self._mysql.check_rate_limit(key, limit, window_seconds)
+            except Exception:
+                pass
         if self._redis is not None:
             try:
                 pipe = self._redis.pipeline()

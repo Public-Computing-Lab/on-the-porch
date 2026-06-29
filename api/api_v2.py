@@ -26,6 +26,7 @@ import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
+from mysql_cache import MySQLCacheStore
 from ops_health import check_ingestion_lag, validate_production_config
 from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
 from rate_limit import RateLimiter
@@ -279,6 +280,16 @@ def get_db_connection():
         return conn
 
 
+_mysql_cache_store: Optional[MySQLCacheStore] = None
+
+
+def _get_mysql_cache_store() -> MySQLCacheStore:
+    global _mysql_cache_store
+    if _mysql_cache_store is None:
+        _mysql_cache_store = MySQLCacheStore(get_db_connection)
+    return _mysql_cache_store
+
+
 def initialize_database() -> None:
     run_migrations(get_db_connection)
 
@@ -472,8 +483,49 @@ class _RedisSessionCache(_BaseSessionCache):
             _log_exception("Redis cache set failed", exc)
 
 
+class _MySQLSessionCache(_BaseSessionCache):
+    """Cross-worker cache backed by MySQL (DreamHost / no-Redis production)."""
+
+    def __init__(self, store: MySQLCacheStore, ttl_minutes: int, key_prefix: str) -> None:
+        self._store = store
+        self._ttl_seconds = max(60, ttl_minutes * 60)
+        self._key_prefix = key_prefix
+
+    def _key(self, session_id: str) -> str:
+        return f"{self._key_prefix}{session_id}"
+
+    def get(self, session_id: str) -> Dict[str, Any]:
+        try:
+            raw = self._store.get(self._key(session_id))
+            if raw:
+                return json_loads(raw, create_empty_cache())
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("MySQL cache get failed", exc)
+        return create_empty_cache()
+
+    def set(self, session_id: str, cache: Dict[str, Any]) -> None:
+        try:
+            self._store.set(self._key(session_id), json_dumps(cache), self._ttl_seconds)
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("MySQL cache set failed", exc)
+
+
 def _build_session_cache() -> _BaseSessionCache:
     """Construct the configured cache backend, falling back to memory on error."""
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if store.ping():
+                print("Session cache backend: mysql")
+                return _MySQLSessionCache(
+                    store, Config.CACHE_TTL_MINUTES, Config.CACHE_KEY_PREFIX,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: mysql cache backend unavailable ({exc.__class__.__name__}); "
+                "falling back to in-memory cache.",
+                file=sys.stderr,
+            )
     if Config.CACHE_BACKEND == "redis":
         try:
             import redis  # type: ignore
@@ -500,7 +552,17 @@ _session_cache = _build_session_cache()
 
 def _build_rate_limiter() -> RateLimiter:
     redis_client = None
-    if Config.CACHE_BACKEND == "redis":
+    mysql_store = None
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if store.ping():
+                mysql_store = store
+            else:
+                _log_exception("Rate limiter mysql unavailable; using in-memory fallback", RuntimeError("ping failed"))
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("Rate limiter mysql unavailable; using in-memory fallback", exc)
+    elif Config.CACHE_BACKEND == "redis":
         try:
             import redis  # type: ignore
 
@@ -512,7 +574,11 @@ def _build_rate_limiter() -> RateLimiter:
             redis_client.ping()
         except Exception as exc:  # noqa: BLE001
             _log_exception("Rate limiter redis unavailable; using in-memory fallback", exc)
-    return RateLimiter(redis_client, key_prefix=Config.RATE_LIMIT_KEY_PREFIX)
+    return RateLimiter(
+        redis_client,
+        mysql_store=mysql_store,
+        key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
+    )
 
 
 _rate_limiter = _build_rate_limiter()
@@ -528,7 +594,21 @@ def _semantic_embed(text: str):
 def _build_semantic_cache() -> SemanticResponseCache:
     backend_name = Config.SEMANTIC_CACHE_BACKEND
     redis_client = None
-    if backend_name == "redis":
+    mysql_store = None
+    if backend_name == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if not store.ping():
+                raise RuntimeError("mysql cache ping failed")
+        except Exception as exc:  # noqa: BLE001
+            _log_exception(
+                "Semantic cache mysql unavailable; using in-memory backend",
+                exc,
+            )
+            backend_name = "memory"
+        else:
+            mysql_store = store
+    elif backend_name == "redis":
         try:
             import redis  # type: ignore
 
@@ -549,6 +629,7 @@ def _build_semantic_cache() -> SemanticResponseCache:
         backend_name=backend_name,
         redis_client=redis_client,
         redis_key=Config.SEMANTIC_CACHE_KEY,
+        mysql_store=mysql_store,
     )
     return SemanticResponseCache(
         enabled=Config.SEMANTIC_CACHE_ENABLED,
@@ -1303,6 +1384,17 @@ def _check_redis_health() -> str:
         return "connected"
     except Exception:
         return "disconnected"
+
+
+def _check_shared_cache_health() -> str:
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            return "connected" if _get_mysql_cache_store().ping() else "disconnected"
+        except Exception:
+            return "disconnected"
+    if Config.CACHE_BACKEND == "redis":
+        return _check_redis_health()
+    return "in_process"
 
 
 def _check_chroma_health() -> str:
@@ -3090,9 +3182,12 @@ def health():
         status["status"] = "degraded"
 
     status["redis"] = _check_redis_health()
-    if status["redis"] == "disconnected" and Config.CACHE_BACKEND == "redis":
+    status["shared_cache"] = _check_shared_cache_health()
+    if Config.CACHE_BACKEND == "redis" and status["redis"] == "disconnected":
         status["status"] = "degraded"
-    if Config.PRODUCTION_MODE and status["redis"] != "connected":
+    elif Config.CACHE_BACKEND == "mysql" and status["shared_cache"] == "disconnected":
+        status["status"] = "degraded"
+    elif Config.PRODUCTION_MODE and Config.CACHE_BACKEND == "memory":
         status["status"] = "degraded"
 
     status["chroma"] = _check_chroma_health()

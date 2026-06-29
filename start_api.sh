@@ -27,20 +27,24 @@ else
 fi
 
 if [ "${PRODUCTION_MODE:-false}" = "true" ] || [ "${PRODUCTION_MODE:-false}" = "1" ]; then
-  if [ "${CACHE_BACKEND:-memory}" != "redis" ]; then
-    echo "ERROR: PRODUCTION_MODE=true requires CACHE_BACKEND=redis in .env" >&2
+  CACHE_BACKEND="${CACHE_BACKEND:-memory}"
+  if [ "$CACHE_BACKEND" = "redis" ]; then
+    REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+    if command -v redis-cli >/dev/null 2>&1; then
+      if ! redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
+        echo "ERROR: Redis is not reachable at $REDIS_URL. Start it with ./start_redis.sh" >&2
+        exit 1
+      fi
+    else
+      echo "WARNING: redis-cli not found; skipping Redis reachability check." >&2
+    fi
+    echo "Production mode: CACHE_BACKEND=redis, starting gunicorn..."
+  elif [ "$CACHE_BACKEND" = "mysql" ]; then
+    echo "Production mode: CACHE_BACKEND=mysql (shared cache via MySQL), starting gunicorn..."
+  else
+    echo "ERROR: PRODUCTION_MODE=true requires CACHE_BACKEND=redis or CACHE_BACKEND=mysql in .env" >&2
     exit 1
   fi
-  REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-  if command -v redis-cli >/dev/null 2>&1; then
-    if ! redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
-      echo "ERROR: Redis is not reachable at $REDIS_URL. Start it with ./start_redis.sh" >&2
-      exit 1
-    fi
-  else
-    echo "WARNING: redis-cli not found; skipping Redis reachability check." >&2
-  fi
-  echo "Production mode: CACHE_BACKEND=redis, starting gunicorn..."
 fi
 
 exec "$GUNICORN" -c "$ROOT_DIR/api/gunicorn_conf.py" api_v2:app

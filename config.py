@@ -181,7 +181,10 @@ CACHE_MAX_SESSIONS = _int("CACHE_MAX_SESSIONS", 100)
 CACHE_KEY_PREFIX = _env("CACHE_KEY_PREFIX", "rethinkai:chatcache:")
 
 SEMANTIC_CACHE_ENABLED = _truthy("SEMANTIC_CACHE_ENABLED", "false")
-_semantic_default_backend = "redis" if CACHE_BACKEND == "redis" else "memory"
+_semantic_default_backend = {
+    "redis": "redis",
+    "mysql": "mysql",
+}.get(CACHE_BACKEND, "memory")
 SEMANTIC_CACHE_BACKEND = _env("SEMANTIC_CACHE_BACKEND", _semantic_default_backend).strip().lower()
 SEMANTIC_CACHE_KEY = _env("SEMANTIC_CACHE_KEY", "rethinkai:semantic_cache:entries")
 SEMANTIC_CACHE_THRESHOLD = _float("SEMANTIC_CACHE_THRESHOLD", 0.95)
