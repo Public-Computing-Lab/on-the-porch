@@ -1,11 +1,19 @@
-# Unified environment configuration for ml-misi-community-sentiment
-# Copy these values into .env at the repo root and adjust them for your machine.
+# Canonical environment template for ml-misi-community-sentiment
+# Copy to .env at the repo root and fill in secrets. Never commit .env.
+#
+# Quick start:
+#   cp example_env.txt .env
+#
+# Production overrides (see README § Deployment):
+#   PRODUCTION_MODE=true, CACHE_BACKEND=redis, SEMANTIC_CACHE_ENABLED=true,
+#   GUEST_CLEANUP_ENABLED=true, FLASK_SESSION_COOKIE_SECURE=true,
+#   ALLOWED_ORIGINS=https://your-frontend-domain
 
 # ============================================================================
 # Gemini AI configuration
 # ============================================================================
 GEMINI_API_KEY=your-gemini-api-key
-# Production: use Flash Lite for cost control; Pro only as fallback (see GEMINI_FALLBACK_MODEL).
+# Production: use Flash Lite for cost control; Pro only as fallback.
 GEMINI_MODEL=gemini-2.5-flash-lite
 GEMINI_SUMMARY_MODEL=gemini-2.5-flash-lite
 GEMINI_FAST_MODEL=gemini-2.5-flash-lite
@@ -47,6 +55,7 @@ SESSION_TOUCH_DEBOUNCE_SECONDS=300
 
 # Request rate limits (uses Redis when CACHE_BACKEND=redis)
 RATE_LIMIT_ENABLED=true
+RATE_LIMIT_KEY_PREFIX=rethinkai:ratelimit:
 RATE_LIMIT_GUEST_CREATE_PER_IP=30
 RATE_LIMIT_GUEST_CREATE_WINDOW_SECONDS=3600
 RATE_LIMIT_CHAT_PER_SESSION=60
@@ -70,15 +79,24 @@ RETHINKAI_API_KEYS=legacy-api-key-1,legacy-api-key-2
 # ============================================================================
 # Production server (gunicorn via ./start_api.sh)
 # ============================================================================
+GUNICORN_BIND=127.0.0.1:8888
 GUNICORN_WORKERS=3
 GUNICORN_THREADS=8
 GUNICORN_TIMEOUT=120
-GUNICORN_BIND=127.0.0.1:8888
+GUNICORN_WORKER_CLASS=gthread
+# Optional tuning (defaults shown in api/gunicorn_conf.py):
+# GUNICORN_GRACEFUL_TIMEOUT=30
+# GUNICORN_KEEPALIVE=5
+# GUNICORN_MAX_REQUESTS=1000
+# GUNICORN_MAX_REQUESTS_JITTER=100
+# GUNICORN_ACCESS_LOG=-
+# GUNICORN_ERROR_LOG=-
+# GUNICORN_LOG_LEVEL=info
 
 # ============================================================================
 # Shared cache (required for multi-worker gunicorn deployments)
 # ============================================================================
-# Local dev: memory is fine for a single worker. Production: use redis.
+# Local dev: memory is fine for a single Flask/gunicorn worker. Production: redis.
 CACHE_BACKEND=memory
 REDIS_URL=redis://127.0.0.1:6379/0
 CACHE_TTL_MINUTES=60
@@ -86,7 +104,6 @@ CACHE_MAX_SESSIONS=100
 CACHE_KEY_PREFIX=rethinkai:chatcache:
 
 # Semantic response cache (near-duplicate first-turn questions)
-# Enable in production to reduce repeat LLM cost (Iteration 0+).
 SEMANTIC_CACHE_ENABLED=false
 SEMANTIC_CACHE_BACKEND=redis
 SEMANTIC_CACHE_KEY=rethinkai:semantic_cache:entries
@@ -94,17 +111,16 @@ SEMANTIC_CACHE_THRESHOLD=0.95
 SEMANTIC_CACHE_TTL_SECONDS=900
 SEMANTIC_CACHE_MAX=200
 
-# Iteration 1: prepared SQL catalog + smarter follow-up gate
+# ============================================================================
+# Civic chatbot: prepared SQL + execution pipeline
+# ============================================================================
 PREPARED_SQL_ENABLED=true
 PREPARED_SQL_USE_LLM_SUMMARY=false
-# Rewrite DB-backed count answers with Gemini (keeps **numbers** exact via validator)
 PREPARED_SQL_CONVERSATIONAL=true
-# Answer multi-topic questions (e.g. 311 AND 911) with one query per topic
 PREPARED_SQL_MULTI_PART=true
-# Include top 311 issue types whenever reporting a generic 311 count
 PREPARED_SQL_311_INCLUDE_TYPES=true
 
-# Plan → execute → synthesize pipeline (rules-first planner, code-only executor)
+# Plan → execute → synthesize (rules-first planner, parallel executor, one synthesis LLM)
 EXECUTION_PIPELINE_ENABLED=true
 EXECUTION_LLM_PLANNER_ENABLED=true
 EXECUTION_PIPELINE_LOG=true
@@ -112,21 +128,22 @@ EXECUTION_PIPELINE_MAX_WORKERS=4
 ANSWER_SYNTHESIS_ENABLED=true
 FAST_FOLLOWUP_GATE_ENABLED=true
 
-# Iteration 2: rule-first intent router + async Boston.gov enrichment
+# Rule-first intent router + async Boston.gov enrichment
 INTENT_ROUTER_V2_ENABLED=true
 ROUTER_RULE_CONFIDENCE_THRESHOLD=0.75
 BOSTON_GOV_ASYNC_ENABLED=true
 BOSTON_GOV_BLOCKING=false
 BOSTON_GOV_ASYNC_TIMEOUT_SECONDS=8
 
-# Iteration 3: local BGE embeddings (run reindex_bge_vectordb.py before enabling local)
+# ============================================================================
+# Embeddings and vector retrieval
+# ============================================================================
+# gemini = API embeddings; local = BAAI/bge-base-en-v1.5 (run reindex_bge_vectordb.py first)
 EMBED_PROVIDER=gemini
 LOCAL_EMBED_MODEL=BAAI/bge-base-en-v1.5
 LOCAL_EMBED_DEVICE=cpu
-VECTORDB_BGE_DIR=../vectordb_bge_v1
 
-# Iteration 4: Qdrant vector DB + BM25 hybrid retrieval
-# Default chroma; set qdrant after migrate_chroma_to_qdrant.py
+# chroma (default) or qdrant after migrate_chroma_to_qdrant.py
 VECTOR_DB_PROVIDER=chroma
 BM25_HYBRID_ENABLED=true
 QDRANT_MODE=local
@@ -137,7 +154,15 @@ QDRANT_STAGING_COLLECTION=otp_documents_staging
 QDRANT_INGEST_STAGING=false
 VECTOR_SIZE=768
 
-# Iteration 5: materialized MySQL summaries, ingest job tracking, 311 freshness SLO
+VECTORDB_DIR=../vectordb_new
+VECTORDB_BGE_DIR=../vectordb_bge_v1
+PARALLEL_RETRIEVAL=true
+VECTORDB_SINGLETON=true
+CHROMA_MAX_ATTEMPTS=3
+
+# ============================================================================
+# Materialized MySQL summaries, ingest jobs, freshness SLOs
+# ============================================================================
 MATERIALIZED_VIEWS_ENABLED=true
 EVENTS_MATERIALIZED_DAYS=90
 INGEST_QUEUE_ENABLED=true
@@ -147,14 +172,11 @@ INGEST_STATUS_PREFIX=rethinkai:ingest:status:
 INGEST_STATUS_TTL_SECONDS=604800
 
 # ============================================================================
-# Production profile (Iteration 0)
+# Production profile
 # ============================================================================
-# Set PRODUCTION_MODE=true on deployed servers. Requires CACHE_BACKEND=redis.
 PRODUCTION_MODE=false
 INGEST_STALE_HOURS=26
 REQUEST_METRICS_ENABLED=true
-
-# Streaming endpoint (client opt-in via public/config.js)
 STREAMING_ENABLED=true
 
 # ============================================================================
@@ -167,15 +189,6 @@ MYSQL_PASSWORD=your-mysql-password
 MYSQL_DB=rethink_ai_boston
 MYSQL_POOL_SIZE=10
 MYSQL_CONNECT_TIMEOUT=10
-
-# ============================================================================
-# Vector database configuration
-# ============================================================================
-VECTORDB_DIR=../vectordb_new
-VECTORDB_BGE_DIR=../vectordb_bge_v1
-PARALLEL_RETRIEVAL=true
-VECTORDB_SINGLETON=true
-CHROMA_MAX_ATTEMPTS=3
 
 # ============================================================================
 # LangChain / LangSmith tracing (optional)
@@ -192,8 +205,6 @@ LANGSMITH_PROJECT=rethinkai-community-sentiment
 # ============================================================================
 # Dorchester Reporter (dotnews.com) RSS — disabled until feed issues are resolved.
 RSS_DOT_REPORTER_ENABLED=false
-
-# Optional: limit DotNews PDF backfill to issues on/after this date (YYYY-MM-DD)
 # DOTNEWS_CUTOFF_DATE=2024-01-01
 
 # ============================================================================
