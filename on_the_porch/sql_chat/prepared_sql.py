@@ -29,6 +29,48 @@ _OFFENSE_EXPR = (
     "COALESCE(NULLIF(`offense_code_group`, ''), NULLIF(`offense_description`, ''))"
 )
 
+# BPD "crime incident reports" include many non-criminal police responses.
+_NON_CRIME_OFFENSE_LIKE_PATTERNS = (
+    "sick assist",
+    "investigate person",
+    "investigate property",
+    "towed motor vehicle",
+    "m/v accident",
+    "motor vehicle accident",
+    "property - lost",
+    "property - found",
+    "missing person",
+    "verbal dispute",
+    "search warrant",
+    "death investigation",
+    "sick/injured",
+    "landlord",
+    "ballistics evidence",
+    "medical assist",
+    "service to other",
+    "other investigation",
+    "warrant arrest",
+    "assist pd",
+    "property recovered",
+    "found property",
+    "recovered property",
+    "missing person located",
+    "locate person",
+)
+
+
+def _is_non_crime_offense(name: str) -> bool:
+    s = (name or "").lower()
+    return any(pat in s for pat in _NON_CRIME_OFFENSE_LIKE_PATTERNS)
+
+
+def _sql_exclude_non_crime_offenses(field: str) -> str:
+    clauses = [
+        f"LOWER({field}) NOT LIKE '%{pat.replace(chr(39), chr(39)+chr(39))}%'"
+        for pat in _NON_CRIME_OFFENSE_LIKE_PATTERNS
+    ]
+    return " AND ".join(clauses)
+
 
 @dataclass
 class PreparedMatch:
@@ -36,6 +78,16 @@ class PreparedMatch:
     sql: str
     answer_fn: Callable[[str, Dict[str, Any]], str]
     supplemental_sql: Optional[str] = None
+
+
+def _default_period_days(intent: str) -> int:
+    if intent.startswith("crime"):
+        return 30
+    return 7
+
+
+def _resolve_period_for_intent(question: str, intent: str) -> PeriodWindow:
+    return _resolve_period(question, _default_period_days(intent))
 
 
 def _data_source_note() -> str:
@@ -84,6 +136,122 @@ def _format_count_answer(
         hint = zero_hint or "Try a wider date range or check again after the next data sync."
         return f"I found **0** {label} in Dorchester {prep} {period}{defn}. {hint}"
     return f"There were **{count:,}** {label} in Dorchester {prep} {period}{defn}."
+
+
+def _format_crime_count_answer(
+    question: str,
+    result: Dict[str, Any],
+    *,
+    period: str,
+    kind: str = "incidents",
+) -> str:
+    """Count of BPD records — factual but not sensational."""
+    rows = result.get("rows") or []
+    count = 0
+    if rows and isinstance(rows[0], dict):
+        count = rows[0].get("cnt") or rows[0].get("count") or 0
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = 0
+    prep = _period_preposition(period)
+    if count == 0:
+        return (
+            f"I didn't find matching BPD incident reports for Dorchester {prep} {period}. "
+            "That may reflect a quieter stretch in the public data, or you can try a wider date range."
+        )
+    if kind == "shootings":
+        what = "incidents flagged with a shooting indicator in BPD records"
+    else:
+        what = "incident reports filed with BPD"
+    return (
+        f"BPD's open data shows **{count:,}** {what} in Dorchester {prep} {period}. "
+        "That's the volume of reports on record — useful context when you're looking into "
+        "safety, not the whole story of the neighborhood."
+    )
+
+
+def _display_offense_name(name: str) -> str:
+    """Readable label from BPD offense_group codes."""
+    s = " ".join((name or "Unknown").strip().lower().split())
+    if not s or s == "unknown":
+        return "Unknown"
+    s = s.replace("m/v", "motor vehicle")
+    if s.startswith("investigate person"):
+        return "investigating persons"
+    if s.startswith("investigate property"):
+        return "investigating property"
+    if s == "sick assist":
+        return "sick assist calls"
+    if s == "larceny shoplifting":
+        return "shoplifting"
+    if "assault - simple" in s:
+        return "simple assaults"
+    if "leaving scene" in s and "property damage" in s:
+        return "motor vehicle leaving the scene (property damage)"
+    if s == "towed motor vehicle":
+        return "towed motor vehicles"
+    return s[0].upper() + s[1:]
+
+
+def _join_ranked_labels(labels: List[str]) -> str:
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return ", ".join(labels[:-1]) + f", and {labels[-1]}"
+
+
+def _format_crime_breakdown_answer(
+    question: str,
+    result: Dict[str, Any],
+    *,
+    period: str,
+    limit: int = 5,
+) -> str:
+    """Offense breakdown in prose — categories by default, counts only when asked."""
+    rows = result.get("rows") or []
+    if not rows:
+        return (
+            f"I couldn't pull a category breakdown from BPD's Dorchester records for {period}. "
+            "Try a wider window or ask about a specific concern."
+        )
+    prep = _period_preposition(period)
+    show_counts = _wants_crime_counts(question)
+    labels: List[str] = []
+    counted_parts: List[str] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        raw_name = row.get("offense_group") or row.get("issue_type") or "Unknown"
+        if _is_non_crime_offense(str(raw_name)):
+            continue
+        name = _display_offense_name(raw_name)
+        cnt = row.get("cnt") or row.get("count") or 0
+        try:
+            cnt = int(cnt)
+        except (TypeError, ValueError):
+            cnt = 0
+        labels.append(f"**{name}**")
+        counted_parts.append(f"**{name}** ({cnt:,} reports)")
+
+    if not labels:
+        return (
+            f"I couldn't pull criminal offense categories from BPD's Dorchester records "
+            f"for {period}. Try a wider window or ask about a specific concern."
+        )
+
+    joined = _join_ranked_labels(counted_parts if show_counts else labels)
+    verb = "is" if len(labels) == 1 else "are"
+    return (
+        f"For criminal offense categories in BPD's Dorchester records {prep} {period}, "
+        f"{joined} {verb} among those recorded most often "
+        "(non-criminal police service calls are excluded). "
+        "These are official report labels in open data — helpful for understanding patterns, "
+        "not a scorecard on the neighborhood."
+    )
 
 
 def _format_grouped_answer(
@@ -697,25 +865,25 @@ def _format_homicide_answer(
 
     if labeled > 0:
         answer = (
-            f"There were **{labeled:,}** homicides in Dorchester for {period} "
-            f"({labeled_def}; {_data_source_note()})."
+            f"BPD's records show **{labeled:,}** homicides in Dorchester for {period} "
+            f"({labeled_def}; {_data_source_note()}). "
+            "Behind each number is a person and a family — I'm sharing what the data shows "
+            "because you asked."
         )
         return answer + baseline_note
 
     if proxy > 0:
         answer = (
-            f"I found **0** homicides explicitly labeled in Boston Open Data for {period}, "
-            f"but **{proxy:,}** fatal-shooting death investigations in Dorchester "
-            f"({proxy_def}). Official BPD homicide counts may differ because rulings "
-            f"and offense labels are updated separately from this feed."
+            f"BPD's open data does not show homicides explicitly labeled for {period}, but "
+            f"does include **{proxy:,}** fatal-shooting death investigations in Dorchester "
+            f"({proxy_def}). Official counts can change as cases are reviewed and reclassified."
         )
         return answer + baseline_note
 
     answer = (
-        f"I found **0** homicides in Dorchester for {period} using both labeled homicides "
-        f"and fatal-shooting death investigations in Boston Open Data ({_data_source_note()}). "
-        "Recent fatal shootings may not appear yet, or may be coded under other offense types "
-        "until BPD updates the record."
+        f"I did not find homicides or fatal-shooting death investigations labeled in BPD's "
+        f"Dorchester records for {period} ({_data_source_note()}). Recent cases may not be "
+        "filed yet, or may appear under other offense types until records are updated."
     )
     return answer + baseline_note
 
@@ -751,6 +919,7 @@ def _bpd_fatal_shootings_baseline_note() -> str:
 
 
 def _sql_crime_top_offenses(window: PeriodWindow) -> str:
+    offense_filter = _sql_exclude_non_crime_offenses("offense_group")
     if window.calendar_ym and os.getenv("MATERIALIZED_VIEWS_ENABLED", "true").strip().lower() in (
         "1", "true", "yes",
     ):
@@ -759,6 +928,7 @@ def _sql_crime_top_offenses(window: PeriodWindow) -> str:
             "FROM `mv_crime_monthly` "
             f"WHERE DATE_FORMAT(`month_start`, '%Y-%m') = '{window.calendar_ym}' "
             "AND offense_group IS NOT NULL AND offense_group <> '' "
+            f"AND {offense_filter} "
             "GROUP BY offense_group ORDER BY cnt DESC LIMIT 10"
         )
     days = max(1, min(window.days, 365))
@@ -771,14 +941,17 @@ def _sql_crime_top_offenses(window: PeriodWindow) -> str:
             "FROM `mv_crime_monthly` "
             f"WHERE `month_start` >= DATE_SUB(CURDATE(), INTERVAL {months} MONTH) "
             "AND offense_group IS NOT NULL AND offense_group <> '' "
+            f"AND {offense_filter} "
             "GROUP BY offense_group ORDER BY cnt DESC LIMIT 10"
         )
+    raw_filter = _sql_exclude_non_crime_offenses(_OFFENSE_EXPR)
     return (
         f"SELECT {_OFFENSE_EXPR} AS offense_group, COUNT(*) AS cnt "
         "FROM `crime_incident_reports` "
         f"WHERE {_DORCHESTER_CRIME} "
         f"AND {_date_column_filter('occurred_on_date', window)} "
         f"AND {_OFFENSE_EXPR} IS NOT NULL AND {_OFFENSE_EXPR} <> '' "
+        f"AND {raw_filter} "
         f"GROUP BY {_OFFENSE_EXPR} ORDER BY cnt DESC LIMIT 10"
     )
 
@@ -921,10 +1094,71 @@ def is_311_advisory_question(question: str) -> bool:
         return False
     return any(h in q for h in _311_ADVISORY_HINTS)
 
+
+_CRIME_DATA_CLARIFICATION_HINTS = (
+    "really crimes",
+    "really crime",
+    "actually crimes",
+    "actually crime",
+    "are those crimes",
+    "are these crimes",
+    "is that a crime",
+    "is this a crime",
+    "what counts as a crime",
+    "not crimes",
+    "aren't crimes",
+    "arent crimes",
+    "not really crimes",
+    "why sick assist",
+    "why investigate person",
+)
+
+
+def is_crime_data_clarification_question(question: str) -> bool:
+    """Follow-up asking whether BPD incident categories are actual crimes."""
+    q = _q(question)
+    if not q:
+        return False
+    if any(h in q for h in _CRIME_DATA_CLARIFICATION_HINTS):
+        return True
+    return re.search(
+        r"\b(are|is) (these|those|they|that) (really|actually) crimes?\b",
+        q,
+    ) is not None
+
+
+def crime_data_clarification_answer() -> str:
+    return (
+        "Not all of them — that's an important distinction. Boston's **crime incident reports** "
+        "dataset logs many police responses in one file: **sick assists**, "
+        "**investigate person** checks, **towing**, and **accident** reports appear alongside "
+        "actual criminal filings.\n\n"
+        "Those high-volume categories are **not crimes** in the everyday sense, even though "
+        "they share the same open-data table. When you ask about crimes, I filter toward "
+        "offense types like **theft**, **assault**, **vandalism**, and **shoplifting**."
+    )
+
 _STATS_COUNT_HINTS = (
     "how many", "how much", "count", "number of", "total",
     "a lot of", "are there a lot", "are there many", "how bad", "how common",
 )
+
+_CRIME_EXPLICIT_COUNT_HINTS = (
+    "exact number", "exact count", "give me the numbers", "with numbers",
+    "how many of each", "breakdown with", "statistics", "stats",
+)
+
+
+def _wants_crime_counts(question: str) -> bool:
+    """True when the resident explicitly asked for numeric crime figures."""
+    q = _q(question)
+    if any(h in q for h in _STATS_COUNT_HINTS):
+        return True
+    return any(h in q for h in _CRIME_EXPLICIT_COUNT_HINTS)
+
+
+def wants_crime_counts(question: str) -> bool:
+    return _wants_crime_counts(question)
 
 _BREAKDOWN_HINTS = (
     "what were they", "what were these", "what were those", "what kind",
@@ -1030,16 +1264,33 @@ def build_synthesis_canonical(
 
     if intent == "crime_by_offense":
         if not rows:
-            return f"No crime breakdown available{period_phrase}."
+            return f"No BPD offense-category breakdown is available{period_phrase}."
         parts = []
         for row in rows[:8]:
-            name = row.get("offense_group") or "Unknown"
+            if not isinstance(row, dict):
+                continue
+            raw = row.get("offense_group") or "Unknown"
+            if _is_non_crime_offense(str(raw)):
+                continue
+            name = _display_offense_name(raw)
             cnt = int(row.get("cnt") or row.get("count") or 0)
-            parts.append(f"{name}: **{cnt:,}**")
-        return f"Crime types in Dorchester{period_phrase}: " + "; ".join(parts)
+            parts.append(f"{name}: **{cnt:,}** reports")
+        if not parts:
+            return f"No criminal offense breakdown is available{period_phrase}."
+        return (
+            f"Criminal offense categories in BPD Dorchester open data{period_phrase} "
+            f"(non-criminal police service calls excluded): "
+            + "; ".join(parts)
+        )
 
     count = _first_count_from_result(result)
     if count is not None:
+        if intent == "crime_monthly_count" and is_subjective_safety_question(question):
+            return (
+                f"BPD incident reports in Dorchester{period_phrase}: **{count:,}** "
+                "(background only — the resident asked if the neighborhood is safe; "
+                "answer with nuance and community context, not this count alone)"
+            )
         return f"Count: **{count:,}**{period_phrase}."
     return ""
 
@@ -1062,6 +1313,12 @@ def build_synthesis_payload(
     if intent in DETAIL_CIVIC_INTENTS or intent in ("crime_by_offense",):
         payload["row_analysis"] = analyze_311_report_rows(rows) if "311" in intent else None
         payload["sample_rows"] = rows[:8]
+        if intent == "crime_by_offense":
+            payload["notes"] = (
+                "Criminal offense categories only (service calls excluded). Use these categories "
+                "to answer what crimes are reported. Supplement with RAG for street safety, "
+                "community programs, and neighborhood context — not as a substitute for these facts."
+            )
     elif rows:
         payload["sample_rows"] = rows[:5]
     if supplemental_result and supplemental_result.get("rows"):
@@ -1139,8 +1396,8 @@ _911_EXPLICIT_CRIME_HINTS = (
 )
 
 _911_CRIME_FOOTNOTE = (
-    "*(These are BPD crime incident reports for Dorchester (district C11), "
-    "not 911 dispatch call logs.)*"
+    "*(These figures come from BPD incident reports in open data for Dorchester — "
+    "not 911 call logs. They're one lens on safety, not the whole picture of the neighborhood.)*"
 )
 
 
@@ -1184,8 +1441,16 @@ def _is_911_dispatch_question(question: str) -> bool:
 
 def _append_911_crime_footnote(answer: str) -> str:
     text = (answer or "").strip()
-    if not text or "not 911 dispatch call logs" in text:
+    if not text:
         return text
+    low = text.lower()
+    if "not 911" in low or "911 call log" in low or "911 dispatch" in low:
+        return text
+    if "not the whole story" in low or "not the whole picture" in low:
+        return (
+            f"{text}\n\n"
+            "*_(Source: BPD open-data incident reports for Dorchester — not 911 call logs.)_*"
+        )
     return f"{text}\n\n{_911_CRIME_FOOTNOTE}"
 
 
@@ -1373,12 +1638,39 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
     return None
 
 
+def _wants_crime_breakdown(q: str) -> bool:
+    if any(h in q for h in ("top", "breakdown", "by type", "types", "by category")):
+        return True
+    if any(h in q for h in ("of each", "each type", "each category", "per category", "crime type")):
+        return True
+    if any(
+        h in q
+        for h in (
+            "most common",
+            "most comon",
+            "most frequent",
+            "most frequently",
+            "most often",
+            "frequently reported",
+            "commonly reported",
+            "common crimes",
+            "common crime",
+        )
+    ):
+        return True
+    if re.search(r"\bwhat\s+crimes?\b", q) and any(
+        h in q for h in ("reported", "common", "frequent", "often", "typical")
+    ):
+        return True
+    return re.search(r"\bmost\s+comm?on\b", q) is not None
+
+
 def _match_crime(question: str, *, from_911: bool = False) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     crime_hints = (
         "crime", "crimes", "incident", "incidents", "assault", "robbery",
         "shooting", "shootings", "shots fired", "gun violence", "theft", "burglary",
-        "offense", "police report",
+        "offense", "police report", "reporting", "reportings",
         "homicide", "homicides", "murder", "murders",
     )
     if not from_911 and not any(h in q for h in crime_hints):
@@ -1386,6 +1678,15 @@ def _match_crime(question: str, *, from_911: bool = False) -> Optional[PreparedM
     window = _resolve_period(question, 30)
     period = window.label
     calendar_year = "this year" in q
+
+    if _wants_crime_breakdown(q):
+        return PreparedMatch(
+            intent="crime_by_offense",
+            sql=_sql_crime_top_offenses(window),
+            answer_fn=lambda question, result, per=period: _format_crime_breakdown_answer(
+                question, result, period=per,
+            ),
+        )
 
     stats_asked = any(h in q for h in _STATS_COUNT_HINTS) or any(
         h in q for h in ("recently", "lately", "these days")
@@ -1404,16 +1705,11 @@ def _match_crime(question: str, *, from_911: bool = False) -> Optional[PreparedM
         stats_asked = True
     if stats_asked:
         if any(h in q for h in ("shooting", "shootings", "shots fired", "gun violence")):
-            shoot_def = "incidents flagged shooting=1 in BPD crime reports"
             return PreparedMatch(
                 intent="crime_shooting_count",
                 sql=_sql_crime_shooting_count(window),
-                answer_fn=lambda question, result: _format_count_answer(
-                    question,
-                    result,
-                    label="shootings",
-                    period=period,
-                    definition=shoot_def,
+                answer_fn=lambda question, result, per=period: _format_crime_count_answer(
+                    question, result, period=per, kind="shootings",
                 ),
             )
         if any(h in q for h in ("homicide", "homicides", "murder", "murders")):
@@ -1429,20 +1725,83 @@ def _match_crime(question: str, *, from_911: bool = False) -> Optional[PreparedM
         return PreparedMatch(
             intent="crime_monthly_count",
             sql=_sql_crime_monthly_count(window),
-            answer_fn=lambda question, result: _format_count_answer(
-                question, result, label="crime incidents", period=period,
-            ),
-        )
-    if any(h in q for h in ("top", "most common", "breakdown", "by type", "types")):
-        return PreparedMatch(
-            intent="crime_by_offense",
-            sql=_sql_crime_top_offenses(window),
-            answer_fn=lambda question, result: _format_grouped_answer(
-                question, result, label="crime types",
-                key_field="offense_group", period=period,
+            answer_fn=lambda question, result, per=period: _format_crime_count_answer(
+                question, result, period=per, kind="incidents",
             ),
         )
     return None
+
+
+def should_hybridize_crime_answer(question: str) -> bool:
+    """Subjective safety / concerns — hybrid (RAG + SQL background). Not factual crime lookups."""
+    return crime_routing_mode(question) == "hybrid"
+
+
+def is_factual_crime_question(question: str) -> bool:
+    """Resident wants BPD numbers or offense categories — route SQL for verified facts."""
+    if is_subjective_safety_question(question):
+        return False
+    hit = match_prepared_sql(question)
+    if hit is not None and (
+        hit.intent.startswith("crime") or hit.intent == "911_unavailable"
+    ):
+        if hit.intent == "911_unavailable":
+            return False
+        return True
+    q = (question or "").lower()
+    crime_words = (
+        "crime", "crimes", "offense", "assault", "robbery", "shooting",
+        "homicide", "murder", "larceny", "theft", "vandalism", "bpd",
+        "police report", "incident report",
+    )
+    if not any(h in q for h in crime_words):
+        return False
+    if _wants_crime_breakdown(q):
+        return True
+    stats_hints = (
+        "how many", "count", "number of", "total", "most common", "most frequent",
+        "frequently reported", "commonly reported", "breakdown", "what crimes",
+        "what kind", "what type", "types of", "how much", "statistics", "stats",
+        "how common", "how bad",
+    )
+    return any(h in q for h in stats_hints)
+
+
+def crime_routing_mode(question: str) -> Optional[str]:
+    """'sql' for factual BPD lookups; 'hybrid' for neighborhood-safety judgment calls."""
+    if is_subjective_safety_question(question):
+        return "hybrid"
+    q = (question or "").lower()
+    if "safety" in q and any(
+        h in q for h in ("concern", "concerns", "issue", "issues", "worry", "worried")
+    ):
+        return "hybrid"
+    if is_factual_crime_question(question):
+        return "sql"
+    return None
+
+
+def is_subjective_safety_question(question: str) -> bool:
+    """'Is it safe?' / neighborhood safety — needs nuance, not a raw count."""
+    q = (question or "").lower()
+    if any(
+        h in q
+        for h in (
+            "is it safe",
+            "how safe",
+            "safe neighborhood",
+            "safe neighbourhood",
+            "safe to live",
+            "safe area",
+            "safe place",
+        )
+    ):
+        return True
+    if "safe" in q and any(
+        h in q for h in ("neighborhood", "neighbourhood", "area", "live", "raise", "family")
+    ):
+        return True
+    return False
 
 
 def is_named_event_detail(question: str) -> bool:
@@ -1553,10 +1912,15 @@ def _conversational_llm_enabled() -> bool:
     )
 
 
-def _prepared_should_use_llm(hit: PreparedMatch) -> bool:
+def _prepared_should_use_llm(hit: PreparedMatch, question: str = "") -> bool:
     if hit.intent == "event_by_name":
         return True
     if hit.intent in ("crime_homicide_count", "911_unavailable", "911_advisory"):
+        return False
+    q = (question or "").lower()
+    if "911" in q and (
+        hit.intent.startswith("crime") or hit.intent in _COUNT_INTENTS
+    ):
         return False
     if _conversational_llm_enabled() and hit.intent in _COUNT_INTENTS:
         return True
@@ -1584,7 +1948,7 @@ def _llm_render_prepared_answer(
     )
     from sql_chat import app4  # noqa: WPS433
 
-    window = _resolve_period(question, 7)
+    window = _resolve_period_for_intent(question, hit.intent)
     terms = _issue_search_terms(question)
     issue_label = terms[0] if terms else None
     if hit.intent == "911_unavailable":
@@ -1614,7 +1978,8 @@ def _llm_render_prepared_answer(
     )
 
     model = os.getenv("GEMINI_SUMMARY_MODEL", app4.GEMINI_SUMMARY_MODEL)
-    return app4._call_gemini_with_logging(model, full_prompt, temperature=0.35).strip()
+    temp = 0.2 if kind == "crime" else 0.35
+    return app4._call_gemini_with_logging(model, full_prompt, temperature=temp).strip()
 
 
 def _format_compound_fallback(
@@ -1672,7 +2037,7 @@ def execute_prepared_facts(
     result, supplemental_result = _execute_prepared_hit(
         hit, question, execute_sql, supplemental_sql=supplemental_sql,
     )
-    window = _resolve_period(question, 7)
+    window = _resolve_period_for_intent(question, hit.intent)
     period = window.label
     issue_label: Optional[str] = None
     terms = _issue_search_terms(question)
@@ -1760,6 +2125,8 @@ def _enforce_compound_canonical_facts(answer: str, blocks: List[Dict[str, Any]])
         if not canonical:
             continue
         if block.get("intent") == "911_unavailable":
+            continue
+        if block.get("intent") == "crime_by_offense":
             continue
         count = _first_count_from_result(block.get("result") or {})
         if count is not None:
@@ -1936,7 +2303,7 @@ def run_prepared_sql(
         print(f"  ⚠️ Prepared SQL failed ({hit.intent}): {exc}")
         return None
 
-    use_llm = _prepared_should_use_llm(hit)
+    use_llm = _prepared_should_use_llm(hit, question)
     answer = ""
     if use_llm:
         try:
@@ -1984,6 +2351,7 @@ def run_prepared_sql(
         (answer or "").strip(),
         result,
         prepared_intent=hit.intent,
+        question=question,
     )
     from answer_voice import polish_conversational_answer  # noqa: WPS433
 
@@ -1991,6 +2359,7 @@ def run_prepared_sql(
         answer,
         conversation_history,
         prepared_intent=hit.intent,
+        question=question,
     )
 
     out: Dict[str, Any] = {
@@ -2019,6 +2388,62 @@ def _first_count_from_result(result: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _crime_breakdown_labels(result: Dict[str, Any], *, limit: int = 5) -> List[str]:
+    labels: List[str] = []
+    for row in (result.get("rows") or [])[:limit]:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("offense_group") or row.get("issue_type") or ""
+        if _is_non_crime_offense(str(raw)):
+            continue
+        labels.append(_display_offense_name(str(raw)))
+    return labels
+
+
+def _label_mentioned(label: str, text: str) -> bool:
+    low = (text or "").lower()
+    label_low = label.lower()
+    if label_low in low:
+        return True
+    tokens = [w for w in re.split(r"[\s/\-]+", label_low) if len(w) > 3]
+    return any(tok in low for tok in tokens)
+
+
+def _looks_like_crime_scoreboard(text: str) -> bool:
+    if not text:
+        return False
+    bold_counts = len(re.findall(r"\*\*\d[\d,]*\*\*", text))
+    if bold_counts >= 3:
+        return True
+    list_lines = len(re.findall(
+        r"(?m)^\s*(?:[-*•]|\d+[.)])\s*.+\d",
+        text,
+    ))
+    return list_lines >= 3
+
+
+def _ensure_crime_breakdown_facts(answer: str, result: Dict[str, Any]) -> str:
+    """Keep LLM answers warm but ensure leading offense categories are present."""
+    labels = _crime_breakdown_labels(result)
+    if not labels:
+        return answer
+    out = (answer or "").strip()
+    top = labels[:3]
+    mentioned = sum(1 for label in top if _label_mentioned(label, out))
+    if mentioned >= min(2, len(top)):
+        return out
+    joined = _join_ranked_labels([f"**{name}**" for name in top])
+    fact_line = (
+        f"In BPD's Dorchester records for that period, the leading criminal offense "
+        f"types include {joined}."
+    )
+    if not out:
+        return fact_line
+    if fact_line.lower() in out.lower():
+        return out
+    return f"{out}\n\n{fact_line}"
+
+
 def _bold_counts_in_answer(answer: str) -> list[int]:
     return [int(m.replace(",", "")) for m in re.findall(r"\*\*(\d[\d,]*)\*\*", answer or "")]
 
@@ -2028,6 +2453,7 @@ def validate_prepared_answer(
     result: Dict[str, Any],
     *,
     prepared_intent: Optional[str] = None,
+    question: Optional[str] = None,
 ) -> str:
     """Ensure prepared-SQL numeric answers match query results."""
     if not prepared_intent or not answer:
@@ -2035,6 +2461,17 @@ def validate_prepared_answer(
 
     sql_count = _first_count_from_result(result)
     bold = _bold_counts_in_answer(answer)
+
+    if prepared_intent == "crime_by_offense":
+        from answer_voice import polish_crime_answer  # noqa: WPS433
+
+        out = polish_crime_answer(answer, question or "")
+        return _ensure_crime_breakdown_facts(out, result)
+
+    if prepared_intent == "crime_monthly_count" and is_subjective_safety_question(
+        question or "",
+    ):
+        return answer
 
     if prepared_intent == "crime_homicide_count":
         row = (result.get("rows") or [{}])[0] if result.get("rows") else {}

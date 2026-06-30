@@ -684,9 +684,13 @@ def _cache_has_311_data(cache: Dict[str, Any]) -> bool:
 
 def _cache_has_crime_data(cache: Dict[str, Any]) -> bool:
     sql = _sql_query_text(cache)
-    if "crime_incident_reports" in sql:
+    if "crime_incident_reports" in sql or "mv_crime" in sql:
         return True
-    return False
+    result = cache.get("sql_result") or {}
+    rows = result.get("rows") or []
+    if not rows or not isinstance(rows[0], dict):
+        return False
+    return any(k in rows[0] for k in ("offense_group", "offense_description"))
 
 
 def _followup_topic_requires_fresh_data(
@@ -720,6 +724,48 @@ _311_EXPANSION_PATTERNS = (
     r"go deeper",
     r"expand on",
 )
+
+
+def _period_from_followup_message(message: str) -> Optional[str]:
+    ql = (message or "").lower()
+    if "last month" in ql:
+        return "last month"
+    if "this month" in ql:
+        return "this month"
+    if "last week" in ql:
+        return "last week"
+    if "this week" in ql:
+        return "this week"
+    if "this year" in ql:
+        return "this year"
+    if "last year" in ql:
+        return "last year"
+    if "last 30 days" in ql or "past 30 days" in ql:
+        return "in the last 30 days"
+    if "last 7 days" in ql or "past week" in ql:
+        return "in the last 7 days"
+    return None
+
+
+def _prior_user_asked_about_crimes(
+    retrieval_cache: Optional[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> bool:
+    crime_hints = (
+        "crime", "crimes", "offense", "assault", "robbery", "larceny",
+        "911 report", "safety stat", "shooting", "vandalism",
+    )
+    prior = (retrieval_cache or {}).get("question") or ""
+    if any(h in prior.lower() for h in crime_hints):
+        return True
+    if conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") != "user":
+                continue
+            content = (msg.get("content") or "").lower()
+            if any(h in content for h in crime_hints):
+                return True
+    return False
 
 
 def _period_from_conversation_context(
@@ -781,6 +827,22 @@ def resolve_effective_question(
             )
             return rewritten, True
 
+    crime_followup = (
+        _prior_user_asked_about_crimes(retrieval_cache, conversation_history)
+        or _cache_has_crime_data(retrieval_cache or {})
+    )
+    if crime_followup and (
+        any(re.search(pat, ql) for pat in (r"^what about\b", r"^how about\b", r"^and what about\b"))
+        or any(h in ql for h in _TIME_SHIFT_HINTS)
+    ):
+        period = _period_from_followup_message(q) or _period_from_conversation_context(
+            retrieval_cache, conversation_history,
+        )
+        rewritten = (
+            f"What crimes are most frequently reported in Dorchester {period}?"
+        )
+        return rewritten, True
+
     return q, False
 
 
@@ -826,6 +888,13 @@ def _fast_followup_needs_new_data(
             return {
                 "needs_new_data": False,
                 "reason": "rule: 311 advisory follow-up answerable from cache/history",
+            }
+        if _ps.is_crime_data_clarification_question(question) and (
+            has_history or _cache_has_crime_data(cache)
+        ):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: crime data clarification answerable from cache/history",
             }
     except Exception:
         pass
@@ -1402,6 +1471,38 @@ def _compose_311_advisory_answer(
         "You can call **311**, use the **BOS:311** app, or report online at boston.gov/311.",
     ])
     return "\n".join(lines)
+
+
+def _try_crime_clarification_response(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return a complete agent payload for BPD data clarification follow-ups."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+    except Exception:
+        return None
+    if not _ps.is_crime_data_clarification_question(message):
+        return None
+    cache = retrieval_cache or create_empty_cache()
+    has_history = bool(conversation_history)
+    if not has_history and not _cache_has_crime_data(cache):
+        return None
+    answer = _ps.crime_data_clarification_answer()
+    try:
+        from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+        answer = polish_conversational_answer(answer, conversation_history)
+    except Exception:
+        pass
+    return {
+        "answer": answer,
+        "mode": "advisory",
+        "sources": [],
+        "result": {"answer": answer, "advisory": True},
+        "retrieval_cache": cache,
+    }
 
 
 def _try_311_advisory_response(
@@ -2062,6 +2163,21 @@ def stream_agent_response(
             "answer": answer,
             "mode": "advisory",
             "result": advisory["result"],
+            "retrieval_cache": cache,
+        })
+        return
+
+    crime_clarify = _try_crime_clarification_response(
+        message, conversation_history, cache,
+    )
+    if crime_clarify is not None:
+        answer = crime_clarify["answer"]
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+        yield ("final", {
+            "answer": answer,
+            "mode": "advisory",
+            "result": crime_clarify["result"],
             "retrieval_cache": cache,
         })
         return

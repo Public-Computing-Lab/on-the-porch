@@ -115,8 +115,9 @@ def test_911_stats_neighbourhood_routes_to_crime():
     assert hit is not None
     assert hit.intent == "crime_monthly_count"
     answer = hit.answer_fn("x", {"rows": [{"cnt": 42}]})
-    assert "crime incident" in answer.lower()
-    assert "911 dispatch" in answer.lower() or "not 911" in answer.lower()
+    low = answer.lower()
+    assert "incident" in low or "bpd" in low
+    assert "not 911" in low or "911 call" in low or "911 dispatch" in low
 
 
 def test_911_dispatch_calls_still_unavailable():
@@ -225,6 +226,30 @@ def test_no_duplicate_911_disclosure_when_llm_already_explained():
     assert out == raw
 
 
+def test_crime_clarification_followup_uses_cache():
+    from sql_chat.prepared_sql import is_crime_data_clarification_question  # noqa: WPS433
+
+    assert is_crime_data_clarification_question("are these really crimes?")
+    out = _fast_followup_needs_new_data(
+        "are these really crimes?",
+        [{"role": "user", "content": "what crimes are most frequently reported?"}],
+        {"mode": "sql", "sql_query": "mv_crime_monthly"},
+    )
+    assert out is not None
+    assert out["needs_new_data"] is False
+
+
+def test_crime_period_followup_rewrites():
+    rewritten, force = resolve_effective_question(
+        "what about the last month?",
+        [{"role": "user", "content": "what crimes are most frequently reported in Dorchester?"}],
+        {"mode": "sql", "sql_query": "mv_crime_monthly"},
+    )
+    assert force is True
+    assert "last month" in rewritten.lower()
+    assert "crime" in rewritten.lower()
+
+
 def main() -> int:
     tests = [
         test_events_after_311_needs_fresh_data,
@@ -241,6 +266,8 @@ def main() -> int:
         test_trim_repetitive_opener_on_followup,
         test_scrub_false_911_zero_claim,
         test_no_duplicate_911_disclosure_when_llm_already_explained,
+        test_crime_clarification_followup_uses_cache,
+        test_crime_period_followup_rewrites,
     ]
     failed = 0
     for fn in tests:

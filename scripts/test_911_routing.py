@@ -31,10 +31,13 @@ def test_explicit_crime_not_classified():
     assert classify_911_question("911 crime incidents last month") == "none"
 
 
-def test_colloquial_matches_crime_sql():
-    hit = match_prepared_sql("911 safety stats in Dorchester last month")
+def test_most_common_911_reportings_uses_offense_breakdown():
+    from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+
+    hit = match_prepared_sql("what are the most comon 911 reportings in Dorchester?")
     assert hit is not None
-    assert hit.intent.startswith("crime")
+    assert hit.intent == "crime_by_offense"
+    assert "offense_group" in hit.sql or "OFFENSE" in hit.sql.upper()
 
 
 def main() -> int:
@@ -43,7 +46,7 @@ def main() -> int:
         test_dispatch_calls_unavailable,
         test_advisory,
         test_explicit_crime_not_classified,
-        test_colloquial_matches_crime_sql,
+        test_most_common_911_reportings_uses_offense_breakdown,
     ]
     failed = 0
     for fn in tests:

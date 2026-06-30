@@ -152,14 +152,15 @@ def _mentions_opinion(q: str) -> bool:
 
 def _looks_like_safety_overview(q: str) -> bool:
     """Broad safety questions — recent crime stats plus community/transcript context."""
-    if "safety" not in q:
+    if "safety" not in q and "safe" not in q:
         return False
     return any(
         h in q
         for h in (
             "concern", "concerns", "issue", "issues", "problem", "problems",
             "how safe", "is it safe", "main concern", "biggest concern",
-            "public safety",
+            "public safety", "safe neighborhood", "safe neighbourhood",
+            "neighborhood", "neighbourhood",
         )
     )
 
@@ -255,7 +256,30 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
             return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
         return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)
 
-    # Crime routing (before generic schedule hints)
+    # Crime / safety — factual BPD lookups → SQL; neighborhood-safety judgment → hybrid
+    try:
+        from sql_chat.prepared_sql import crime_routing_mode  # noqa: WPS433
+
+        crime_mode = crime_routing_mode(question)
+        if crime_mode == "hybrid":
+            return _base_plan(
+                mode="hybrid",
+                intent="crime_safety_context",
+                confidence=0.92,
+                k=8,
+                transcript_tags=["safety", "violence", "community"],
+            )
+        if crime_mode == "sql":
+            return _base_plan(
+                mode="sql",
+                intent="crime_stats",
+                confidence=0.95,
+                k=5,
+            )
+    except Exception:
+        pass
+
+    # Crime routing fallback (before generic schedule hints)
     if any(h in q for h in _CRIME_HINTS):
         if _mentions_stats(q) and not _mentions_opinion(q):
             return _base_plan(mode="sql", intent="crime_stats", confidence=0.92, k=5)

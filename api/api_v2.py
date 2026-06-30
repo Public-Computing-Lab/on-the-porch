@@ -88,6 +88,7 @@ from unified_chatbot import (  # noqa: E402
     stream_agent_response,
     try_boston_gov_enrichment,
     _try_311_advisory_response,
+    _try_crime_clarification_response,
 )
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
@@ -1944,6 +1945,18 @@ def _execute_agent_response(
             streaming=streaming,
         )
         return advisory
+
+    crime_clarify = _try_crime_clarification_response(
+        message, conversation_history, cache,
+    )
+    if crime_clarify is not None:
+        _log_agent_metrics(
+            mode="advisory",
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return crime_clarify
 
     # Semantic response cache: short-circuit near-duplicate first-turn questions.
     semantic_eligible = _semantic_cache_eligible(message, conversation_history)
