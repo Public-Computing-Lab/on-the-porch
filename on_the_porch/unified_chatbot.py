@@ -698,6 +698,10 @@ def _followup_topic_requires_fresh_data(
     cache: Dict[str, Any],
 ) -> Optional[str]:
     """Return a reason when the cache topic cannot answer the new question."""
+    if intent_router.topics_conflict(question, cache):
+        q_topic = intent_router.detect_civic_topic(question)
+        c_topic = intent_router.detect_cache_topic(cache)
+        return f"rule: topic switch ({c_topic} -> {q_topic})"
     if _looks_like_events_question(question) and not _cache_has_events_data(cache):
         return "rule: events question but cache has no events data"
     if _looks_like_311_stats_question(question) and not _cache_has_311_data(cache):
@@ -705,6 +709,97 @@ def _followup_topic_requires_fresh_data(
     if _looks_like_crime_stats_question(question) and not _cache_has_crime_data(cache):
         return "rule: crime stats question but cache has no crime data"
     return None
+
+
+def _is_self_contained_civic_lookup(question: str) -> bool:
+    """Standalone civic question that must run a fresh lookup, not history mode."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.match_prepared_sql(question) or _ps.decompose_civic_question(question):
+            return True
+    except Exception:
+        pass
+    q = (question or "").lower()
+    topic = intent_router.detect_civic_topic(question)
+    if topic and any(h in q for h in _STATS_QUESTION_HINTS):
+        return True
+    if _looks_like_events_question(question):
+        return True
+    if topic in {"policy", "transcript", "news", "community_note", "opinion"} and len(q) >= 12:
+        return True
+    plan = intent_router.route_with_rules(question)
+    if plan and float(plan.get("confidence") or 0) >= 0.85:
+        return True
+    return False
+
+
+def _question_looks_referential(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+    if q in {"tell me more", "more detail", "go on", "continue", "explain more"}:
+        return True
+    if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
+        return True
+    if re.match(r"^(what about|how about|and what about)\b", q):
+        return True
+    words = q.split()
+    return len(words) <= 12 and any(
+        word in words for word in ("that", "those", "it", "them", "this", "there")
+    )
+
+
+def _is_count_only_sql_cache(cache: Dict[str, Any]) -> bool:
+    rows = (cache.get("sql_result") or {}).get("rows") or []
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        return False
+    keys = {str(k).lower() for k in rows[0].keys()}
+    return keys <= {"cnt", "count"}
+
+
+def _history_mode_allowed(question: str, cache: Dict[str, Any]) -> bool:
+    """History-only answers are allowed only for same-topic, referential follow-ups."""
+    if intent_router.topics_conflict(question, cache):
+        return False
+    if _is_self_contained_civic_lookup(question):
+        return False
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.match_prepared_sql(question):
+            return False
+        if _ps.is_crime_data_clarification_question(question):
+            return True
+        if _ps.is_311_advisory_question(question):
+            return True
+    except Exception:
+        pass
+    if not _question_looks_referential(question):
+        return False
+    mode = str(cache.get("mode") or "").lower()
+    if mode == "sql" and _is_count_only_sql_cache(cache):
+        ql = (question or "").lower()
+        if any(
+            phrase in ql
+            for phrase in (
+                "tell me more", "break down", "breakdown", "what types",
+                "what kinds", "top ", "most common",
+            )
+        ):
+            return False
+    return True
+
+
+def _can_answer_from_cache_without_fresh_lookup(
+    question: str,
+    cache: Dict[str, Any],
+) -> bool:
+    if intent_router.topics_conflict(question, cache):
+        return False
+    if _is_self_contained_civic_lookup(question):
+        return False
+    return _question_looks_referential(question)
 
 _REFERENTIAL_PATTERNS = (
     r"^(the\s+)?(first|second|third|fourth|fifth|last)\s+one\b",
@@ -827,14 +922,32 @@ def resolve_effective_question(
             )
             return rewritten, True
 
+    if any(h in ql for h in _311_QUESTION_HINTS):
+        return q, False
+
+    if _looks_like_events_question(q):
+        return q, False
+
+    if intent_router.detect_civic_topic(q) in {"policy", "transcript", "news", "safety"}:
+        return q, False
+
+    if _looks_like_crime_stats_question(q) or _looks_like_311_stats_question(q):
+        return q, False
+
     crime_followup = (
         _prior_user_asked_about_crimes(retrieval_cache, conversation_history)
         or _cache_has_crime_data(retrieval_cache or {})
     )
-    if crime_followup and (
-        any(re.search(pat, ql) for pat in (r"^what about\b", r"^how about\b", r"^and what about\b"))
-        or any(h in ql for h in _TIME_SHIFT_HINTS)
-    ):
+    referential_period = any(
+        re.search(pat, ql)
+        for pat in (r"^what about\b", r"^how about\b", r"^and what about\b")
+    )
+    short_time_shift = (
+        any(h in ql for h in _TIME_SHIFT_HINTS)
+        and not any(h in ql for h in _CRIME_QUESTION_HINTS + ("911",))
+        and len(ql) <= 48
+    )
+    if crime_followup and (referential_period or short_time_shift):
         period = _period_from_followup_message(q) or _period_from_conversation_context(
             retrieval_cache, conversation_history,
         )
@@ -917,14 +1030,28 @@ def _fast_followup_needs_new_data(
         pass
 
     if any(hint in q for hint in _TIME_SHIFT_HINTS):
-        return {
-            "needs_new_data": True,
-            "reason": "rule: question requests a different time period or comparison",
-        }
+        if not _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: question requests a different time period or comparison",
+            }
 
     topic_mismatch = _followup_topic_requires_fresh_data(question, cache)
     if topic_mismatch:
         return {"needs_new_data": True, "reason": topic_mismatch}
+
+    if _is_self_contained_civic_lookup(question):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: self-contained civic lookup",
+        }
+
+    if not _history_mode_allowed(question, cache):
+        if intent_router.detect_civic_topic(question):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: factual or new-topic question requires fresh lookup",
+            }
 
     cache_has_data = bool(
         cache.get("sql_result")
@@ -948,24 +1075,28 @@ def _fast_followup_needs_new_data(
         }
 
     if any(re.search(pat, q) for pat in (r"^tell me more\b", r"^more (about|on|info)\b")):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: referential follow-up answerable from cache",
-        }
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: referential follow-up answerable from cache",
+            }
+        return None
 
     if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: referential follow-up answerable from cache",
-        }
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: referential follow-up answerable from cache",
+            }
+        return None
 
-    if len(q) <= 80 and any(
-        word in q.split() for word in ("that", "those", "it", "them", "this", "there")
-    ):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: short clarification follow-up answerable from cache",
-        }
+    if _question_looks_referential(question):
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: short clarification follow-up answerable from cache",
+            }
+        return None
 
     return None
 
@@ -982,6 +1113,26 @@ def _check_if_needs_new_data(
     fast = _fast_followup_needs_new_data(question, conversation_history, retrieval_cache)
     if fast is not None:
         return fast
+
+    cache = retrieval_cache or {}
+    if intent_router.topics_conflict(question, cache):
+        q_topic = intent_router.detect_civic_topic(question)
+        c_topic = intent_router.detect_cache_topic(cache)
+        return {
+            "needs_new_data": True,
+            "reason": f"rule: topic switch ({c_topic} -> {q_topic})",
+        }
+    if _is_self_contained_civic_lookup(question):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: self-contained civic lookup",
+        }
+
+    if cache.get("mode") and not _history_mode_allowed(question, cache):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: history mode not safe for this follow-up",
+        }
 
     # If no history and no cache, always need new data
     has_history = conversation_history and len(conversation_history) > 0
@@ -1056,7 +1207,14 @@ def _check_if_needs_new_data(
         if isinstance(needs_new, str):
             needs_new = needs_new.lower() in ("true", "yes", "1")
         result["needs_new_data"] = bool(needs_new)
-        
+
+        if not result["needs_new_data"] and cache.get("mode"):
+            if not _history_mode_allowed(question, cache):
+                return {
+                    "needs_new_data": True,
+                    "reason": "rule: LLM history gate overridden for factual safety",
+                }
+
         return result
     except Exception:
         return default_result
@@ -1252,17 +1410,11 @@ def run_execution_pipeline(
         )
 
         synth_started = time.perf_counter()
-        display_q = question
-        if conversation_history:
-            for msg in reversed(conversation_history):
-                if msg.get("role") == "user" and (msg.get("content") or "").strip():
-                    display_q = msg["content"].strip()
-                    break
         answer = synthesize_and_validate(
             question,
             facts,
             conversation_history=conversation_history,
-            display_question=display_q,
+            display_question=question,
         )
         synth_ms = int((time.perf_counter() - synth_started) * 1000)
 
@@ -1596,7 +1748,12 @@ def _build_history_prompt(
     if cache_context:
         user_prompt += "Available Data (from recent retrieval):\n" + cache_context + "\n\n"
     user_prompt += resident_question_block(question)
-    user_prompt += "\nPlease answer using the available information:"
+    user_prompt += (
+        "\nPlease answer using ONLY the available information above.\n"
+        "Do not invent counts, dates, names, or sources. "
+        "If the question needs data that is not shown above, say you would need "
+        "to look that up fresh rather than guessing."
+    )
 
     return system_prompt_text + "\n\n" + user_prompt
 

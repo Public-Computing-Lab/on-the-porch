@@ -204,6 +204,9 @@ def _kind_instructions(kind: AnswerKind) -> str:
             "Continue the conversation using prior messages and cached data.\n"
             "- Expand or clarify — do not copy-paste the previous answer\n"
             "- If the new question is a different topic, do not reuse unrelated stats\n"
+            "- State ONLY facts visible in the cached data or prior assistant message\n"
+            "- Never invent numbers, dates, event names, or policy details\n"
+            "- If the resident asks for specifics missing from the cache, say a fresh lookup is needed\n"
             "- Do NOT greet again — continue naturally from context\n"
         ),
     }

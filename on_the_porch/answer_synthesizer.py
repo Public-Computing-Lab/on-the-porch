@@ -31,6 +31,9 @@ def _display_question(
     question: str,
     conversation_history: Optional[List[Dict[str, str]]],
 ) -> str:
+    current = (question or "").strip()
+    if current:
+        return current
     if conversation_history:
         for msg in reversed(conversation_history):
             if msg.get("role") == "user":

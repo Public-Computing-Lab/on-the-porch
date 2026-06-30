@@ -250,6 +250,100 @@ def test_crime_period_followup_rewrites():
     assert "crime" in rewritten.lower()
 
 
+def test_311_after_crime_not_rewritten():
+    question = "How many 311 requests were filed last month?"
+    rewritten, force = resolve_effective_question(
+        question,
+        [{"role": "user", "content": "what crimes are most frequently reported in Dorchester?"}],
+        {"mode": "sql", "sql_query": "mv_crime_monthly"},
+    )
+    assert rewritten == question
+    assert force is False
+
+
+def test_311_after_crime_routes_to_prepared_sql():
+    from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+
+    hit = match_prepared_sql("How many 311 requests were filed last month?")
+    assert hit is not None
+    assert hit.intent.startswith("311")
+
+
+def test_events_after_crime_needs_fresh_lookup():
+    crime_cache = {
+        "mode": "sql",
+        "sql_query": "FROM `mv_crime_monthly`",
+        "sql_result": {"rows": [{"offense_group": "THEFT", "cnt": 10}]},
+        "answer": "Top crimes last month...",
+    }
+    result = _fast_followup_needs_new_data(
+        "What events are happening this week?",
+        [{"role": "user", "content": "what crimes are most common?"}],
+        crime_cache,
+    )
+    assert result is not None
+    assert result["needs_new_data"] is True
+
+
+def test_policy_after_crime_needs_fresh_lookup():
+    crime_cache = {
+        "mode": "sql",
+        "sql_query": "FROM `mv_crime_monthly`",
+        "sql_result": {"rows": [{"offense_group": "THEFT", "cnt": 10}]},
+    }
+    result = _fast_followup_needs_new_data(
+        "What does the Boston Slow Streets plan say about Dorchester?",
+        [{"role": "user", "content": "crime stats"}],
+        crime_cache,
+    )
+    assert result is not None
+    assert result["needs_new_data"] is True
+
+
+def test_tell_me_more_after_crime_without_topic_uses_cache():
+    crime_cache = {
+        "mode": "sql",
+        "sql_query": "FROM `mv_crime_monthly`",
+        "sql_result": {"rows": [{"offense_group": "THEFT", "cnt": 10}]},
+        "answer": "Top crimes...",
+    }
+    result = _fast_followup_needs_new_data(
+        "tell me more",
+        [{"role": "user", "content": "what crimes are most common?"}],
+        crime_cache,
+    )
+    assert result is not None
+    assert result["needs_new_data"] is False
+
+
+def test_tell_me_more_about_events_after_crime_needs_fresh():
+    crime_cache = {
+        "mode": "sql",
+        "sql_query": "FROM `mv_crime_monthly`",
+        "sql_result": {"rows": [{"offense_group": "THEFT", "cnt": 10}]},
+    }
+    result = _fast_followup_needs_new_data(
+        "tell me more about events this week",
+        [{"role": "user", "content": "crime stats"}],
+        crime_cache,
+    )
+    assert result is not None
+    assert result["needs_new_data"] is True
+
+
+def test_display_question_uses_current_turn():
+    from answer_synthesizer import _display_question  # noqa: WPS433
+
+    history = [
+        {"role": "user", "content": "what crimes are most common?"},
+        {"role": "assistant", "content": "Assault leads the list."},
+    ]
+    assert _display_question(
+        "How many 311 requests were filed last month?",
+        history,
+    ) == "How many 311 requests were filed last month?"
+
+
 def main() -> int:
     tests = [
         test_events_after_311_needs_fresh_data,
@@ -268,6 +362,13 @@ def main() -> int:
         test_no_duplicate_911_disclosure_when_llm_already_explained,
         test_crime_clarification_followup_uses_cache,
         test_crime_period_followup_rewrites,
+        test_311_after_crime_not_rewritten,
+        test_311_after_crime_routes_to_prepared_sql,
+        test_events_after_crime_needs_fresh_lookup,
+        test_policy_after_crime_needs_fresh_lookup,
+        test_tell_me_more_after_crime_without_topic_uses_cache,
+        test_tell_me_more_about_events_after_crime_needs_fresh,
+        test_display_question_uses_current_turn,
     ]
     failed = 0
     for fn in tests:
