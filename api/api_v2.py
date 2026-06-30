@@ -27,7 +27,7 @@ from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
 from mysql_cache import MySQLCacheStore
-from ops_health import check_ingestion_lag, validate_production_config
+from ops_health import check_ingestion_lag, check_311_feed_balance, validate_production_config
 from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
 from rate_limit import RateLimiter
 from security import (
@@ -3205,6 +3205,14 @@ def health():
     status["ingestion"] = ingest
     if ingest.get("status") in {"stale", "degraded"}:
         status["status"] = "degraded"
+
+    try:
+        feed_311 = check_311_feed_balance(get_db_connection)
+        status["boston_311_feeds"] = feed_311
+        if feed_311.get("status") == "degraded":
+            status["status"] = "degraded"
+    except Exception:
+        pass
 
     try:
         from ingest_queue import check_311_freshness, get_ingest_job_status

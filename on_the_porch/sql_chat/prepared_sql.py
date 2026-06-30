@@ -904,6 +904,23 @@ _311_DOMAIN_HINTS = (
     "illegal dumping",
 )
 
+_311_ADVISORY_HINTS = (
+    "should i report", "should i call", "should i use",
+    "can i report", "can i call", "do i report", "do i call",
+    "how do i report", "how do i call", "how to report", "how to call",
+    "what can i report", "what should i report", "what do i report",
+    "what is 311", "what's 311", "how does 311", "how do 311",
+    "when should i call", "when do i call", "is 311 for",
+)
+
+
+def is_311_advisory_question(question: str) -> bool:
+    """Resident guidance about when/how to use 311 — not a stats lookup."""
+    q = (question or "").lower()
+    if not any(h in q for h in _311_DOMAIN_HINTS):
+        return False
+    return any(h in q for h in _311_ADVISORY_HINTS)
+
 _STATS_COUNT_HINTS = (
     "how many", "how much", "count", "number of", "total",
     "a lot of", "are there a lot", "are there many", "how bad", "how common",
@@ -1131,6 +1148,8 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
     issue_terms = _issue_search_terms(question)
     if not any(h in q for h in _311_DOMAIN_HINTS) and not issue_terms:
         return None
+    if is_311_advisory_question(question):
+        return None
     window = _resolve_period(question, 7)
     period = window.label
 
@@ -1194,7 +1213,11 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
                 question, result, label="311 service requests", period=period,
             ),
         )
-    if any(h in q for h in ("top", "most common", "common", "breakdown", "types", "issues")):
+    if any(h in q for h in (
+        "top", "most common", "common", "breakdown", "types",
+        "what kind", "what kinds", "what type", "what types",
+        "what issues", "what were the", "what are the",
+    )):
         return PreparedMatch(
             intent="311_top_types",
             sql=_sql_311_top_types(window),

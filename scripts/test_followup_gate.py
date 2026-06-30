@@ -83,11 +83,49 @@ def test_pothole_recent_needs_fresh_data():
     assert result["needs_new_data"] is True, result
 
 
+def test_311_advisory_followup_uses_cache():
+    cache = _311_cache()
+    cache["answer"] = (
+        "Last month there were 473 311 requests. Top issues included fallen tree "
+        "branches (99) and domestic animal issues (76)."
+    )
+    history = [
+        {"role": "user", "content": "How many 311 requests were filed last month?"},
+        {"role": "assistant", "content": cache["answer"]},
+    ]
+    result = _fast_followup_needs_new_data(
+        "what kind of issues should i report to 311?",
+        history,
+        cache,
+    )
+    assert result is not None
+    assert result["needs_new_data"] is False, result
+
+
+def test_311_advisory_not_prepared_sql():
+    from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+
+    assert match_prepared_sql("what kind of issues should i report to 311?") is None
+
+
 def test_rewrite_311_expansion():
     cache = _311_cache()
     cache["question"] = "How many 311 requests were filed last month?"
     rewritten, force = resolve_effective_question(
         "tell me more about the 311 requests",
+        [],
+        cache,
+    )
+    assert force is True
+    assert "top 311 issue types" in rewritten.lower()
+    assert "last month" in rewritten.lower()
+
+
+def test_rewrite_311_type_followup_inherits_period():
+    cache = _311_cache()
+    cache["question"] = "How many 311 requests were filed last month?"
+    rewritten, force = resolve_effective_question(
+        "what types of 311 issues were those?",
         [],
         cache,
     )
@@ -160,7 +198,10 @@ def main() -> int:
         test_referential_311_followup_uses_cache,
         test_311_expansion_needs_fresh_data,
         test_pothole_recent_needs_fresh_data,
+        test_311_advisory_followup_uses_cache,
+        test_311_advisory_not_prepared_sql,
         test_rewrite_311_expansion,
+        test_rewrite_311_type_followup_inherits_period,
         test_trim_repetitive_opener_on_followup,
         test_scrub_false_911_zero_claim,
         test_no_duplicate_911_disclosure_when_llm_already_explained,

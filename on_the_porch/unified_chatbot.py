@@ -755,6 +755,23 @@ def resolve_effective_question(
     if not ql:
         return q, False
 
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if (
+            re.search(r"\bwhat (kind|kinds|type|types)\b", ql)
+            and any(h in ql for h in ("311", "service request"))
+            and not _ps.is_311_advisory_question(q)
+        ):
+            period = _period_from_conversation_context(retrieval_cache, conversation_history)
+            rewritten = (
+                f"What are the top 311 issue types reported in Dorchester {period}, "
+                "with counts?"
+            )
+            return rewritten, True
+    except Exception:
+        pass
+
     if any(re.search(pat, ql) for pat in _311_EXPANSION_PATTERNS):
         if any(h in ql for h in ("311", "service request", "those requests", "these requests")):
             period = _period_from_conversation_context(retrieval_cache, conversation_history)
@@ -799,6 +816,17 @@ def _fast_followup_needs_new_data(
     q = (question or "").strip().lower()
     if not q:
         return None
+
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.is_311_advisory_question(question) and _cache_has_311_data(cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: 311 advisory follow-up answerable from cache/history",
+            }
+    except Exception:
+        pass
 
     # Named event detail always needs a fresh weekly_events lookup (not cache/history).
     try:

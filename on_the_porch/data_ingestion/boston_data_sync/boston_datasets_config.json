@@ -1,0 +1,55 @@
+{
+  "datasets": [
+    {
+      "name": "crime_incident_reports",
+      "resource_id": "b973d8cb-eeb2-4e7e-99da-c92938efc9c0",
+      "table_name": "crime_incident_reports",
+      "primary_key": "INCIDENT_NUMBER",
+      "date_field": "OCCURRED_ON_DATE",
+      "description": "Crime incident reports from Boston Police Department",
+      "enabled": true
+    },
+    {
+      "name": "311_service_requests",
+      "resource_id": "254adca6-64ab-4c5c-9fc0-a6da622be185",
+      "table_name": "service_requests_311",
+      "primary_key": "CASE_ID",
+      "date_field": "OPEN_DATE",
+      "description": "311 service requests — Creatio NEW SYSTEM (parks, animals, lights)",
+      "enabled": true
+    },
+    {
+      "name": "311_service_requests_2026_legacy",
+      "resource_id": "1a0b420d-99f1-4887-9851-990b2a5a6e17",
+      "table_name": "service_requests_311",
+      "primary_key": "CASE_ID",
+      "date_field": "OPEN_DT",
+      "description": "311 service requests — 2026 legacy (potholes, streets, trash)",
+      "field_mapping": {
+        "case_enquiry_id": "case_id",
+        "open_dt": "open_date",
+        "closed_dt": "close_date",
+        "type": "service_name",
+        "reason": "case_topic"
+      },
+      "force_backfill_days": 90,
+      "enabled": true
+    },
+    {
+      "name": "shootings",
+      "resource_id": "73c7e069-701f-4910-986d-b950f46c91a1",
+      "table_name": "shootings",
+      "primary_key": "incident_num",
+      "date_field": "shooting_date",
+      "description": "BPD shootings dashboard (fatal and non-fatal victims struck)",
+      "enabled": true
+    }
+  ],
+  "sync_settings": {
+    "batch_size": 20000,
+    "max_records_per_sync": 10000000,
+    "rate_limit_delay": 1.0,
+    "incremental_sync": true,
+    "days_to_sync": 30
+  }
+}
