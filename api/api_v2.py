@@ -165,6 +165,9 @@ DOC_TYPE_DIRS = {
     "boston_gov_answer": "https://www.boston.gov",
 }
 
+_BOSTON_GOV_HOME = "https://www.boston.gov"
+_COMMUNITY_TRANSCRIPTS_LABEL = "Community Transcripts"
+
 
 def _stream_generation_error(exc: Exception) -> str:
     """User-facing message for streamed chat failures."""
@@ -1702,18 +1705,116 @@ def _update_message_meta(conn, message_id: str, message_meta: Dict[str, Any]) ->
 
 
 
+def _canonicalize_source_label(raw: str) -> tuple[str, str]:
+    value = (raw or "").strip()
+    lowered = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    lowered = re.sub(r"\s+", " ", lowered)
+    if lowered in {"dorchester reporter", "dot reporter"} or "dotnews" in lowered:
+        return ("dorchester reporter", "Dorchester Reporter")
+    if lowered in {"admin knowledge", "community note", "community notes"}:
+        return ("community notes", "Community Notes")
+    if lowered in {"boston gov", "boston.gov", "bostongov"} or (
+        "boston" in lowered and "gov" in lowered
+    ):
+        return ("boston.gov", "Boston.gov")
+    return (lowered or value.lower() or "unknown", value or "Unknown")
+
+
+def _friendly_policy_label(source_label: str) -> str:
+    label = (source_label or "").strip()
+    if label.lower().endswith(".txt"):
+        return label[:-4]
+    return label or "Policy document"
+
+
+def _policy_public_url(source_label: str) -> str:
+    base_dir = DOC_TYPE_DIRS["policy"]
+    name = (source_label or "").strip()
+    if name.lower().endswith(".txt"):
+        name = name[:-4]
+    if not name.lower().endswith(".html"):
+        name = f"{name.replace(' ', '-')}.html"
+    return urljoin(base_dir, name)
+
+
+def _build_rag_source_path(meta: Dict[str, Any], source_label: str) -> Optional[str]:
+    doc_type = meta.get("doc_type", "unknown")
+    link = (meta.get("link") or "").strip()
+
+    if doc_type == "transcript":
+        return None
+    if doc_type == "boston_gov_answer":
+        return link or _BOSTON_GOV_HOME
+    if doc_type == "policy":
+        return _policy_public_url(source_label)
+    if link.startswith(("http://", "https://")):
+        return link
+
+    base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
+    if isinstance(base_dir, str) and base_dir.startswith(("http://", "https://")):
+        normalized_source = source_label.replace(" ", "-")
+        if normalized_source.endswith(".txt"):
+            normalized_source = normalized_source[:-4] + ".html"
+        return urljoin(base_dir, normalized_source)
+    return None
+
+
+def _append_rag_sources_from_metadata(
+    metadata: List[Dict[str, Any]],
+    sources: List[Dict[str, str]],
+    *,
+    seen: set[str],
+    limit: int = 5,
+) -> None:
+    boston_entries = [m for m in metadata if m.get("doc_type") == "boston_gov_answer"]
+    other_entries = [m for m in metadata if m.get("doc_type") != "boston_gov_answer"]
+    prioritized = boston_entries + other_entries
+
+    has_transcripts = False
+    for meta in prioritized:
+        doc_type = meta.get("doc_type", "unknown")
+        if doc_type == "transcript":
+            has_transcripts = True
+
+    added = 0
+    for meta in prioritized:
+        if added >= limit:
+            break
+        doc_type = meta.get("doc_type", "unknown")
+        if doc_type == "transcript":
+            continue
+
+        source = meta.get("source", "Unknown")
+        dedupe_key, source_label = _canonicalize_source_label(source)
+        if doc_type == "policy":
+            source_label = _friendly_policy_label(source_label)
+            dedupe_key = re.sub(r"[^a-z0-9]+", " ", source_label.lower()).strip()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        path = _build_rag_source_path(meta, source)
+        entry: Dict[str, str] = {
+            "type": "rag",
+            "source": source_label,
+            "doc_type": doc_type,
+        }
+        if path:
+            entry["path"] = path
+        sources.append(entry)
+        added += 1
+
+    if has_transcripts and _COMMUNITY_TRANSCRIPTS_LABEL not in seen:
+        seen.add(_COMMUNITY_TRANSCRIPTS_LABEL)
+        sources.append({
+            "type": "rag",
+            "source": _COMMUNITY_TRANSCRIPTS_LABEL,
+            "doc_type": "transcript",
+        })
+
+
 def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
     sources: List[Dict[str, str]] = []
-
-    def _canonicalize_source_label(raw: str) -> tuple[str, str]:
-        value = (raw or "").strip()
-        lowered = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-        lowered = re.sub(r"\s+", " ", lowered)
-        if lowered in {"dorchester reporter", "dot reporter"} or "dotnews" in lowered:
-            return ("dorchester reporter", "Dorchester Reporter")
-        if lowered in {"admin knowledge", "community note", "community notes"}:
-            return ("community notes", "Community Notes")
-        return (lowered or value.lower() or "unknown", value or "Unknown")
 
     def _weekly_events_sql(sql_query: str) -> bool:
         return bool(re.search(r"FROM\s+`?weekly_events`?", sql_query or "", re.IGNORECASE))
@@ -1746,39 +1847,8 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
 
     elif mode == "rag":
         metadata = result.get("metadata", [])
-        seen = set()
-        boston_entries = [m for m in metadata if m.get("doc_type") == "boston_gov_answer"]
-        other_entries = [m for m in metadata if m.get("doc_type") != "boston_gov_answer"]
-        prioritized = boston_entries + other_entries
-        
-        for meta in prioritized[:5]:
-            source = meta.get("source", "Unknown")
-            doc_type = meta.get("doc_type", "unknown")
-            # Dedup by source alone — the same publication ingested via
-            # multiple paths (RSS + PDF, etc.) shouldn't show up as
-            # separate citations to the user.
-            dedupe_key, source_label = _canonicalize_source_label(source)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-
-            link = meta.get("link", "")
-            base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
-            if link:
-                path = link
-            elif base_dir.startswith(("http://", "https://")):
-                normalized_source = source_label.replace(" ", "-")
-                if normalized_source.endswith(".txt"):
-                    normalized_source = normalized_source[:-4] + ".html"
-                path = urljoin(base_dir, normalized_source)
-            else:
-                path = str(Path(base_dir) / source_label)
-            sources.append({
-                "type": "rag",
-                "source": source_label,
-                "doc_type": doc_type,
-                "path": path,
-            })
+        seen: set[str] = set()
+        _append_rag_sources_from_metadata(metadata, sources, seen=seen, limit=5)
 
     elif mode == "hybrid":
         sql_part = result.get("sql", {}) if isinstance(result.get("sql"), dict) else result.get("sql")
@@ -1791,21 +1861,7 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
                     sources.append({"type": "sql", "table": match.group(1)})
         rag_metadata = rag_part.get("metadata", []) if isinstance(rag_part, dict) else []
         seen = set()
-        for meta in rag_metadata[:3]:
-            source = meta.get("source", "Unknown")
-            doc_type = meta.get("doc_type", "unknown")
-            dedupe_key, source_label = _canonicalize_source_label(source)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            link = meta.get("link", "")
-            base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
-            sources.append({
-                "type": "rag",
-                "source": source_label,
-                "doc_type": doc_type,
-                "path": link or str(Path(base_dir) / source_label),
-            })
+        _append_rag_sources_from_metadata(rag_metadata, sources, seen=seen, limit=5)
 
     return sources
 
