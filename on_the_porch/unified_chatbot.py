@@ -820,7 +820,9 @@ def _fast_followup_needs_new_data(
     try:
         from sql_chat import prepared_sql as _ps  # noqa: WPS433
 
-        if _ps.is_311_advisory_question(question) and _cache_has_311_data(cache):
+        if _ps.is_311_advisory_question(question) and (
+            has_history or _cache_has_311_data(cache)
+        ):
             return {
                 "needs_new_data": False,
                 "reason": "rule: 311 advisory follow-up answerable from cache/history",
@@ -1335,6 +1337,100 @@ def _compose_rag_answer(question: str, chunks: List[str], metadatas: List[Dict[s
         return (resp.text or "").strip()
     except Exception:
         return "\n\n".join(context_parts[:10])  # fallback: show a sample of context
+
+
+_311_ADVISORY_CATEGORIES = (
+    ("Streets & sidewalks", "potholes, broken sidewalks, missed street cleaning, abandoned vehicles"),
+    ("Trash & sanitation", "missed pickup, illegal dumping, rodents, bulky item pickup"),
+    ("Parking", "enforcement issues, signage, resident permit zones"),
+    ("Property", "graffiti, vacant lots, housing code concerns"),
+    ("Trees & parks", "fallen branches, pruning, park maintenance"),
+    ("Street lights", "outages, damaged poles"),
+    ("Animals", "lost/found pets, wildlife concerns"),
+)
+
+
+def _compose_311_advisory_answer(
+    question: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Fast resident guidance for when/how to use 311 (no LLM round-trip)."""
+    lines = [
+        "311 is Boston's **non-emergency** line for city services — call **911** for emergencies.",
+        "",
+        "**Good things to report via 311 in Dorchester:**",
+    ]
+    for title, examples in _311_ADVISORY_CATEGORIES:
+        lines.append(f"- **{title}:** {examples}")
+
+    cache = retrieval_cache or {}
+    rows = (cache.get("sql_result") or {}).get("rows") or []
+    top_from_cache: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = row.get("issue_type") or row.get("service_name") or row.get("case_topic")
+        if label and str(label).strip():
+            top_from_cache.append(str(label).strip())
+        if len(top_from_cache) >= 5:
+            break
+
+    if top_from_cache:
+        lines.append("")
+        lines.append(
+            "From the data we just looked at, common Dorchester categories include "
+            + ", ".join(f"**{name}**" for name in top_from_cache[:5])
+            + "."
+        )
+    elif conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") != "assistant":
+                continue
+            text = (msg.get("content") or "").lower()
+            if "parking" in text or "trash" in text or "tree" in text or "animal" in text:
+                lines.append("")
+                lines.append(
+                    "Based on our last answer, those monthly totals mix parking, trash, "
+                    "potholes, trees, animals, and similar non-emergency city issues — "
+                    "all valid 311 topics depending on what you're seeing."
+                )
+                break
+
+    lines.extend([
+        "",
+        "You can call **311**, use the **BOS:311** app, or report online at boston.gov/311.",
+    ])
+    return "\n".join(lines)
+
+
+def _try_311_advisory_response(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return a complete agent payload for 311 advisory questions, or None."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+    except Exception:
+        return None
+    if not _ps.is_311_advisory_question(message):
+        return None
+    cache = retrieval_cache or create_empty_cache()
+    answer = _compose_311_advisory_answer(message, conversation_history, cache)
+    try:
+        from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+        answer = polish_conversational_answer(answer, conversation_history)
+    except Exception:
+        pass
+    return {
+        "answer": answer,
+        "mode": "advisory",
+        "sources": [],
+        "result": {"answer": answer, "advisory": True},
+        "retrieval_cache": cache,
+    }
 
 
 def _answer_from_history(
@@ -1957,6 +2053,19 @@ def stream_agent_response(
     """
     cache = retrieval_cache or create_empty_cache()
 
+    advisory = _try_311_advisory_response(message, conversation_history, cache)
+    if advisory is not None:
+        answer = advisory["answer"]
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+        yield ("final", {
+            "answer": answer,
+            "mode": "advisory",
+            "result": advisory["result"],
+            "retrieval_cache": cache,
+        })
+        return
+
     if is_small_talk(message):
         from answer_voice import contextual_chitchat_reply  # noqa: WPS433
 
@@ -2168,7 +2277,9 @@ def apply_post_stream_fallback(
                 _schedule_boston_gov_enrichment(question, answer)
             return answer
         return _apply_sql_fallback_if_needed(question, answer)
-    if mode in {"rag", "hybrid", "history"}:
+    if mode in {"rag", "hybrid", "history", "advisory"}:
+        if mode == "advisory":
+            return answer
         if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
             if _should_trigger_boston_gov_fallback(answer):
                 _schedule_boston_gov_enrichment(question, answer)

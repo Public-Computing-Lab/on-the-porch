@@ -87,6 +87,7 @@ from unified_chatbot import (  # noqa: E402
     should_apply_boston_gov_fallback,
     stream_agent_response,
     try_boston_gov_enrichment,
+    _try_311_advisory_response,
 )
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
@@ -172,7 +173,7 @@ def _stream_generation_error(exc: Exception) -> str:
     return "Generation failed."
 
 
-_SSE_KEEPALIVE_INTERVAL = float(os.getenv("SSE_KEEPALIVE_INTERVAL", "12"))
+_SSE_KEEPALIVE_INTERVAL = float(os.getenv("SSE_KEEPALIVE_INTERVAL", "5"))
 
 
 def _iter_stream_agent_with_keepalive(
@@ -1933,6 +1934,16 @@ def _execute_agent_response(
             streaming=streaming,
         )
         return result
+
+    advisory = _try_311_advisory_response(message, conversation_history, cache)
+    if advisory is not None:
+        _log_agent_metrics(
+            mode="advisory",
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return advisory
 
     # Semantic response cache: short-circuit near-duplicate first-turn questions.
     semantic_eligible = _semantic_cache_eligible(message, conversation_history)

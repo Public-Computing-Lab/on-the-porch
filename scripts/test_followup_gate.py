@@ -108,6 +108,20 @@ def test_311_advisory_not_prepared_sql():
     assert match_prepared_sql("what kind of issues should i report to 311?") is None
 
 
+def test_311_advisory_fast_answer():
+    from unified_chatbot import _try_311_advisory_response  # noqa: E402
+
+    out = _try_311_advisory_response(
+        "what kind of issues should i report to 311?",
+        [{"role": "user", "content": "311 last month"}],
+        _311_cache(),
+    )
+    assert out is not None
+    assert out["mode"] == "advisory"
+    assert "non-emergency" in out["answer"].lower()
+    assert "911" in out["answer"]
+
+
 def test_rewrite_311_expansion():
     cache = _311_cache()
     cache["question"] = "How many 311 requests were filed last month?"
@@ -200,6 +214,7 @@ def main() -> int:
         test_pothole_recent_needs_fresh_data,
         test_311_advisory_followup_uses_cache,
         test_311_advisory_not_prepared_sql,
+        test_311_advisory_fast_answer,
         test_rewrite_311_expansion,
         test_rewrite_311_type_followup_inherits_period,
         test_trim_repetitive_opener_on_followup,
