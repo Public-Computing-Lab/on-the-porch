@@ -108,6 +108,25 @@ def test_311_advisory_not_prepared_sql():
     assert match_prepared_sql("what kind of issues should i report to 311?") is None
 
 
+def test_911_stats_neighbourhood_routes_to_crime():
+    from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+
+    hit = match_prepared_sql("what are the 911 stats in y neighbourhod?")
+    assert hit is not None
+    assert hit.intent == "crime_monthly_count"
+    answer = hit.answer_fn("x", {"rows": [{"cnt": 42}]})
+    assert "crime incident" in answer.lower()
+    assert "911 dispatch" in answer.lower() or "not 911" in answer.lower()
+
+
+def test_911_dispatch_calls_still_unavailable():
+    from sql_chat.prepared_sql import match_prepared_sql  # noqa: WPS433
+
+    hit = match_prepared_sql("how many 911 emergency calls in Dorchester last month?")
+    assert hit is not None
+    assert hit.intent == "911_unavailable"
+
+
 def test_311_advisory_fast_answer():
     from unified_chatbot import _try_311_advisory_response  # noqa: E402
 
@@ -214,6 +233,8 @@ def main() -> int:
         test_pothole_recent_needs_fresh_data,
         test_311_advisory_followup_uses_cache,
         test_311_advisory_not_prepared_sql,
+        test_911_stats_neighbourhood_routes_to_crime,
+        test_911_dispatch_calls_still_unavailable,
         test_311_advisory_fast_answer,
         test_rewrite_311_expansion,
         test_rewrite_311_type_followup_inherits_period,

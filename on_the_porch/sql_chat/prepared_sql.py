@@ -1113,25 +1113,141 @@ def sql_311_top_types(window: PeriodWindow) -> str:
     return _sql_311_top_types(window)
 
 
-def _match_911(question: str) -> Optional[PreparedMatch]:
-    """Boston 911 dispatch data is not in our database — return a clear static answer."""
+_911_ADVISORY_HINTS = (
+    "should i call", "should i use", "when should i call", "when to call",
+    "when do i call", "can i call", "do i call", "911 vs", "versus 311",
+    " vs 311", "or 311", "call 911 for", "use 911 for", "is 911 for",
+    "difference between 911", "911 or 311",
+)
+
+_911_DISPATCH_EXPLICIT_HINTS = (
+    "dispatch", "dispatched", "call volume", "response time", "wait time",
+    "emergency call", "911 call", "calls to 911", "dialed 911",
+    "phone calls", "answered calls", "call log", "call logs",
+)
+
+_911_CRIME_COLOCATION_HINTS = (
+    "stat", "stats", "statistics", "safety", "neighborhood", "neighbourhood",
+    "violence", "activity", "going on", "how bad", "crime data", "my area",
+    "my block", "around here",
+)
+
+_911_EXPLICIT_CRIME_HINTS = (
+    "police report", "crime report", "incident report", "bpd",
+    "crime", "crimes", "incident", "incidents", "assault", "robbery",
+    "shooting", "shootings", "homicide", "murder",
+)
+
+_911_CRIME_FOOTNOTE = (
+    "*(These are BPD crime incident reports for Dorchester (district C11), "
+    "not 911 dispatch call logs.)*"
+)
+
+
+def classify_911_question(question: str) -> str:
+    """Classify 911-shaped questions.
+
+    Returns one of: ``none``, ``advisory``, ``dispatch_unavailable``, ``crime_redirect``.
+    """
     q = (question or "").lower()
     if "911" not in q:
-        return None
-    if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
-        return None
-    if not any(h in q for h in ("call", "calls", "dispatch", "emergency", "how many", "count", "number of", "total")):
+        return "none"
+    if any(h in q for h in _911_ADVISORY_HINTS):
+        return "advisory"
+    if _is_explicit_911_dispatch(q):
+        return "dispatch_unavailable"
+    if any(h in q for h in _911_EXPLICIT_CRIME_HINTS):
+        return "none"
+    if any(
+        h in q
+        for h in _911_CRIME_COLOCATION_HINTS
+        + ("how many", "what", "tell me", "show me", "give me", "number of", "total")
+    ):
+        return "crime_redirect"
+    return "crime_redirect"
+
+
+def _is_explicit_911_dispatch(q: str) -> bool:
+    if any(h in q for h in _911_DISPATCH_EXPLICIT_HINTS):
+        return True
+    if ("call" in q or "calls" in q) and any(
+        h in q for h in ("how many", "count", "number of", "total", "volume")
+    ):
+        return True
+    return False
+
+
+def _is_911_dispatch_question(question: str) -> bool:
+    """True when the user wants 911 call/dispatch volume (data we do not have)."""
+    return classify_911_question(question) == "dispatch_unavailable"
+
+
+def _append_911_crime_footnote(answer: str) -> str:
+    text = (answer or "").strip()
+    if not text or "not 911 dispatch call logs" in text:
+        return text
+    return f"{text}\n\n{_911_CRIME_FOOTNOTE}"
+
+
+def _wrap_crime_answer_for_911(
+    answer_fn: Callable[[str, Dict[str, Any]], str],
+) -> Callable[[str, Dict[str, Any]], str]:
+    def wrapped(question: str, result: Dict[str, Any]) -> str:
+        return _append_911_crime_footnote(answer_fn(question, result))
+
+    return wrapped
+
+
+def _match_911(question: str) -> Optional[PreparedMatch]:
+    """Advisory or dispatch-unavailable 911 questions (not colloquial crime stats)."""
+    kind = classify_911_question(question)
+    if kind == "advisory":
+        def _advisory_answer(_question: str, _result: Dict[str, Any]) -> str:
+            return (
+                "**911** is for **life-threatening emergencies** — fire, serious medical "
+                "issues, or a crime in progress. Call **911** when someone needs immediate help.\n\n"
+                "**311** is for **non-emergency** city services: potholes, missed trash, "
+                "street lights, graffiti, and similar.\n\n"
+                "For **neighborhood safety statistics**, ask about **crime incidents** or "
+                "**shootings** in Dorchester — we have BPD open data for those."
+            )
+
+        return PreparedMatch(
+            intent="911_advisory",
+            sql="SELECT 0 AS cnt",
+            answer_fn=_advisory_answer,
+        )
+    if kind != "dispatch_unavailable":
         return None
 
     def _answer(_question: str, _result: Dict[str, Any]) -> str:
         return (
-            "We don't have Boston **911 emergency dispatch call** data in this app. "
-            "911 call logs are separate from BPD crime incident reports and 311 service requests.\n\n"
-            "For **crime statistics** in Dorchester, ask about crime incidents or shootings. "
-            "For **non-emergency city services** (potholes, trash, lights), ask about **311 requests**."
+            "We don't have Boston **911 emergency dispatch call** data in this app — "
+            "so we can't show how many times people dialed 911 in Dorchester.\n\n"
+            "We **do** have **BPD crime incident reports** for Dorchester (district C11). "
+            "Try:\n"
+            "- \"How many **crime incidents** in Dorchester last month?\"\n"
+            "- \"How many **shootings** in Dorchester this year?\"\n\n"
+            "For **non-emergency** city services (potholes, trash, street lights), "
+            "ask about **311 requests**."
         )
 
     return PreparedMatch(intent="911_unavailable", sql="SELECT 0 AS cnt", answer_fn=_answer)
+
+
+def _match_911_crime_redirect(question: str) -> Optional[PreparedMatch]:
+    """Colloquial 911 safety questions → BPD crime SQL with a short footnote."""
+    if classify_911_question(question) != "crime_redirect":
+        return None
+    hit = _match_crime(question, from_911=True)
+    if hit is None:
+        return None
+    return PreparedMatch(
+        intent=hit.intent,
+        sql=hit.sql,
+        answer_fn=_wrap_crime_answer_for_911(hit.answer_fn),
+        supplemental_sql=hit.supplemental_sql,
+    )
 
 
 def _sql_crime_shooting_count(window: PeriodWindow) -> str:
@@ -1257,7 +1373,7 @@ def _match_311(question: str) -> Optional[PreparedMatch]:
     return None
 
 
-def _match_crime(question: str) -> Optional[PreparedMatch]:
+def _match_crime(question: str, *, from_911: bool = False) -> Optional[PreparedMatch]:
     q = (question or "").lower()
     crime_hints = (
         "crime", "crimes", "incident", "incidents", "assault", "robbery",
@@ -1265,7 +1381,7 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
         "offense", "police report",
         "homicide", "homicides", "murder", "murders",
     )
-    if not any(h in q for h in crime_hints):
+    if not from_911 and not any(h in q for h in crime_hints):
         return None
     window = _resolve_period(question, 30)
     period = window.label
@@ -1274,6 +1390,18 @@ def _match_crime(question: str) -> Optional[PreparedMatch]:
     stats_asked = any(h in q for h in _STATS_COUNT_HINTS) or any(
         h in q for h in ("recently", "lately", "these days")
     )
+    if from_911 and not stats_asked:
+        stats_asked = any(
+            h in q
+            for h in (
+                "stat", "stats", "statistics", "safety", "what", "data",
+                "tell me", "show", "going on",
+            )
+        )
+    if from_911 and not stats_asked and not any(
+        h in q for h in ("top", "most common", "breakdown", "by type", "types")
+    ):
+        stats_asked = True
     if stats_asked:
         if any(h in q for h in ("shooting", "shootings", "shots fired", "gun violence")):
             shoot_def = "incidents flagged shooting=1 in BPD crime reports"
@@ -1329,6 +1457,7 @@ def match_prepared_sql(question: str) -> Optional[PreparedMatch]:
         return None
     for matcher in (
         _match_911,
+        _match_911_crime_redirect,
         _match_event_by_name,
         _match_events_list,
         _match_events_by_source,
@@ -1427,7 +1556,7 @@ def _conversational_llm_enabled() -> bool:
 def _prepared_should_use_llm(hit: PreparedMatch) -> bool:
     if hit.intent == "event_by_name":
         return True
-    if hit.intent in ("crime_homicide_count", "911_unavailable"):
+    if hit.intent in ("crime_homicide_count", "911_unavailable", "911_advisory"):
         return False
     if _conversational_llm_enabled() and hit.intent in _COUNT_INTENTS:
         return True
@@ -1700,6 +1829,11 @@ def _try_run_compound_prepared_sql(
             canonical = _format_compound_fallback(
                 sub_q, result, supplemental_result, period=window.label,
             )
+        if (
+            classify_911_question(question) == "crime_redirect"
+            and part.topic in ("crime", "shootings", "homicide")
+        ):
+            canonical = _append_911_crime_footnote(canonical)
 
         block: Dict[str, Any] = {
             "topic": part.topic,

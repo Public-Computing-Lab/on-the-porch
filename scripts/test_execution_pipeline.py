@@ -18,7 +18,7 @@ def _routing(mode: str, intent: str, **kwargs):
     return base
 
 
-def test_compound_311_911():
+def test_compound_311_911_calls_dispatch_guardrail():
     q = "How many 311 and 911 calls in Dorchester last month?"
     plan = build_execution_plan_rules(q, _routing("sql", "311_stats"))
     assert plan is not None
@@ -30,6 +30,19 @@ def test_compound_311_911():
     part_911 = next(p for p in plan.parts if p.topic == "911")
     assert part_911.path == "guardrail"
     assert part_911.intent == "911_unavailable"
+
+
+def test_compound_311_911_colloquial_uses_crime():
+    q = "How many 311 and 911 in Dorchester last month?"
+    plan = build_execution_plan_rules(q, _routing("sql", "311_stats"))
+    assert plan is not None
+    topics = {p.topic for p in plan.parts}
+    assert "311" in topics
+    assert "crime" in topics
+    assert "911" not in topics
+    part_crime = next(p for p in plan.parts if p.topic == "crime")
+    assert part_crime.path == "sql"
+    assert part_crime.intent == "crime_monthly_count"
 
 
 def test_single_311_count():
@@ -94,7 +107,8 @@ def test_911_routes_guardrail_not_sql():
 
 def main() -> int:
     tests = [
-        test_compound_311_911,
+        test_compound_311_911_calls_dispatch_guardrail,
+        test_compound_311_911_colloquial_uses_crime,
         test_compound_311_includes_types,
         test_single_311_count,
         test_311_with_breakdown,

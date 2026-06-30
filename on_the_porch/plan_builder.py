@@ -53,10 +53,10 @@ def _sql_part(
     if hit is None:
         return None
 
-    if hit.intent == "911_unavailable":
+    if hit.intent in ("911_unavailable", "911_advisory"):
         return PlanPart(
             path="guardrail",
-            intent="911_unavailable",
+            intent=hit.intent,
             sub_question=sub_q,
             topic=topic,
             guardrail_message=hit.answer_fn(sub_q, {"columns": [], "rows": []}),

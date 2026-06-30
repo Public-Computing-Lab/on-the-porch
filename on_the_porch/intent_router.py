@@ -203,11 +203,35 @@ def _looks_like_transcript_query(q: str) -> bool:
 
 def _is_911_call_question(q: str) -> bool:
     """True for 911 dispatch/call volume questions (we have no 911 call dataset)."""
-    if "911" not in q:
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "dispatch_unavailable"
+    except Exception:
+        if "911" not in q:
+            return False
+        if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+            return False
+        return any(h in q for h in ("call", "calls", "dispatch", "emergency"))
+
+
+def _is_911_crime_question(q: str) -> bool:
+    """Colloquial 911 language that should route to BPD crime stats."""
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "crime_redirect"
+    except Exception:
         return False
-    if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+
+
+def _is_911_advisory_question(q: str) -> bool:
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "advisory"
+    except Exception:
         return False
-    return any(h in q for h in ("call", "calls", "dispatch", "emergency"))
 
 
 def match_rules(question: str) -> Optional[Dict[str, Any]]:
@@ -218,6 +242,12 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
 
     if _is_911_call_question(q):
         return _base_plan(mode="sql", intent="911_unavailable", confidence=0.95, k=5)
+
+    if _is_911_advisory_question(q):
+        return _base_plan(mode="sql", intent="911_advisory", confidence=0.95, k=5)
+
+    if _is_911_crime_question(q):
+        return _base_plan(mode="sql", intent="crime_stats", confidence=0.92, k=5)
 
     # 311 stats → sql (before events — "this week" appears in both)
     if any(h in q for h in _311_HINTS) or any(h in q for h in _311_ISSUE_HINTS):
