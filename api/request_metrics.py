@@ -23,6 +23,12 @@ def reset_request_metrics() -> None:
         reset_llm_call_counter()
     except Exception:
         pass
+    try:
+        from request_budget import reset_request_budget  # type: ignore
+
+        reset_request_budget()
+    except Exception:
+        pass
     _metrics_local.llm_calls = 0
     _metrics_local.started_at = time.perf_counter()
 

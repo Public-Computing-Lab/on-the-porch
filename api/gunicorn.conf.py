@@ -42,24 +42,23 @@ bind = os.getenv(
 )
 
 # --- Concurrency ------------------------------------------------------------
-# gthread: each worker is a process running a pool of threads. This suits this
-# app well because requests are I/O-bound (waiting on Gemini / MySQL / Chroma),
-# so threads give cheap concurrency while a handful of processes use all cores.
+# gthread: each worker is a process running a pool of threads. Keep the default
+# conservative for an 8 GB DreamHost host because Chroma/local embeddings and
+# Gemini clients duplicate memory per worker.
 worker_class = os.getenv("GUNICORN_WORKER_CLASS", "gthread")
-workers = int(os.getenv("GUNICORN_WORKERS", "3"))
-threads = int(os.getenv("GUNICORN_THREADS", "8"))
+workers = int(os.getenv("GUNICORN_WORKERS", "2"))
+threads = int(os.getenv("GUNICORN_THREADS", "4"))
 
 # --- Timeouts ---------------------------------------------------------------
-# A chat request can legitimately take a while (several LLM calls). Keep the
-# worker timeout generous so a slow-but-valid request is not killed, but finite
-# so a truly hung worker is recycled instead of wedged forever.
-timeout = int(os.getenv("GUNICORN_TIMEOUT", "180"))
+# Backend chat budget defaults to about 30s and the frontend waits about 55s.
+# Gunicorn should be above both but below the old 180s runaway-request window.
+timeout = int(os.getenv("GUNICORN_TIMEOUT", "75"))
 graceful_timeout = int(os.getenv("GUNICORN_GRACEFUL_TIMEOUT", "30"))
 keepalive = int(os.getenv("GUNICORN_KEEPALIVE", "5"))
 
 # --- Memory hygiene ---------------------------------------------------------
 # Periodically recycle workers to bound any slow leaks (LLM/vector clients).
-max_requests = int(os.getenv("GUNICORN_MAX_REQUESTS", "1000"))
+max_requests = int(os.getenv("GUNICORN_MAX_REQUESTS", "500"))
 max_requests_jitter = int(os.getenv("GUNICORN_MAX_REQUESTS_JITTER", "100"))
 
 # --- Worker initialization --------------------------------------------------

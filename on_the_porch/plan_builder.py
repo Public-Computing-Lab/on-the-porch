@@ -159,13 +159,63 @@ def _build_rag_plan(question: str, routing: Dict[str, Any]) -> Optional[Executio
     )
 
 
+_PUBLIC_SAFETY_BASELINE_INTENTS = frozenset({
+    "safety_overview",
+    "crime_general",
+    "crime_hybrid",
+    "crime_opinion",
+    "crime_safety_context",
+    "opinion_safety",
+})
+
+
+def _public_safety_baseline_question(question: str) -> str:
+    """Prepared-SQL-compatible baseline for broad safety/crime hybrid plans."""
+    q = (question or "").lower()
+    if any(h in q for h in ("shooting", "shootings", "shots fired", "gun violence")):
+        return "How many shootings were reported in Dorchester in the last 30 days?"
+    if any(h in q for h in ("homicide", "homicides", "murder", "murders")):
+        return "How many homicides were reported in Dorchester this year?"
+    return "How many crime incidents were reported in Dorchester in the last 30 days?"
+
+
+def _public_safety_baseline_part(
+    question: str,
+    routing: Dict[str, Any],
+) -> Optional[PlanPart]:
+    intent = str(routing.get("intent") or "").lower()
+    if intent not in _PUBLIC_SAFETY_BASELINE_INTENTS:
+        return None
+    baseline_question = _public_safety_baseline_question(question)
+    sql_part = _sql_part(
+        question,
+        topic="crime",
+        sub_question=baseline_question,
+    )
+    if sql_part is not None:
+        return sql_part
+    return PlanPart(
+        path="guardrail",
+        intent="crime_baseline_unavailable",
+        sub_question=baseline_question,
+        topic="crime",
+        guardrail_message=(
+            "I couldn't load a prepared crime-data baseline for this safety question."
+        ),
+    )
+
+
 def _build_hybrid_plan(question: str, routing: Dict[str, Any]) -> Optional[ExecutionPlan]:
     plan_parts: List[PlanPart] = []
     sql_part = _sql_part(question)
     if sql_part:
         plan_parts.append(sql_part)
-    elif prepared_sql.is_factual_db_question(question):
-        return None
+    else:
+        baseline_part = _public_safety_baseline_part(question, routing)
+        if baseline_part is not None:
+            plan_parts.append(baseline_part)
+        elif prepared_sql.is_factual_db_question(question):
+            return None
 
     plan_parts.append(PlanPart(
         path="rag",
@@ -191,12 +241,11 @@ def build_execution_plan_rules(
     if not question or not question.strip():
         return None
 
-    compound = _build_compound_plan(question, routing)
-    if compound is not None:
-        return compound
-
     mode = str(routing.get("mode", "rag")).lower()
     if mode == "sql":
+        compound = _build_compound_plan(question, routing)
+        if compound is not None:
+            return compound
         return _build_sql_plan(question, routing)
     if mode == "rag":
         return _build_rag_plan(question, routing)

@@ -3,4 +3,4 @@ window.APP_CONFIG = window.APP_CONFIG || {};
 // frontend is served from port 8000 (see public/api.js auto-detect).
 window.APP_CONFIG.apiBaseUrl = 'http://127.0.0.1:8888';
 window.APP_CONFIG.streaming = true;
-window.APP_CONFIG.chatTimeoutMs = 120000;
+window.APP_CONFIG.chatTimeoutMs = 55000;

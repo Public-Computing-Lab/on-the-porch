@@ -127,8 +127,10 @@ The project uses a **single `.env` file at the repo root**.
 - `FLASK_SECRET_KEY`, `TOKEN_PEPPER` – generate strong random values for production
 - `FLASK_SESSION_COOKIE_SECURE=true` – required when serving over HTTPS
 - `ALLOWED_ORIGINS` – comma-separated frontend origins for CORS
-- `CACHE_BACKEND=redis`, `REDIS_URL` – **required** when running multiple gunicorn workers
+- `CACHE_BACKEND=mysql` or `CACHE_BACKEND=redis`, `REDIS_URL` – shared cache required when running multiple gunicorn workers
 - `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_TIMEOUT` – production server tuning
+- `REQUEST_BUDGET_SECONDS`, `GEMINI_REQUEST_TIMEOUT`, `GEMINI_STREAM_TIMEOUT`, `GEMINI_MAX_ATTEMPTS` – chat request budget and LLM timeout controls
+- `DYNAMIC_SQL_ENABLED=false`, `CHAT_VECTOR_WRITES_ENABLED=false` – safer public chat defaults
 - `RATE_LIMIT_*`, `GUEST_CLEANUP_ENABLED` – abuse protection and guest DB hygiene
 - `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DB` – MySQL connection
 - `VECTORDB_DIR` – Gemini-embedded Chroma store (`vectordb_new`)
@@ -142,7 +144,7 @@ The project uses a **single `.env` file at the repo root**.
 window.APP_CONFIG = {
   apiBaseUrl: 'https://api.yourdomain.com',
   streaming: true,
-  chatTimeoutMs: 120000,
+  chatTimeoutMs: 55000,
 };
 ```
 
@@ -276,7 +278,7 @@ This project implements a **hybrid AI system** that combines:
 1. Copy `example_env.txt` → `.env` and set strong `FLASK_SECRET_KEY` + `TOKEN_PEPPER`
 2. Set `FLASK_DEBUG=false` and `FLASK_SESSION_COOKIE_SECURE=true` behind HTTPS
 3. Configure `ALLOWED_ORIGINS` for your real frontend domain
-4. Set `PRODUCTION_MODE=true`, `CACHE_BACKEND=redis`, and `SEMANTIC_CACHE_ENABLED=true`
+4. Set `PRODUCTION_MODE=true`, `CACHE_BACKEND=mysql` (or `redis`), and `SEMANTIC_CACHE_ENABLED=true`
 5. **Local embeddings (Iteration 3):** build the BGE index, then flip the provider:
    ```bash
    pip install sentence-transformers
@@ -298,13 +300,15 @@ This project implements a **hybrid AI system** that combines:
    ```
    `/events` reads `events_materialized` when enabled; prepared SQL uses `mv_311_weekly` / `mv_crime_monthly`. `/health` reports ingest job status and 311 freshness (`BOSTON_311_STALE_HOURS=2`).
 8. Use `gemini-2.5-flash-lite` for `GEMINI_MODEL`, `GEMINI_SUMMARY_MODEL`, and `GEMINI_FAST_MODEL`
-9. Run **Redis** (`./start_redis.sh`) before `./start_api.sh` — production startup fails if Redis is down
-10. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
-11. Serve `public/` via your web server or CDN; set `apiBaseUrl` in `public/config.js`
-12. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
-13. Set `GUEST_CLEANUP_ENABLED=true` in production
-14. Verify `GET /health` reports `database`, `redis`, `qdrant` (or `chroma`), `ingestion`, `ingest_jobs`, and `boston_311_freshness`
-15. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`, includes `request_id`, `tier`, `cache_layer`)
+9. DreamHost 8 GB baseline: `GUNICORN_WORKERS=1` or `2`, `GUNICORN_THREADS=4`, `MYSQL_POOL_SIZE=4` to `6`, `GEMINI_MAX_ATTEMPTS=1` or `2`, `CHROMA_MAX_ATTEMPTS=1` or `2`, `GUNICORN_TIMEOUT=75`, `REQUEST_BUDGET_SECONDS=30`. Use `GUNICORN_WORKERS=1` when `EMBED_PROVIDER=local` loads embeddings inside the API process.
+10. Keep `DYNAMIC_SQL_ENABLED=false`, `CHAT_VECTOR_WRITES_ENABLED=false`, and `ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false` unless you are intentionally running those paths off the public hot path.
+11. If using Redis, run `./start_redis.sh` before `./start_api.sh`; if using MySQL cache, Redis is optional.
+12. Start API with `./start_api.sh` (gunicorn, not the Flask dev server)
+13. Serve `public/` via your web server or CDN; set `apiBaseUrl` and `chatTimeoutMs` in `public/config.js`
+14. Schedule **daily** `./cron_ingest.sh` and **monthly** `./cron_ingest_monthly.sh` (Wayback backfill)
+15. Set `GUEST_CLEANUP_ENABLED=true` in production
+16. Verify `GET /health` reports `database`, shared cache, `qdrant` (or `chroma`), `ingestion`, `ingest_jobs`, and `boston_311_freshness`
+17. Monitor structured chat metrics in gunicorn error logs (`"event": "chat_request"`, includes `request_id`, `tier`, `cache_layer`)
 
 ### Local production-like stack
 
@@ -321,7 +325,7 @@ See `scripts/dreamhost/` for older deployment scripts. They may be out of date w
 ### Production considerations
 
 - Use gunicorn (`./start_api.sh`) — the Flask dev server is not suitable for production
-- Redis shares session cache, rate limits, and **semantic response cache** across gunicorn workers
+- Redis or MySQL cache shares session cache, rate limits, and **semantic response cache** across gunicorn workers
 - **Prepared SQL** (`PREPARED_SQL_ENABLED=true`) answers common 311/crime/events questions without LLM SQL generation
 - **Intent router v2** (`INTENT_ROUTER_V2_ENABLED=true`) routes most questions with rules instead of an LLM call
 - **Async Boston.gov** (`BOSTON_GOV_ASYNC_ENABLED=true`) keeps enrichment off the hot path; streaming may send a late `correction` event

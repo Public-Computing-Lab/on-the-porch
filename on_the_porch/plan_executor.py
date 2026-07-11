@@ -178,6 +178,13 @@ def execute_plan(
 ) -> FactBundle:
     """Execute all plan parts without LLM calls."""
     started = time.perf_counter()
+    try:
+        from request_budget import current_deadline, use_request_deadline  # noqa: WPS433
+
+        deadline = current_deadline()
+    except Exception:
+        deadline = None
+        use_request_deadline = None  # type: ignore[assignment]
 
     def _run(part: PlanPart) -> FactPart:
         if part.path == "sql":
@@ -195,12 +202,18 @@ def execute_plan(
             error="unknown_path",
         )
 
+    def _run_with_budget(part: PlanPart) -> FactPart:
+        if use_request_deadline is None:
+            return _run(part)
+        with use_request_deadline(deadline):
+            return _run(part)
+
     if len(plan.parts) == 1:
-        fact_parts = [_run(plan.parts[0])]
+        fact_parts = [_run_with_budget(plan.parts[0])]
     else:
         workers = min(_MAX_WORKERS, len(plan.parts))
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            fact_parts = list(executor.map(_run, plan.parts))
+            fact_parts = list(executor.map(_run_with_budget, plan.parts))
 
     execute_ms = int((time.perf_counter() - started) * 1000)
     bundle = FactBundle(

@@ -113,8 +113,18 @@ _bootstrap_env()
 _fix_retrieval_vectordb_path()
 
 
+def _admin_vector_writes_enabled() -> bool:
+    default = "false" if Config.PRODUCTION_MODE else "true"
+    return os.getenv("ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED", default).strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
 def _trigger_ingest() -> None:
     """Run ingest_community_notes in a daemon thread so it doesn't block the response."""
+    if not _admin_vector_writes_enabled():
+        print("Community notes vector ingest skipped (ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false)")
+        return
     if _ingest_community_notes is None:
         return
 
@@ -130,6 +140,9 @@ def _trigger_ingest() -> None:
 
 def _remove_from_chroma(entry_id: int) -> None:
     """Delete a community note from the active vector DB by its note ID."""
+    if not _admin_vector_writes_enabled():
+        print("Community note vector removal skipped (ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false)")
+        return
     if _retrieval is None:
         return
 
@@ -188,11 +201,23 @@ def _iter_stream_agent_with_keepalive(
     """Run stream_agent_response in a worker thread; emit None while waiting."""
     done = object()
     event_queue: queue.Queue = queue.Queue()
+    try:
+        from request_budget import current_deadline, use_request_deadline  # noqa: WPS433
+
+        deadline = current_deadline()
+    except Exception:
+        deadline = None
+        use_request_deadline = None  # type: ignore[assignment]
 
     def _worker() -> None:
         try:
-            for item in stream_agent_response(message, conversation_history, thread_state):
-                event_queue.put(item)
+            if use_request_deadline is None:
+                for item in stream_agent_response(message, conversation_history, thread_state):
+                    event_queue.put(item)
+            else:
+                with use_request_deadline(deadline):
+                    for item in stream_agent_response(message, conversation_history, thread_state):
+                        event_queue.put(item)
         except Exception as exc:  # noqa: BLE001
             event_queue.put(exc)
         finally:

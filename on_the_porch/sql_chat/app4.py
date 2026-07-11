@@ -46,11 +46,30 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 SQL_MAX_RETRIES = int(os.getenv("SQL_MAX_RETRIES", "2"))  # Reduced default to 2 for faster execution
 # How many times to attempt a Gemini call / MySQL connection before giving up.
 # Transient upstream errors (rate limits, 5xx, timeouts) are retried with backoff.
-GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
 DB_MAX_ATTEMPTS = max(1, int(os.getenv("DB_MAX_ATTEMPTS", "3")))
 # Per-call wall-clock timeout (seconds) for a single Gemini request, so a stuck
 # upstream call cannot hang a worker thread indefinitely.
-GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "60"))
+GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "25"))
+SQL_QUERY_TIMEOUT_SECONDS = max(1, int(os.getenv("SQL_QUERY_TIMEOUT_SECONDS", "8")))
+SQL_RESULT_LIMIT = max(1, min(int(os.getenv("SQL_RESULT_LIMIT", "500")), 1000))
+_DEFAULT_SQL_TABLE_ALLOWLIST = (
+    "service_requests_311",
+    "mv_311_weekly",
+    "crime_incident_reports",
+    "mv_crime_monthly",
+    "weekly_events",
+    "events_materialized",
+    "shootings",
+)
+SQL_TABLE_ALLOWLIST = {
+    part.strip().lower()
+    for part in os.getenv(
+        "SQL_TABLE_ALLOWLIST",
+        ",".join(_DEFAULT_SQL_TABLE_ALLOWLIST),
+    ).split(",")
+    if part.strip()
+}
 # Cheaper/faster model for classification (table selection). Defaults to the
 # main model so behavior is unchanged until you point it at a lighter model.
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
@@ -151,12 +170,20 @@ def _generate_content(model, prompt, generation_config):
         increment_llm_call_counter()
     except Exception:
         pass
+    try:
+        from request_budget import budget_exhausted, gemini_timeout_cap  # type: ignore
+
+        if budget_exhausted():
+            raise TimeoutError("Request time budget exhausted before Gemini call")
+        call_timeout = gemini_timeout_cap(GEMINI_REQUEST_TIMEOUT)
+    except ImportError:
+        call_timeout = GEMINI_REQUEST_TIMEOUT
     if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
         try:
             return model.generate_content(
                 prompt,
                 generation_config=generation_config,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                request_options={"timeout": call_timeout},
             )
         except TypeError:
             _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
@@ -676,12 +703,34 @@ def is_generic_events_list_question(question: str) -> bool:
     if not q:
         return False
 
-    event_hints = (
-        "event", "events", "happening", "going on", "what's on", "whats on",
+    explicit_event_hints = (
+        "event", "events", "what's on", "whats on",
         "calendar", "schedule", "activities", "activity", "things to do",
         "workshop", "workshops", "meeting", "meetings",
     )
+    generic_event_phrases = (
+        "happening", "going on", "what's happening", "whats happening",
+        "what is happening", "what's going on", "whats going on",
+        "what is going on",
+    )
+    event_hints = explicit_event_hints + generic_event_phrases
     if not any(h in q for h in event_hints):
+        return False
+
+    public_concern_blockers = (
+        "crime", "crimes", "shooting", "shootings", "shots fired",
+        "homicide", "violence", "safe", "safety", "public safety",
+        "311", "service request", "service requests", "city complaint",
+        "pothole", "potholes", "trash", "graffiti", "rodent", "rats",
+        "streetlight", "street light", "illegal dumping",
+        "resident", "residents", "community concern", "community concerns",
+        "concern", "concerns", "concerned", "worry", "worried",
+    )
+    if (
+        any(p in q for p in generic_event_phrases)
+        and not any(h in q for h in explicit_event_hints)
+        and any(blocker in q for blocker in public_concern_blockers)
+    ):
         return False
 
     if any(m in q for m in ("tell me about", "more about", "details about", "when is the", "where is the")):
@@ -974,13 +1023,89 @@ def _llm_refine_sql(
     return sql
 
 
+_FORBIDDEN_SQL_KEYWORDS = re.compile(
+    r"\b(ALTER|CALL|CREATE|DELETE|DROP|EXEC|EXECUTE|GRANT|INSERT|LOAD|MERGE|"
+    r"OUTFILE|REPLACE|REVOKE|TRUNCATE|UPDATE|UPSERT)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    no_line_comments = re.sub(r"--[^\n\r]*", " ", sql or "")
+    return re.sub(r"/\*.*?\*/", " ", no_line_comments, flags=re.DOTALL)
+
+
+def _extract_sql_tables(sql: str) -> List[str]:
+    tables: List[str] = []
+    pattern = re.compile(
+        r"\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_]+)`?(?:\s*\.\s*`?([A-Za-z0-9_]+)`?)?",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(sql or ""):
+        table = (match.group(2) or match.group(1) or "").lower()
+        if table:
+            tables.append(table)
+    return tables
+
+
+def _enforce_select_limit(sql: str) -> str:
+    text = (sql or "").strip().rstrip(";")
+    match = re.search(r"\bLIMIT\s+(\d+)\b", text, flags=re.IGNORECASE)
+    if not match:
+        return f"{text} LIMIT {SQL_RESULT_LIMIT}"
+    try:
+        requested = int(match.group(1))
+    except ValueError:
+        requested = SQL_RESULT_LIMIT
+    if requested <= SQL_RESULT_LIMIT:
+        return text
+    return text[:match.start(1)] + str(SQL_RESULT_LIMIT) + text[match.end(1):]
+
+
+def _validate_select_only_sql(sql: str) -> str:
+    cleaned = _strip_sql_comments(sql).strip()
+    if not cleaned:
+        raise ValueError("Empty SQL is not allowed")
+    statements = [part.strip() for part in cleaned.rstrip(";").split(";") if part.strip()]
+    if len(statements) != 1:
+        raise ValueError("Only a single SQL statement is allowed")
+    statement = statements[0]
+    if not re.match(r"^\s*SELECT\b", statement, flags=re.IGNORECASE):
+        raise ValueError("Only SELECT statements are allowed")
+    if _FORBIDDEN_SQL_KEYWORDS.search(statement):
+        raise ValueError("DDL/DML keywords are not allowed in public SQL")
+    tables = _extract_sql_tables(statement)
+    disallowed = sorted({table for table in tables if table not in SQL_TABLE_ALLOWLIST})
+    if disallowed:
+        raise ValueError(f"SQL references disallowed table(s): {', '.join(disallowed)}")
+    return _enforce_select_limit(statement)
+
+
+def _apply_statement_timeout(cur) -> None:
+    timeout_ms = int(SQL_QUERY_TIMEOUT_SECONDS * 1000)
+    try:
+        cur.execute(f"SET SESSION MAX_EXECUTION_TIME={timeout_ms}")
+    except Exception:
+        try:
+            cur.execute(f"SET SESSION max_statement_time={SQL_QUERY_TIMEOUT_SECONDS}")
+        except Exception:
+            pass
+
+
 @traceable(name="execute_sql")
 def _execute_sql(sql: str) -> Dict[str, Any]:
+    sql = _validate_select_only_sql(sql)
+    tables = sorted(set(_extract_sql_tables(sql)))
+    print(
+        f"[SQL audit] select_only=true tables={tables} "
+        f"limit<={SQL_RESULT_LIMIT} timeout={SQL_QUERY_TIMEOUT_SECONDS}s"
+    )
     conn = _get_db_connection()
     # Connection is thread-owned and reused; do not close it here. A statement
     # error leaves the connection usable (autocommit, no open transaction); the
     # next borrow re-pings and reconnects if the socket was dropped.
     with conn.cursor() as cur:
+        _apply_statement_timeout(cur)
         cur.execute(sql)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description] if cur.description else []

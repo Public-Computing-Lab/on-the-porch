@@ -97,6 +97,28 @@ def _fallback_answer(bundle: FactBundle) -> str:
     return "\n\n".join(parts)
 
 
+def _is_rag_only_empty(bundle: FactBundle) -> bool:
+    if any(p.path == "sql" for p in bundle.parts):
+        return False
+    rag_parts = [p for p in bundle.parts if p.path == "rag"]
+    if not rag_parts:
+        return False
+    return not any(p.rag_chunks for p in rag_parts)
+
+
+def _empty_rag_message(question: str) -> str:
+    topic = (question or "").strip().rstrip("?.!")
+    if topic:
+        return (
+            f"I did not find exact information about {topic} in our Dorchester news "
+            "sources, meeting transcripts, or policy documents."
+        )
+    return (
+        "I did not find exact information about that in our Dorchester news "
+        "sources, meeting transcripts, or policy documents."
+    )
+
+
 def synthesize_answer(
     question: str,
     bundle: FactBundle,
@@ -177,6 +199,9 @@ def synthesize_and_validate(
     conversation_history: Optional[List[Dict[str, str]]] = None,
     display_question: Optional[str] = None,
 ) -> str:
+    if _is_rag_only_empty(bundle):
+        return _empty_rag_message(display_question or question)
+
     answer = synthesize_answer(
         question,
         bundle,
