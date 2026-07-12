@@ -4,7 +4,7 @@ import sys
 import json
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -474,6 +474,16 @@ def try_boston_gov_enrichment(
     """Attempt Boston.gov enrichment with a bounded wait (post-stream correction)."""
     if not _should_trigger_boston_gov_fallback(original_answer):
         return original_answer
+    try:
+        from request_budget import remaining_seconds  # noqa: WPS433
+
+        remaining = remaining_seconds(floor=0.0) - 0.5
+        if remaining < 0.5:
+            print("  ⏱️ Boston.gov enrichment skipped — request budget nearly exhausted")
+            return original_answer
+        timeout_seconds = min(timeout_seconds, remaining)
+    except Exception:
+        pass
     result: Dict[str, Any] = {"answer": original_answer}
 
     def _job() -> None:
@@ -2057,13 +2067,14 @@ def _retrieve_rag(
     Returns (combined_chunks, combined_meta). Kept separate from answer
     composition so the streaming path can retrieve, then stream the answer.
     """
-    from concurrent.futures import TimeoutError as FuturesTimeout  # noqa: WPS433
     from request_budget import (  # noqa: WPS433
         budget_exhausted,
         current_deadline,
+        deadline_exhausted,
         remaining_seconds,
         retrieval_timeout_cap,
         use_request_deadline,
+        wait_timeout_cap,
     )
 
     if budget_exhausted():
@@ -2088,7 +2099,18 @@ def _retrieve_rag(
     combined_meta: List[Dict[str, Any]] = []
 
     retrieval.clear_query_embedding_cache()
-    query_embedding = retrieval.get_query_embedding(question)
+    try:
+        query_embedding = retrieval.get_query_embedding(question)
+    except TimeoutError as exc:
+        print(f"  ⏱️ RAG retrieval skipped — query embedding timed out: {exc}")
+        return [], []
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ RAG retrieval skipped — query embedding failed: {exc}")
+        return [], []
+
+    if budget_exhausted() or remaining_seconds(floor=0.0) < 1.0:
+        print("  ⏱️ RAG retrieval skipped — request budget exhausted after embedding")
+        return [], []
 
     def _task_rss():
         rss_res = retrieval.retrieve_rss(
@@ -2135,7 +2157,11 @@ def _retrieve_rag(
     source_names = _rag_retrieval_task_names(
         question, plan, transcript_first=transcript_first, folders=folders,
     )
-    tasks = [task_by_name[name] for name in source_names if name in task_by_name]
+    task_entries = [
+        (name, task_by_name[name])
+        for name in source_names
+        if name in task_by_name
+    ]
     print(f"  🔎 RAG sources: {', '.join(source_names)}")
 
     deadline = current_deadline()
@@ -2149,18 +2175,62 @@ def _retrieve_rag(
             return ("(failed)", [], [])
 
     per_task_timeout = retrieval_timeout_cap(12.0)
-    if _PARALLEL_RETRIEVAL and len(tasks) > 1:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = [executor.submit(_safe_run, fn) for fn in tasks]
-            results = []
-            for future in futures:
-                try:
-                    results.append(future.result(timeout=per_task_timeout))
-                except FuturesTimeout:
-                    print(f"  ⏱️ Retrieval task timed out after {per_task_timeout:.1f}s")
-                    results.append(("(timeout)", [], []))
+    if task_entries and (_PARALLEL_RETRIEVAL or deadline is not None):
+        executor = ThreadPoolExecutor(max_workers=len(task_entries))
+        future_map: Dict[Future[Tuple[str, List[str], List[Dict[str, Any]]]], tuple[int, str]] = {}
+        pending: set[Future[Tuple[str, List[str], List[Dict[str, Any]]]]] = set()
+        collected: Dict[int, Tuple[str, List[str], List[Dict[str, Any]]]] = {}
+        try:
+            for index, (name, fn) in enumerate(task_entries):
+                future = executor.submit(_safe_run, fn)
+                future_map[future] = (index, name)
+                pending.add(future)
+
+            while pending:
+                if deadline_exhausted(deadline, safety_margin=0.25):
+                    break
+                wait_timeout = wait_timeout_cap(
+                    per_task_timeout,
+                    deadline,
+                    safety_margin=0.25,
+                )
+                if wait_timeout is not None and wait_timeout <= 0.0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    index, _name = future_map[future]
+                    try:
+                        collected[index] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  ⚠️ Retrieval task future failed: {exc}")
+                        collected[index] = ("(failed)", [], [])
+
+            for future in pending:
+                future.cancel()
+            for future in pending:
+                index, name = future_map[future]
+                print(f"  ⏱️ Retrieval task {name} timed out before request deadline")
+                collected.setdefault(index, ("(timeout)", [], []))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        results = [
+            collected[index]
+            for index in range(len(task_entries))
+            if index in collected
+        ]
     else:
-        results = [_safe_run(fn) for fn in tasks]
+        results = []
+        for _name, fn in task_entries:
+            if deadline_exhausted(deadline, safety_margin=0.25):
+                results.append(("(timeout)", [], []))
+                break
+            results.append(_safe_run(fn))
 
     for label, chunks, meta in results:
         print(f"  {label}: {len(chunks)} chunks found")
@@ -2346,7 +2416,12 @@ def _run_hybrid_parts(
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run the SQL and RAG halves of a hybrid query (concurrently when enabled)."""
-    from request_budget import current_deadline, use_request_deadline  # noqa: WPS433
+    from request_budget import (  # noqa: WPS433
+        current_deadline,
+        deadline_exhausted,
+        use_request_deadline,
+        wait_timeout_cap,
+    )
 
     deadline = current_deadline()
 
@@ -2354,17 +2429,88 @@ def _run_hybrid_parts(
         with use_request_deadline(deadline):
             return fn(*args, **kwargs)
 
+    def _sql_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        return {
+            "answer": "I couldn't load structured data before the request timed out.",
+            "sql": "",
+            "result": {"columns": [], "rows": [], "error": reason},
+            "db_backed": False,
+            "error": reason,
+        }
+
+    def _rag_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        return {
+            "answer": "I couldn't load community context before the request timed out.",
+            "chunks": [],
+            "metadata": [],
+            "error": reason,
+        }
+
     # SQL and RAG are independent. SQL uses its own thread-local DB connection
     # and RAG uses the shared (read-only) vector store, so this is safe.
     if _PARALLEL_RETRIEVAL:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        executor = ThreadPoolExecutor(max_workers=2)
+        future_map: Dict[Future[Dict[str, Any]], str] = {}
+        pending: set[Future[Dict[str, Any]]] = set()
+        collected: Dict[str, Dict[str, Any]] = {}
+        try:
             sql_future = executor.submit(
                 _with_budget, _run_sql, question, conversation_history, False,
             )
             rag_future = executor.submit(
                 _with_budget, _run_rag, question, plan, conversation_history, False,
             )
-            return sql_future.result(), rag_future.result()
+            future_map[sql_future] = "sql"
+            future_map[rag_future] = "rag"
+            pending.update({sql_future, rag_future})
+
+            while pending:
+                if deadline_exhausted(deadline, safety_margin=0.25):
+                    break
+                wait_timeout = (
+                    None
+                    if deadline is None
+                    else wait_timeout_cap(
+                        5.0,
+                        deadline,
+                        safety_margin=0.25,
+                    )
+                )
+                if wait_timeout is not None and wait_timeout <= 0.0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    label = future_map[future]
+                    try:
+                        collected[label] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  ⚠️ Hybrid {label} part failed: {exc}")
+                        if label == "sql":
+                            collected[label] = _sql_unavailable(str(exc))
+                        else:
+                            collected[label] = _rag_unavailable(str(exc))
+
+            for future in pending:
+                future.cancel()
+            for future in pending:
+                label = future_map[future]
+                print(f"  ⏱️ Hybrid {label} part timed out before request deadline")
+                if label == "sql":
+                    collected.setdefault(label, _sql_unavailable())
+                else:
+                    collected.setdefault(label, _rag_unavailable())
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return (
+            collected.get("sql") or _sql_unavailable(),
+            collected.get("rag") or _rag_unavailable(),
+        )
     sql_part = _run_sql(question, conversation_history, apply_fallback=False)
     rag_part = _run_rag(question, plan, conversation_history, apply_fallback=False)
     return sql_part, rag_part

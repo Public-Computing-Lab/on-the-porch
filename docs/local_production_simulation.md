@@ -128,11 +128,15 @@ It fails on HTTP/server errors, missing modes, timeouts, or any request over
 Default duration is 10 minutes.
 
 ```bash
-python scripts/local_two_user_soak.py
+python scripts/local_two_user_soak.py --reuse-session
 ```
 
 User A cycles through RAG/hybrid resident-voice and safety questions. User B
 cycles through prepared SQL, events, 311, and crime-count questions.
+Use `--reuse-session` for capacity testing so the harness behaves like a small
+number of concurrent users instead of creating a fresh guest session per
+request. This keeps rate-limit behavior observable without letting session
+churn dominate the test.
 
 The script records latency, error count, timeout count, route distribution, and
 API RSS. It fails if any request exceeds 40 seconds, if network/server errors
@@ -141,7 +145,7 @@ occur, or if API RSS grows continuously by more than 300 MB.
 Short local trial:
 
 ```bash
-python scripts/local_two_user_soak.py --duration 120
+python scripts/local_two_user_soak.py --duration 120 --reuse-session
 ```
 
 ## 5. Five-User Burst Test
@@ -149,7 +153,7 @@ python scripts/local_two_user_soak.py --duration 120
 Default duration is 180 seconds.
 
 ```bash
-python scripts/local_five_user_burst.py
+python scripts/local_five_user_burst.py --reuse-session
 ```
 
 This simulates five concurrent guest users with mixed SQL/RAG/hybrid queries.
@@ -159,7 +163,7 @@ network failures, or requests over 40 seconds.
 Short local trial:
 
 ```bash
-python scripts/local_five_user_burst.py --duration 60
+python scripts/local_five_user_burst.py --duration 60 --reuse-session
 ```
 
 ## 6. Forced Slow Gemini Test
@@ -207,7 +211,7 @@ a 3-minute hang.
 First verify resident chat does not write to the vector store:
 
 ```bash
-CHAT_VECTOR_WRITES_ENABLED=false python scripts/local_chroma_contention.py --duration 60
+CHAT_VECTOR_WRITES_ENABLED=false python scripts/local_chroma_contention.py --duration 60 --reuse-session
 ```
 
 If no ingestion is running, vector DB file mtimes should not change. If you want
@@ -215,7 +219,7 @@ to test read behavior while ingestion is active, start ingestion in another
 terminal, then run:
 
 ```bash
-python scripts/local_chroma_contention.py --duration 120 --allow-vector-mtime-change
+python scripts/local_chroma_contention.py --duration 120 --reuse-session --allow-vector-mtime-change
 ```
 
 Useful ingestion commands for local-only contention checks:

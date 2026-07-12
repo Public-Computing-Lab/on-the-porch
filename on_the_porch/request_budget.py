@@ -11,6 +11,9 @@ from typing import Iterator, Optional
 _local = threading.local()
 
 DEFAULT_BUDGET_SECONDS = float(os.getenv("REQUEST_BUDGET_SECONDS", "30"))
+DEFAULT_SAFETY_MARGIN_SECONDS = float(
+    os.getenv("REQUEST_BUDGET_SAFETY_MARGIN_SECONDS", "0.5")
+)
 
 
 def reset_request_budget(seconds: Optional[float] = None) -> None:
@@ -50,8 +53,57 @@ def remaining_seconds(*, floor: float = 0.0) -> float:
     return max(floor, deadline - time.perf_counter())
 
 
+def seconds_until_deadline(
+    deadline: Optional[float],
+    *,
+    floor: float = 0.0,
+    safety_margin: float = 0.0,
+) -> float:
+    """Remaining seconds for a captured deadline, optionally reserving margin."""
+    if deadline is None:
+        return DEFAULT_BUDGET_SECONDS
+    return max(floor, float(deadline) - time.perf_counter() - max(0.0, safety_margin))
+
+
 def budget_exhausted() -> bool:
     return remaining_seconds(floor=0.0) <= 0.0
+
+
+def deadline_exhausted(
+    deadline: Optional[float],
+    *,
+    safety_margin: float = DEFAULT_SAFETY_MARGIN_SECONDS,
+) -> bool:
+    if deadline is None:
+        return False
+    return seconds_until_deadline(
+        deadline,
+        floor=0.0,
+        safety_margin=safety_margin,
+    ) <= 0.0
+
+
+def wait_timeout_cap(
+    default_seconds: float,
+    deadline: Optional[float] = None,
+    *,
+    safety_margin: float = DEFAULT_SAFETY_MARGIN_SECONDS,
+) -> float:
+    """Timeout for waiting on a worker without consuming the whole budget."""
+    default_seconds = max(0.0, float(default_seconds))
+    if deadline is None:
+        return default_seconds
+    return max(
+        0.0,
+        min(
+            default_seconds,
+            seconds_until_deadline(
+                deadline,
+                floor=0.0,
+                safety_margin=safety_margin,
+            ),
+        ),
+    )
 
 
 def gemini_timeout_cap(default_seconds: int) -> int:
