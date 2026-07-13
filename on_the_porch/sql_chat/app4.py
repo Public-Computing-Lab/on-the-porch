@@ -1023,29 +1023,356 @@ def _llm_refine_sql(
     return sql
 
 
-_FORBIDDEN_SQL_KEYWORDS = re.compile(
-    r"\b(ALTER|CALL|CREATE|DELETE|DROP|EXEC|EXECUTE|GRANT|INSERT|LOAD|MERGE|"
-    r"OUTFILE|REPLACE|REVOKE|TRUNCATE|UPDATE|UPSERT)\b",
-    re.IGNORECASE,
-)
+_SQL_STATEMENT_COMMANDS = frozenset({
+    "ALTER", "CALL", "CREATE", "DELETE", "DROP", "EXEC", "EXECUTE", "GRANT",
+    "INSERT", "LOAD", "MERGE", "REPLACE", "REVOKE", "SELECT", "TRUNCATE",
+    "UPDATE", "UPSERT",
+})
+_FORBIDDEN_SQL_WORDS = (_SQL_STATEMENT_COMMANDS - {"SELECT", "REPLACE"}) | {
+    "DUMPFILE",
+    "OUTFILE",
+}
+_FORBIDDEN_SELECT_TOKENS = frozenset({"DUMPFILE", "LOAD_FILE", "OUTFILE"})
+_FORBIDDEN_QUERY_EXPRESSION_TOKENS = frozenset({"TABLE"})
+_FORBIDDEN_SQL_FUNCTIONS = frozenset({
+    "BENCHMARK",
+    "GET_LOCK",
+    "IS_FREE_LOCK",
+    "IS_USED_LOCK",
+    "RELEASE_ALL_LOCKS",
+    "RELEASE_LOCK",
+    "SLEEP",
+})
+_FORBIDDEN_SQL_SCHEMAS = frozenset({
+    "information_schema",
+    "mysql",
+    "performance_schema",
+    "sys",
+})
+_UNSUPPORTED_TABLE_SOURCE_WORDS = frozenset({
+    "STRAIGHT_JOIN",
+})
+_INDEX_HINT_PREFIXES = frozenset({"FORCE", "IGNORE", "USE"})
+_INDEX_HINT_TARGETS = frozenset({"INDEX", "KEY"})
 
 
 def _strip_sql_comments(sql: str) -> str:
-    no_line_comments = re.sub(r"--[^\n\r]*", " ", sql or "")
-    return re.sub(r"/\*.*?\*/", " ", no_line_comments, flags=re.DOTALL)
+    """Remove SQL comments without treating comment markers in literals as comments."""
+    text = sql or ""
+    output: List[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"', "`"):
+            quote = char
+            output.append(char)
+            index += 1
+            while index < len(text):
+                output.append(text[index])
+                if text[index] == "\\" and quote != "`" and index + 1 < len(text):
+                    index += 1
+                    output.append(text[index])
+                elif text[index] == quote:
+                    if index + 1 < len(text) and text[index + 1] == quote:
+                        index += 1
+                        output.append(text[index])
+                    else:
+                        index += 1
+                        break
+                index += 1
+            continue
+        # MySQL recognizes ``--`` as a comment only when whitespace/control
+        # follows the second dash. Treating ``--x`` as a comment here would let
+        # executable SQL after it disappear from validation while MySQL still
+        # parses it as an expression.
+        dash_comment = (
+            text.startswith("--", index)
+            and (
+                index + 2 >= len(text)
+                or text[index + 2].isspace()
+                or ord(text[index + 2]) < 32
+            )
+        )
+        if dash_comment or char == "#":
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            output.append("\n")
+            index = newline + 1
+            continue
+        if text.startswith("/*", index):
+            # MySQL executes version comments (/*! ... */) and interprets
+            # optimizer hints (/*+ ... */). The public SQL subset does not need
+            # either form, so fail closed instead of stripping executable text.
+            if text.startswith("/*!", index) or text.startswith("/*+", index):
+                raise ValueError("Executable SQL comments are not allowed")
+            end = text.find("*/", index + 2)
+            output.append(" ")
+            index = len(text) if end < 0 else end + 2
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _scan_sql_tokens(sql: str) -> tuple[List[tuple[str, str, int]], List[int]]:
+    """Tokenize outside literals so statement commands and functions stay distinct."""
+    tokens: List[tuple[str, str, int]] = []
+    semicolons: List[int] = []
+    depth = 0
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            while index < len(sql):
+                if sql[index] == "\\":
+                    index += 2
+                    continue
+                if sql[index] == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "`":
+            end = index + 1
+            value: List[str] = []
+            while end < len(sql):
+                if sql[end] == "`":
+                    if end + 1 < len(sql) and sql[end + 1] == "`":
+                        value.append("`")
+                        end += 2
+                        continue
+                    end += 1
+                    break
+                value.append(sql[end])
+                end += 1
+            tokens.append(("identifier", "".join(value), depth))
+            index = end
+            continue
+        if char == "(":
+            tokens.append(("punct", char, depth))
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            tokens.append(("punct", char, depth))
+            index += 1
+            continue
+        if char in (",", ".", ";", "{", "}"):
+            tokens.append(("punct", char, depth))
+            if char == ";":
+                semicolons.append(index)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] in ("_", "$")):
+                end += 1
+            tokens.append(("word", sql[index:end].upper(), depth))
+            index = end
+            continue
+        index += 1
+    return tokens, semicolons
+
+
+def _statement_command(tokens: List[tuple[str, str, int]]) -> tuple[str, int]:
+    top_words = [
+        (index, value)
+        for index, (kind, value, depth) in enumerate(tokens)
+        if kind == "word" and depth == 0
+    ]
+    if not top_words:
+        return "", -1
+    first_index, first_word = top_words[0]
+    if first_word != "WITH":
+        return first_word, first_index
+    for index, word in top_words[1:]:
+        if word in _SQL_STATEMENT_COMMANDS:
+            return word, index
+    return "", -1
+
+
+def _extract_cte_names(
+    tokens: List[tuple[str, str, int]],
+    command_index: int,
+) -> set[str]:
+    """Collect aliases declared before the main command in a WITH query."""
+    names: set[str] = set()
+    for index, (kind, value, depth) in enumerate(tokens[:command_index]):
+        if kind != "word" or value != "AS" or depth != 0:
+            continue
+        previous = index - 1
+        while previous >= 0:
+            prev_kind, prev_value, prev_depth = tokens[previous]
+            if prev_depth == 0 and prev_kind in ("word", "identifier"):
+                if prev_value.upper() not in ("WITH", "RECURSIVE"):
+                    names.add(prev_value.lower())
+                break
+            previous -= 1
+    return names
+
+
+_FROM_CLAUSE_END_WORDS = frozenset({
+    "EXCEPT", "FOR", "GROUP", "HAVING", "INTERSECT", "INTO", "LIMIT",
+    "LOCK", "ORDER", "PROCEDURE", "QUALIFY", "UNION", "WHERE", "WINDOW",
+})
+
+
+def _table_reference_at(
+    tokens: List[tuple[str, str, int]],
+    start: int,
+    depth: int,
+) -> str:
+    if start >= len(tokens):
+        raise ValueError("Missing table source after FROM or JOIN")
+    kind, value, token_depth = tokens[start]
+    if kind == "punct" and value == "(":
+        next_index = start + 1
+        while next_index < len(tokens) and tokens[next_index][0] == "punct":
+            next_index += 1
+        if (
+            next_index < len(tokens)
+            and tokens[next_index][0] == "word"
+            and tokens[next_index][1] in ("SELECT", "WITH")
+            and tokens[next_index][2] > depth
+        ):
+            return ""
+        raise ValueError("Unsupported parenthesized table source")
+    if token_depth != depth or kind not in ("word", "identifier"):
+        raise ValueError("Unsupported table source")
+
+    first = value.lower()
+    if start + 2 < len(tokens):
+        dot_kind, dot_value, dot_depth = tokens[start + 1]
+        next_kind, next_value, next_depth = tokens[start + 2]
+        if (
+            dot_kind == "punct"
+            and dot_value == "."
+            and dot_depth == depth
+            and next_kind in ("word", "identifier")
+            and next_depth == depth
+        ):
+            return f"{first}.{next_value.lower()}"
+    return first
 
 
 def _extract_sql_tables(sql: str) -> List[str]:
+    """Return physical/CTE sources from the explicitly supported SQL subset.
+
+    Supported source forms are the forms used by the app's read queries:
+    ``FROM source``, comma sources, standard ``[INNER|LEFT|RIGHT|CROSS] JOIN``,
+    CTE references, and derived ``(SELECT ...)`` / ``(WITH ... SELECT ...)``
+    sources. Unsupported MySQL extensions are rejected before this extractor.
+    The linear scan still visits CTE bodies and nested/derived SELECTs, so every
+    physical table in those scopes is returned for allowlist validation.
+    """
+    tokens, _ = _scan_sql_tokens(sql or "")
     tables: List[str] = []
-    pattern = re.compile(
-        r"\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_]+)`?(?:\s*\.\s*`?([A-Za-z0-9_]+)`?)?",
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(sql or ""):
-        table = (match.group(2) or match.group(1) or "").lower()
-        if table:
-            tables.append(table)
+    active_from_depths: set[int] = set()
+    for index, (kind, value, depth) in enumerate(tokens):
+        active_from_depths = {item for item in active_from_depths if item <= depth}
+        if kind == "word" and value in _FROM_CLAUSE_END_WORDS:
+            active_from_depths.discard(depth)
+            continue
+        if kind == "word" and value == "FROM":
+            active_from_depths.add(depth)
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
+            continue
+        if kind == "word" and value == "JOIN" and depth in active_from_depths:
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
+            continue
+        if kind == "punct" and value == "," and depth in active_from_depths:
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
     return tables
+
+
+def _next_same_depth_token(
+    tokens: List[tuple[str, str, int]],
+    start: int,
+    depth: int,
+) -> tuple[int, tuple[str, str, int]] | tuple[int, None]:
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        if token[2] == depth:
+            return index, token
+        if token[2] < depth:
+            break
+    return -1, None
+
+
+def _validate_table_source_subset(tokens: List[tuple[str, str, int]]) -> None:
+    """Reject MySQL source syntax outside the app's bounded read-only subset."""
+    if any(kind == "punct" and value in ("{", "}") for kind, value, _ in tokens):
+        raise ValueError("ODBC table-source escapes are not supported")
+
+    for index, (kind, value, depth) in enumerate(tokens):
+        if kind != "word":
+            continue
+        word = value.upper()
+        if word in _UNSUPPORTED_TABLE_SOURCE_WORDS:
+            raise ValueError(f"Unsupported table-source syntax: {word}")
+
+        next_index, next_token = _next_same_depth_token(tokens, index + 1, depth)
+
+        # NATURAL joins are not used by current queries. Reject the complete
+        # modifier family rather than attempting to infer its implicit columns.
+        if word == "NATURAL":
+            cursor = next_index
+            while cursor >= 0 and cursor < len(tokens):
+                next_kind, next_value, next_depth = tokens[cursor]
+                if next_depth != depth or next_kind != "word":
+                    break
+                if next_value == "JOIN":
+                    raise ValueError("NATURAL JOIN is not supported")
+                if next_value not in ("INNER", "LEFT", "RIGHT", "OUTER"):
+                    break
+                cursor, _ = _next_same_depth_token(tokens, cursor + 1, depth)
+
+        # Table-valued/derived extensions are deliberately unsupported. Plain
+        # derived SELECTs remain accepted by _table_reference_at().
+        if word in ("JSON_TABLE", "LATERAL") and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "punct" and next_value == "(":
+                raise ValueError(f"{word} table sources are not supported")
+
+        # Table partition selectors and index hints are unnecessary for public
+        # queries and complicate source parsing, so reject them fail-closed.
+        if word == "PARTITION" and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "punct" and next_value == "(":
+                raise ValueError("Table PARTITION selectors are not supported")
+        if word in _INDEX_HINT_PREFIXES and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "word" and next_value in _INDEX_HINT_TARGETS:
+                raise ValueError("Table index hints are not supported")
+
+
+def _called_sql_functions(tokens: List[tuple[str, str, int]]) -> set[str]:
+    """Return executable function names while ignoring words inside literals."""
+    called: set[str] = set()
+    for index, (kind, value, depth) in enumerate(tokens[:-1]):
+        if kind not in ("word", "identifier"):
+            continue
+        next_kind, next_value, next_depth = tokens[index + 1]
+        if (
+            next_kind == "punct"
+            and next_value == "("
+            and next_depth == depth
+        ):
+            called.add(value.upper())
+    return called
 
 
 def _enforce_select_limit(sql: str) -> str:
@@ -1066,18 +1393,62 @@ def _validate_select_only_sql(sql: str) -> str:
     cleaned = _strip_sql_comments(sql).strip()
     if not cleaned:
         raise ValueError("Empty SQL is not allowed")
-    statements = [part.strip() for part in cleaned.rstrip(";").split(";") if part.strip()]
-    if len(statements) != 1:
+    tokens, semicolons = _scan_sql_tokens(cleaned)
+    if semicolons and (
+        len(semicolons) != 1 or cleaned[semicolons[0] + 1:].strip()
+    ):
         raise ValueError("Only a single SQL statement is allowed")
-    statement = statements[0]
-    if not re.match(r"^\s*SELECT\b", statement, flags=re.IGNORECASE):
+    statement = cleaned[:semicolons[0]].strip() if semicolons else cleaned
+    tokens, _ = _scan_sql_tokens(statement)
+    command, command_index = _statement_command(tokens)
+    if command != "SELECT":
         raise ValueError("Only SELECT statements are allowed")
-    if _FORBIDDEN_SQL_KEYWORDS.search(statement):
+    _validate_table_source_subset(tokens)
+    forbidden = {
+        value
+        for kind, value, _depth in tokens
+        if kind == "word" and value in _FORBIDDEN_SQL_WORDS
+    }
+    if forbidden:
         raise ValueError("DDL/DML keywords are not allowed in public SQL")
+    dangerous_select_tokens = {
+        value.upper()
+        for kind, value, _depth in tokens
+        if kind in ("word", "identifier")
+        and value.upper() in _FORBIDDEN_SELECT_TOKENS
+    }
+    if dangerous_select_tokens:
+        raise ValueError("File operations are not allowed in public SQL")
+    executable_query_tokens = {
+        value.upper()
+        for kind, value, _depth in tokens
+        if kind == "word"
+        and value.upper() in _FORBIDDEN_QUERY_EXPRESSION_TOKENS
+    }
+    if executable_query_tokens:
+        raise ValueError("TABLE query expressions are not allowed in public SQL")
+    forbidden_functions = _called_sql_functions(tokens) & _FORBIDDEN_SQL_FUNCTIONS
+    if forbidden_functions:
+        raise ValueError(
+            "Resource-control functions are not allowed in public SQL"
+        )
+
     tables = _extract_sql_tables(statement)
-    disallowed = sorted({table for table in tables if table not in SQL_TABLE_ALLOWLIST})
+    cte_names = _extract_cte_names(tokens, command_index)
+    disallowed: set[str] = set()
+    for table in tables:
+        schema, separator, _base_table = table.partition(".")
+        if separator and schema in _FORBIDDEN_SQL_SCHEMAS:
+            disallowed.add(table)
+            continue
+        if separator:
+            if table not in SQL_TABLE_ALLOWLIST:
+                disallowed.add(table)
+            continue
+        if table not in SQL_TABLE_ALLOWLIST and table not in cte_names:
+            disallowed.add(table)
     if disallowed:
-        raise ValueError(f"SQL references disallowed table(s): {', '.join(disallowed)}")
+        raise ValueError(f"SQL references disallowed table(s): {', '.join(sorted(disallowed))}")
     return _enforce_select_limit(statement)
 
 

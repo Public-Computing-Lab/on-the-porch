@@ -17,6 +17,7 @@ from execution_plan import (
 from query_plan import resolve_period
 
 from sql_chat import prepared_sql
+from resident_response import execution_failure_message
 
 
 def _sanitize_rows(rows: List[Dict[str, Any]], *, limit: int = 10) -> List[Dict[str, Any]]:
@@ -60,9 +61,9 @@ def _execute_sql_part(
             intent=part.intent,
             topic=part.topic,
             sub_question=sub_q,
-            canonical_facts=(
-                f"I couldn't run a prepared query for the **{part.topic or part.intent}** "
-                "part of your question."
+            canonical_facts=execution_failure_message(
+                path="sql",
+                intent=part.intent,
             ),
             error="no_prepared_match",
         )
@@ -82,7 +83,10 @@ def _execute_sql_part(
             intent=part.intent,
             topic=part.topic,
             sub_question=sub_q,
-            canonical_facts=f"I couldn't load **{part.topic or part.intent}** data right now.",
+            canonical_facts=execution_failure_message(
+                path="sql",
+                intent=part.intent,
+            ),
             error=str(exc),
         )
 
@@ -171,12 +175,11 @@ def _derive_prepared_intent(plan: ExecutionPlan, parts: List[FactPart]) -> Optio
 
 
 def _timeout_fact_part(part: PlanPart) -> FactPart:
-    if part.path == "rag":
-        message = "I couldn't load community context before the request timed out."
-    elif part.path == "sql":
-        message = "I couldn't load structured data before the request timed out."
-    else:
-        message = part.guardrail_message or "That part of the answer timed out."
+    message = part.guardrail_message or execution_failure_message(
+        path=part.path,
+        intent=part.intent,
+        timed_out=True,
+    )
     return FactPart(
         path=part.path,
         intent=part.intent,
@@ -189,12 +192,10 @@ def _timeout_fact_part(part: PlanPart) -> FactPart:
 
 def _exception_fact_part(part: PlanPart, exc: Exception) -> FactPart:
     print(f"  ⚠️ Plan part failed ({part.path}/{part.intent}): {exc}")
-    if part.path == "rag":
-        message = "I couldn't load community context right now."
-    elif part.path == "sql":
-        message = "I couldn't load structured data right now."
-    else:
-        message = part.guardrail_message or "That part of the answer is unavailable."
+    message = part.guardrail_message or execution_failure_message(
+        path=part.path,
+        intent=part.intent,
+    )
     return FactPart(
         path=part.path,
         intent=part.intent,

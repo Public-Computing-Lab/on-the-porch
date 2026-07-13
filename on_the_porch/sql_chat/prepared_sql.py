@@ -426,7 +426,7 @@ def _event_by_name_sql(
     if on_date is not None:
         date_clause = f"AND `start_date` = '{on_date.isoformat()}' "
     return (
-        "SELECT `event_name`, `event_date`, `start_date`, `end_date`, "
+        "SELECT `id`, `event_name`, `event_date`, `start_date`, `end_date`, "
         "`start_time`, `end_time`, `raw_text`, `source_pdf` "
         "FROM `weekly_events` "
         f"WHERE {_event_name_where_clause(name)} "
@@ -485,9 +485,73 @@ def _fmt_clock(value) -> str:
         return text
 
 
+def _fmt_event_date(value) -> str:
+    if not value:
+        return ""
+    try:
+        if hasattr(value, "strftime"):
+            parsed = value
+        else:
+            from datetime import date
+
+            parsed = date.fromisoformat(str(value)[:10])
+        return f"{parsed.strftime('%A')}, {parsed.strftime('%B')} {parsed.day}"
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
+_EVENT_FIELD_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(DATE|TIME|LOCATION|CONTACT|URL|COST|REGISTRATION)\s*:\s*",
+    flags=re.IGNORECASE,
+)
+
+
+def _clean_event_field_value(value: str) -> str:
+    return (value or "").strip().strip(",;|").strip()
+
+
+def _parse_labeled_event_fields(raw_text: str) -> tuple[str, Dict[str, str]]:
+    """Split event prose from recognized line or inline LABEL: value fields."""
+    raw = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return "", {}
+    matches = list(_EVENT_FIELD_PATTERN.finditer(raw))
+    if not matches:
+        return raw, {}
+
+    description_parts: List[str] = [raw[:matches[0].start()].strip()]
+    fields: Dict[str, str] = {}
+    for index, match in enumerate(matches):
+        label = match.group(1).lower()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        segment = raw[match.end():end].strip()
+        lines = [
+            _clean_event_field_value(line)
+            for line in segment.splitlines()
+            if _clean_event_field_value(line)
+        ]
+        if not lines:
+            continue
+        value = lines[0]
+        if label == "url":
+            url_match = re.search(r"https?://[^\s,;]+", segment, flags=re.IGNORECASE)
+            value = url_match.group(0).rstrip(").,]") if url_match else value
+        fields.setdefault(label, value)
+        if len(lines) > 1:
+            description_parts.extend(lines[1:])
+
+    description = "\n".join(part for part in description_parts if part).strip()
+    return description, fields
+
+
 def _extract_event_url(raw_text: str) -> str:
-    match = re.search(r"URL:\s*(https?://\S+)", raw_text or "", flags=re.IGNORECASE)
-    return match.group(1).rstrip(").,]") if match else ""
+    _description, fields = _parse_labeled_event_fields(raw_text)
+    for candidate in (fields.get("url", ""), fields.get("registration", "")):
+        match = re.search(r"https?://[^\s,;]+", candidate, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).rstrip(").,]")
+    return ""
 
 
 _EVENT_SOURCE_LABELS = {
@@ -524,27 +588,67 @@ def build_event_sources(
     return [{"type": "event", "source": label, "path": url}]
 
 
-def _clean_event_body(raw_text: str, name: str) -> str:
-    body = (raw_text or "").strip()
+def _metadata_prefix_pattern(value: str) -> str:
+    parts = [re.escape(part) for part in re.split(r"\s+", (value or "").strip()) if part]
+    return r"\s+".join(parts)
+
+
+def _strip_leading_event_metadata(
+    description: str,
+    name: str,
+    date_labels: tuple[str, ...] = (),
+) -> str:
+    body = (description or "").strip()
     if not body:
         return ""
+
+    prefixes = [name]
+    prefixes.extend(
+        sorted(
+            {label for label in date_labels if (label or "").strip()},
+            key=len,
+            reverse=True,
+        )
+    )
+    for prefix in prefixes:
+        pattern = _metadata_prefix_pattern(prefix)
+        if not pattern:
+            continue
+        updated = re.sub(
+            rf"^\s*\**{pattern}\**(?=$|\s|[-–—|,:;·])",
+            "",
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if updated != body:
+            body = updated.lstrip(" \t\n-|,:;·–—")
+
     norm_name = _normalize_event_name(name)
-    first_line = body.splitlines()[0].strip() if body else ""
-    if _normalize_event_name(first_line) == norm_name:
-        body = "\n".join(body.splitlines()[1:]).strip()
-    # Drop structured footer lines we render separately.
+    normalized_dates = {
+        _normalize_event_name(label)
+        for label in date_labels
+        if (label or "").strip()
+    }
     kept: List[str] = []
     for line in body.splitlines():
         stripped = line.strip()
-        lower = stripped.lower()
-        if lower.startswith("url:") or lower.startswith("location:"):
+        normalized = _normalize_event_name(stripped)
+        if normalized == norm_name:
+            continue
+        if normalized in normalized_dates:
             continue
         kept.append(stripped)
-    body = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
-    # Single-paragraph Tribe descriptions embed LOCATION:/CONTACT: inline.
-    body = re.split(r"\bLOCATION:\s*", body, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    body = re.split(r"\bCONTACT:\s*", body, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    return body
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def _clean_event_body(
+    raw_text: str,
+    name: str,
+    date_labels: tuple[str, ...] = (),
+) -> str:
+    description, _fields = _parse_labeled_event_fields(raw_text)
+    return _strip_leading_event_metadata(description, name, date_labels)
 
 
 def _pick_event_rows(question: str, rows: List[dict]) -> List[dict]:
@@ -581,44 +685,92 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
 
     row = _pick_event_rows(question, rows)[0]
     name = row.get("event_name") or "Event"
-    start_date = row.get("start_date") or row.get("event_date") or ""
+    raw_text = str(row.get("raw_text") or "")
+    description_text, fields = _parse_labeled_event_fields(raw_text)
+    start_date = _fmt_event_date(
+        row.get("start_date")
+        or row.get("event_date")
+        or fields.get("date")
+        or ""
+    )
     start_time = _fmt_clock(row.get("start_time"))
     end_time = _fmt_clock(row.get("end_time"))
-    when_parts = [str(start_date)] if start_date else []
+    time_label = ""
     if start_time:
-        when_parts.append(
-            f"{start_time} – {end_time}" if end_time else start_time
-        )
-    when_label = " · ".join(when_parts)
+        time_label = f"{start_time} – {end_time}" if end_time else start_time
+    elif fields.get("time"):
+        time_label = fields["time"]
 
-    body = _clean_event_body(row.get("raw_text") or "", name)
-    url = _extract_event_url(row.get("raw_text") or "")
+    body = _strip_leading_event_metadata(
+        description_text,
+        name,
+        (str(row.get("event_date") or ""), fields.get("date", ""), start_date),
+    )
+    url = _extract_event_url(raw_text)
+    location = str(
+        row.get("location")
+        or row.get("event_location")
+        or fields.get("location", "")
+    ).strip()
+    contact = fields.get("contact", "")
+    cost = fields.get("cost", "")
+    registration = fields.get("registration", "")
 
-    lines = [f"**{name}**"]
-    if when_label:
-        lines.append(f"**When:** {when_label}")
+    lead = f"**{name}**"
+    if start_date:
+        lead += f" is scheduled for **{start_date}**."
+    else:
+        lead += " is listed in the community calendar."
+    lines = [lead]
+    if time_label:
+        lines.append(f"**Time:** {time_label}")
     if body:
         lines.append("")
         lines.append(body)
-    loc_match = re.search(
-        r"LOCATION:\s*(.+?)(?:\n|CONTACT:|$)",
-        row.get("raw_text") or "",
-        flags=re.IGNORECASE | re.DOTALL,
+    body_mentions_location = bool(
+        body
+        and location
+        and re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(location)}(?![A-Za-z0-9])",
+            body,
+            flags=re.IGNORECASE,
+        )
     )
-    if loc_match:
+    if location and not body_mentions_location:
         lines.append("")
-        lines.append(f"**Location:** {loc_match.group(1).strip()}")
-    contact_match = re.search(
-        r"CONTACT:\s*(.+?)(?:\n|WALK-INS|$)",
-        row.get("raw_text") or "",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if contact_match:
+        lines.append(f"**Location:** {location}")
+    if cost:
         lines.append("")
-        lines.append(f"**Contact:** {contact_match.group(1).strip()}")
-    if url:
+        lines.append(f"**Cost:** {cost}")
+    url_rendered = False
+    if registration:
+        lines.append("")
+        registration_label = registration
+        if url and url in registration_label:
+            registration_label = registration_label.replace(
+                url,
+                f"[Registration link]({url})",
+            )
+            url_rendered = True
+        lines.append(f"**Registration:** {registration_label}")
+    if contact:
+        lines.append("")
+        lines.append(f"**Contact:** {contact}")
+    if url and not url_rendered:
         lines.append("")
         lines.append(f"[Event details]({url})")
+    if not body and not location:
+        lines.append("")
+        lines.append(
+            "The current listing does not include a detailed description and "
+            "does not provide a separate location field."
+        )
+    elif not body:
+        lines.append("")
+        lines.append("The current listing does not include a detailed description.")
+    elif not location:
+        lines.append("")
+        lines.append("The listing does not provide a separate location field.")
     return "\n".join(lines).strip()
 
 
@@ -1914,7 +2066,7 @@ def _conversational_llm_enabled() -> bool:
 
 def _prepared_should_use_llm(hit: PreparedMatch, question: str = "") -> bool:
     if hit.intent == "event_by_name":
-        return True
+        return False
     if hit.intent in ("crime_homicide_count", "911_unavailable", "911_advisory"):
         return False
     q = (question or "").lower()
@@ -2168,11 +2320,14 @@ def _try_run_compound_prepared_sql(
         sub_q = part.sub_question
         hit = match_prepared_sql(sub_q)
         if hit is None:
+            from resident_response import execution_failure_message  # noqa: WPS433
+
             blocks.append({
                 "topic": part.topic,
                 "sub_question": sub_q,
-                "canonical_facts": (
-                    f"I couldn't run a prepared query for the **{part.topic}** part of your question."
+                "canonical_facts": execution_failure_message(
+                    path="sql",
+                    intent="unavailable",
                 ),
                 "result": {"columns": [], "rows": []},
             })

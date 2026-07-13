@@ -1605,6 +1605,40 @@ def _try_fast_hybrid_stitch(
     return f"{sql_answer}\n\n{rag_answer}"
 
 
+def _degraded_hybrid_answer(
+    sql_part: Dict[str, Any],
+    rag_part: Dict[str, Any],
+    plan: Dict[str, Any],
+) -> Optional[str]:
+    """Compose partial legacy results without sending failure details to a model."""
+    if not sql_part.get("error") and not rag_part.get("error"):
+        return None
+
+    from resident_response import (  # noqa: WPS433
+        execution_failure_message,
+        sanitize_degraded_answer,
+    )
+
+    intent = str(plan.get("intent") or "")
+    pieces: List[str] = []
+    for path, part in (("sql", sql_part), ("rag", rag_part)):
+        if part.get("error"):
+            piece = execution_failure_message(path=path, intent=intent)
+        else:
+            piece = (part.get("answer") or "").strip()
+        if piece and piece not in pieces:
+            pieces.append(piece)
+
+    fallback = "\n\n".join(pieces).strip()
+    if not fallback:
+        fallback = execution_failure_message(path="hybrid", intent=intent)
+    return sanitize_degraded_answer(
+        fallback,
+        fallback=execution_failure_message(path="hybrid", intent=intent),
+        internal_identifiers=(intent, str(sql_part.get("prepared_intent") or "")),
+    )
+
+
 def _build_rag_prompt(
     question: str,
     chunks: List[str],
@@ -2306,9 +2340,8 @@ def _run_sql(
     if not _dynamic_sql_enabled():
         return {
             "answer": (
-                "I can answer common civic data questions from prepared Boston Open Data "
-                "queries, but generated SQL is disabled on the public chat path. Try a "
-                "specific 311, crime, or events count with a time range."
+                "I can answer common questions from synced Boston Open Data. Try a "
+                "specific 311, crime, or events question with a time range."
             ),
             "sql": "",
             "result": {
@@ -2424,14 +2457,21 @@ def _run_hybrid_parts(
     )
 
     deadline = current_deadline()
+    routed_intent = str(plan.get("intent") or "")
 
     def _with_budget(fn, *args, **kwargs):
         with use_request_deadline(deadline):
             return fn(*args, **kwargs)
 
     def _sql_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        from resident_response import execution_failure_message  # noqa: WPS433
+
         return {
-            "answer": "I couldn't load structured data before the request timed out.",
+            "answer": execution_failure_message(
+                path="sql",
+                intent=routed_intent,
+                timed_out=reason == "request_budget_exhausted",
+            ),
             "sql": "",
             "result": {"columns": [], "rows": [], "error": reason},
             "db_backed": False,
@@ -2439,8 +2479,14 @@ def _run_hybrid_parts(
         }
 
     def _rag_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        from resident_response import execution_failure_message  # noqa: WPS433
+
         return {
-            "answer": "I couldn't load community context before the request timed out.",
+            "answer": execution_failure_message(
+                path="rag",
+                intent=routed_intent,
+                timed_out=reason == "request_budget_exhausted",
+            ),
             "chunks": [],
             "metadata": [],
             "error": reason,
@@ -2545,6 +2591,14 @@ def _build_hybrid_merge_prompt(
 def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     sql_part, rag_part = _run_hybrid_parts(question, plan, conversation_history)
     sql_part = _finalize_prepared_sql_out(dict(sql_part))
+    degraded = _degraded_hybrid_answer(sql_part, rag_part, plan)
+    if degraded is not None:
+        return {
+            "answer": degraded,
+            "sql": sql_part,
+            "rag": rag_part,
+            "prepared_intent": sql_part.get("prepared_intent"),
+        }
     fast = _try_fast_hybrid_stitch(sql_part, rag_part)
     if fast:
         answer = _apply_default_fallback_if_needed(question, fast)
@@ -2902,8 +2956,13 @@ def stream_agent_response(
     # hybrid
     sql_part, rag_part = _run_hybrid_parts(message, plan, conversation_history)
     sql_part = _finalize_prepared_sql_out(dict(sql_part))
-    fast_hybrid = _try_fast_hybrid_stitch(sql_part, rag_part)
-    if fast_hybrid:
+    degraded_hybrid = _degraded_hybrid_answer(sql_part, rag_part, plan)
+    fast_hybrid = None if degraded_hybrid is not None else _try_fast_hybrid_stitch(sql_part, rag_part)
+    if degraded_hybrid is not None:
+        answer = degraded_hybrid
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+    elif fast_hybrid:
         answer = fast_hybrid
         for piece in _pseudo_stream(answer):
             yield ("delta", piece)
