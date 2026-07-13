@@ -24,6 +24,7 @@ from resident_response import (  # noqa: E402
     internal_terms,
     sanitize_degraded_answer,
 )
+from query_plan import PeriodWindow  # noqa: E402
 from sql_chat import app4, prepared_sql  # noqa: E402
 
 
@@ -142,6 +143,214 @@ def test_table_word_inside_literals_and_comments_is_allowed() -> None:
     )
     for sql in (literal, quoted_description, commented):
         assert app4._validate_select_only_sql(sql).startswith("SELECT")
+
+
+def test_straight_join_bypasses_are_rejected() -> None:
+    rejected = (
+        (
+            "SELECT w.id FROM weekly_events w "
+            "STRAIGHT_JOIN events_materialized e ON 1=1"
+        ),
+        "SELECT w.id FROM weekly_events w STRAIGHT_JOIN mysql.user u ON 1=1",
+        "SELECT w.id FROM weekly_events w STRAIGHT_JOIN other_schema.secret s ON 1=1",
+        (
+            "WITH x AS (SELECT w.id FROM weekly_events w "
+            "STRAIGHT_JOIN mysql.user u ON 1=1) SELECT * FROM x"
+        ),
+        (
+            "SELECT * FROM (SELECT w.id FROM weekly_events w "
+            "STRAIGHT_JOIN mysql.user u ON 1=1) AS x"
+        ),
+        "SELECT w.id FROM weekly_events w StRaIgHt_JoIn mysql.user u ON 1=1",
+        "SELECT w.id FROM weekly_events w STRAIGHT_JOIN/**/mysql.user u ON 1=1",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_supported_table_source_subset_extracts_every_physical_table() -> None:
+    accepted = (
+        "SELECT event_name FROM weekly_events",
+        (
+            "SELECT w.event_name, e.event_name FROM weekly_events w, "
+            "events_materialized e"
+        ),
+        (
+            "SELECT w.event_name FROM weekly_events w "
+            "JOIN events_materialized e ON e.event_name = w.event_name"
+        ),
+        (
+            "SELECT w.event_name FROM weekly_events w "
+            "INNER JOIN events_materialized e ON e.event_name = w.event_name"
+        ),
+        (
+            "SELECT w.event_name FROM weekly_events w "
+            "LEFT OUTER JOIN events_materialized e ON e.event_name = w.event_name"
+        ),
+        (
+            "SELECT w.event_name FROM weekly_events w "
+            "RIGHT JOIN events_materialized e ON e.event_name = w.event_name"
+        ),
+        "SELECT w.event_name FROM weekly_events w CROSS JOIN events_materialized e",
+        (
+            "WITH x AS (SELECT event_name FROM weekly_events) "
+            "SELECT x.event_name FROM x"
+        ),
+        (
+            "WITH weekly_events AS (SELECT event_name FROM events_materialized) "
+            "SELECT event_name FROM weekly_events"
+        ),
+        (
+            "SELECT x.event_name FROM "
+            "(SELECT event_name FROM weekly_events) AS x"
+        ),
+        (
+            "SELECT event_name FROM weekly_events WHERE id IN "
+            "(SELECT id FROM events_materialized)"
+        ),
+    )
+    for sql in accepted:
+        validated = app4._validate_select_only_sql(sql)
+        assert validated.startswith(("SELECT", "WITH")), validated
+
+    rejected = (
+        "SELECT * FROM weekly_events, mysql.user",
+        "SELECT * FROM weekly_events, other_schema.secret",
+        "SELECT * FROM weekly_events JOIN mysql.user ON 1=1",
+        "SELECT * FROM weekly_events LEFT JOIN other_schema.secret ON 1=1",
+        "WITH x AS (SELECT * FROM mysql.user) SELECT * FROM x",
+        (
+            "WITH weekly_events AS (SELECT * FROM mysql.user) "
+            "SELECT * FROM weekly_events"
+        ),
+        "SELECT * FROM (SELECT * FROM other_schema.secret) AS x",
+        "SELECT * FROM weekly_events WHERE id IN (SELECT id FROM mysql.user)",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_unsupported_table_source_extensions_fail_closed() -> None:
+    groups = {
+        "natural": (
+            "SELECT * FROM weekly_events NATURAL JOIN events_materialized",
+            "SELECT * FROM weekly_events NATURAL JOIN mysql.user",
+            "SELECT * FROM weekly_events NATURAL LEFT JOIN other_schema.secret",
+        ),
+        "lateral": (
+            (
+                "SELECT * FROM weekly_events w JOIN LATERAL "
+                "(SELECT * FROM events_materialized) x ON TRUE"
+            ),
+            (
+                "SELECT * FROM weekly_events w JOIN LATERAL "
+                "(SELECT * FROM mysql.user) x ON TRUE"
+            ),
+            (
+                "SELECT * FROM weekly_events w JOIN LATERAL "
+                "(SELECT * FROM other_schema.secret) x ON TRUE"
+            ),
+        ),
+        "json_table": (
+            (
+                "SELECT * FROM weekly_events w JOIN "
+                "JSON_TABLE(w.raw_text, '$[*]' COLUMNS(v VARCHAR(20) PATH '$')) j"
+            ),
+            "SELECT * FROM mysql.user u JOIN JSON_TABLE('[]', '$[*]' COLUMNS(v INT PATH '$')) j",
+            (
+                "SELECT * FROM other_schema.secret s JOIN "
+                "JSON_TABLE('[]', '$[*]' COLUMNS(v INT PATH '$')) j"
+            ),
+        ),
+        "parenthesized_join": (
+            "SELECT * FROM (weekly_events JOIN events_materialized ON 1=1) x",
+            "SELECT * FROM (weekly_events JOIN mysql.user ON 1=1) x",
+            "SELECT * FROM (weekly_events JOIN other_schema.secret ON 1=1) x",
+        ),
+        "odbc_escape": (
+            "SELECT * FROM { OJ weekly_events LEFT JOIN events_materialized ON 1=1 }",
+            "SELECT * FROM { OJ weekly_events LEFT JOIN mysql.user ON 1=1 }",
+            "SELECT * FROM { OJ weekly_events LEFT JOIN other_schema.secret ON 1=1 }",
+        ),
+        "index_hint": (
+            "SELECT * FROM weekly_events USE INDEX (`PRIMARY`)",
+            "SELECT * FROM mysql.user FORCE KEY (`PRIMARY`)",
+            "SELECT * FROM other_schema.secret IGNORE INDEX (`idx`)",
+        ),
+        "partition": (
+            "SELECT * FROM weekly_events PARTITION (p0)",
+            "SELECT * FROM mysql.user PARTITION (p0)",
+            "SELECT * FROM other_schema.secret PARTITION (p0)",
+        ),
+    }
+    for examples in groups.values():
+        for sql in examples:
+            _assert_rejected(sql)
+
+
+def test_table_source_words_in_literals_and_normal_comments_are_allowed() -> None:
+    sql = (
+        "SELECT 'STRAIGHT_JOIN LATERAL JSON_TABLE PARTITION SLEEP' AS note "
+        "FROM weekly_events "
+        "/* NATURAL JOIN mysql.user; USE INDEX; { OJ other_schema.secret } */"
+    )
+    assert app4._validate_select_only_sql(sql).startswith("SELECT")
+
+    quoted_description = (
+        'SELECT "Bring a TABLE to the NATURAL history display" AS description '
+        "FROM weekly_events -- STRAIGHT_JOIN mysql.user\n"
+    )
+    assert app4._validate_select_only_sql(quoted_description).startswith("SELECT")
+
+
+def test_executable_mysql_comments_and_non_mysql_dash_comments_are_rejected() -> None:
+    rejected = (
+        "SELECT * FROM weekly_events /*! STRAIGHT_JOIN mysql.user ON 1=1 */",
+        "SELECT * FROM weekly_events /*+ JOIN_ORDER(weekly_events) */",
+        "SELECT 1--x FROM mysql.user",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_current_prepared_query_corpus_remains_valid() -> None:
+    rolling = PeriodWindow(days=30, label="the last 30 days")
+    calendar = PeriodWindow(days=31, label="July 2026", calendar_ym="2026-07")
+    original_mv = os.environ.get("MATERIALIZED_VIEWS_ENABLED")
+    queries = ["SELECT 0 AS cnt", app4._fast_weekly_events_sql(14)]
+    try:
+        for enabled in ("true", "false"):
+            os.environ["MATERIALIZED_VIEWS_ENABLED"] = enabled
+            queries.extend((
+                prepared_sql._sql_events_upcoming(14),
+                prepared_sql._sql_events_upcoming(7, weekend_only=True),
+                prepared_sql._events_by_source_sql("dotnews", 30),
+                prepared_sql._event_by_name_sql("Crew & Cadet Street Parade", 90),
+                prepared_sql._sql_311_weekly_count(rolling),
+                prepared_sql._sql_311_top_types_live(rolling),
+                prepared_sql._sql_311_top_types(rolling),
+                prepared_sql._sql_311_top_types(calendar),
+                prepared_sql._sql_311_issue_count(("pothole",), rolling),
+                prepared_sql._sql_311_issue_recent(("pothole",), rolling),
+                prepared_sql._sql_311_recent(rolling),
+                prepared_sql._sql_311_open(rolling),
+                prepared_sql._sql_crime_monthly_count(rolling),
+                prepared_sql._sql_crime_monthly_count(calendar),
+                prepared_sql._sql_crime_homicide_tiered(rolling),
+                prepared_sql._sql_crime_top_offenses(rolling),
+                prepared_sql._sql_crime_top_offenses(calendar),
+                prepared_sql._sql_crime_shooting_count(rolling),
+                prepared_sql.sql_311_top_types(rolling),
+            ))
+    finally:
+        if original_mv is None:
+            os.environ.pop("MATERIALIZED_VIEWS_ENABLED", None)
+        else:
+            os.environ["MATERIALIZED_VIEWS_ENABLED"] = original_mv
+
+    for sql in queries:
+        validated = app4._validate_select_only_sql(sql)
+        assert validated.startswith(("SELECT", "WITH")), sql
 
 
 def test_resource_control_functions_are_rejected() -> None:
@@ -604,6 +813,12 @@ def main() -> int:
         test_schema_allowlist_and_file_operations_are_rejected,
         test_table_query_expressions_are_rejected,
         test_table_word_inside_literals_and_comments_is_allowed,
+        test_straight_join_bypasses_are_rejected,
+        test_supported_table_source_subset_extracts_every_physical_table,
+        test_unsupported_table_source_extensions_fail_closed,
+        test_table_source_words_in_literals_and_normal_comments_are_allowed,
+        test_executable_mysql_comments_and_non_mysql_dash_comments_are_rejected,
+        test_current_prepared_query_corpus_remains_valid,
         test_resource_control_functions_are_rejected,
         test_resource_control_words_inside_literals_and_comments_are_allowed,
         test_prohibited_words_inside_literals_are_allowed,

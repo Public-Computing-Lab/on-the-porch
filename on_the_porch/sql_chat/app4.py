@@ -1049,6 +1049,11 @@ _FORBIDDEN_SQL_SCHEMAS = frozenset({
     "performance_schema",
     "sys",
 })
+_UNSUPPORTED_TABLE_SOURCE_WORDS = frozenset({
+    "STRAIGHT_JOIN",
+})
+_INDEX_HINT_PREFIXES = frozenset({"FORCE", "IGNORE", "USE"})
+_INDEX_HINT_TARGETS = frozenset({"INDEX", "KEY"})
 
 
 def _strip_sql_comments(sql: str) -> str:
@@ -1076,7 +1081,19 @@ def _strip_sql_comments(sql: str) -> str:
                         break
                 index += 1
             continue
-        if text.startswith("--", index) or char == "#":
+        # MySQL recognizes ``--`` as a comment only when whitespace/control
+        # follows the second dash. Treating ``--x`` as a comment here would let
+        # executable SQL after it disappear from validation while MySQL still
+        # parses it as an expression.
+        dash_comment = (
+            text.startswith("--", index)
+            and (
+                index + 2 >= len(text)
+                or text[index + 2].isspace()
+                or ord(text[index + 2]) < 32
+            )
+        )
+        if dash_comment or char == "#":
             newline = text.find("\n", index)
             if newline < 0:
                 break
@@ -1084,6 +1101,11 @@ def _strip_sql_comments(sql: str) -> str:
             index = newline + 1
             continue
         if text.startswith("/*", index):
+            # MySQL executes version comments (/*! ... */) and interprets
+            # optimizer hints (/*+ ... */). The public SQL subset does not need
+            # either form, so fail closed instead of stripping executable text.
+            if text.startswith("/*!", index) or text.startswith("/*+", index):
+                raise ValueError("Executable SQL comments are not allowed")
             end = text.find("*/", index + 2)
             output.append(" ")
             index = len(text) if end < 0 else end + 2
@@ -1142,7 +1164,7 @@ def _scan_sql_tokens(sql: str) -> tuple[List[tuple[str, str, int]], List[int]]:
             tokens.append(("punct", char, depth))
             index += 1
             continue
-        if char in (",", ".", ";"):
+        if char in (",", ".", ";", "{", "}"):
             tokens.append(("punct", char, depth))
             if char == ";":
                 semicolons.append(index)
@@ -1241,7 +1263,15 @@ def _table_reference_at(
 
 
 def _extract_sql_tables(sql: str) -> List[str]:
-    """Return unqualified or schema-qualified physical/CTE source references."""
+    """Return physical/CTE sources from the explicitly supported SQL subset.
+
+    Supported source forms are the forms used by the app's read queries:
+    ``FROM source``, comma sources, standard ``[INNER|LEFT|RIGHT|CROSS] JOIN``,
+    CTE references, and derived ``(SELECT ...)`` / ``(WITH ... SELECT ...)``
+    sources. Unsupported MySQL extensions are rejected before this extractor.
+    The linear scan still visits CTE bodies and nested/derived SELECTs, so every
+    physical table in those scopes is returned for allowlist validation.
+    """
     tokens, _ = _scan_sql_tokens(sql or "")
     tables: List[str] = []
     active_from_depths: set[int] = set()
@@ -1266,6 +1296,67 @@ def _extract_sql_tables(sql: str) -> List[str]:
             if table:
                 tables.append(table)
     return tables
+
+
+def _next_same_depth_token(
+    tokens: List[tuple[str, str, int]],
+    start: int,
+    depth: int,
+) -> tuple[int, tuple[str, str, int]] | tuple[int, None]:
+    for index in range(start, len(tokens)):
+        token = tokens[index]
+        if token[2] == depth:
+            return index, token
+        if token[2] < depth:
+            break
+    return -1, None
+
+
+def _validate_table_source_subset(tokens: List[tuple[str, str, int]]) -> None:
+    """Reject MySQL source syntax outside the app's bounded read-only subset."""
+    if any(kind == "punct" and value in ("{", "}") for kind, value, _ in tokens):
+        raise ValueError("ODBC table-source escapes are not supported")
+
+    for index, (kind, value, depth) in enumerate(tokens):
+        if kind != "word":
+            continue
+        word = value.upper()
+        if word in _UNSUPPORTED_TABLE_SOURCE_WORDS:
+            raise ValueError(f"Unsupported table-source syntax: {word}")
+
+        next_index, next_token = _next_same_depth_token(tokens, index + 1, depth)
+
+        # NATURAL joins are not used by current queries. Reject the complete
+        # modifier family rather than attempting to infer its implicit columns.
+        if word == "NATURAL":
+            cursor = next_index
+            while cursor >= 0 and cursor < len(tokens):
+                next_kind, next_value, next_depth = tokens[cursor]
+                if next_depth != depth or next_kind != "word":
+                    break
+                if next_value == "JOIN":
+                    raise ValueError("NATURAL JOIN is not supported")
+                if next_value not in ("INNER", "LEFT", "RIGHT", "OUTER"):
+                    break
+                cursor, _ = _next_same_depth_token(tokens, cursor + 1, depth)
+
+        # Table-valued/derived extensions are deliberately unsupported. Plain
+        # derived SELECTs remain accepted by _table_reference_at().
+        if word in ("JSON_TABLE", "LATERAL") and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "punct" and next_value == "(":
+                raise ValueError(f"{word} table sources are not supported")
+
+        # Table partition selectors and index hints are unnecessary for public
+        # queries and complicate source parsing, so reject them fail-closed.
+        if word == "PARTITION" and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "punct" and next_value == "(":
+                raise ValueError("Table PARTITION selectors are not supported")
+        if word in _INDEX_HINT_PREFIXES and next_token is not None:
+            next_kind, next_value, _ = next_token
+            if next_kind == "word" and next_value in _INDEX_HINT_TARGETS:
+                raise ValueError("Table index hints are not supported")
 
 
 def _called_sql_functions(tokens: List[tuple[str, str, int]]) -> set[str]:
@@ -1312,6 +1403,7 @@ def _validate_select_only_sql(sql: str) -> str:
     command, command_index = _statement_command(tokens)
     if command != "SELECT":
         raise ValueError("Only SELECT statements are allowed")
+    _validate_table_source_subset(tokens)
     forbidden = {
         value
         for kind, value, _depth in tokens
