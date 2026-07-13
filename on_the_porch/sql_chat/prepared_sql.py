@@ -426,7 +426,7 @@ def _event_by_name_sql(
     if on_date is not None:
         date_clause = f"AND `start_date` = '{on_date.isoformat()}' "
     return (
-        "SELECT `event_name`, `event_date`, `start_date`, `end_date`, "
+        "SELECT `id`, `event_name`, `event_date`, `start_date`, `end_date`, "
         "`start_time`, `end_time`, `raw_text`, `source_pdf` "
         "FROM `weekly_events` "
         f"WHERE {_event_name_where_clause(name)} "
@@ -485,6 +485,21 @@ def _fmt_clock(value) -> str:
         return text
 
 
+def _fmt_event_date(value) -> str:
+    if not value:
+        return ""
+    try:
+        if hasattr(value, "strftime"):
+            parsed = value
+        else:
+            from datetime import date
+
+            parsed = date.fromisoformat(str(value)[:10])
+        return f"{parsed.strftime('%A')}, {parsed.strftime('%B')} {parsed.day}"
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
 def _extract_event_url(raw_text: str) -> str:
     match = re.search(r"URL:\s*(https?://\S+)", raw_text or "", flags=re.IGNORECASE)
     return match.group(1).rstrip(").,]") if match else ""
@@ -524,7 +539,11 @@ def build_event_sources(
     return [{"type": "event", "source": label, "path": url}]
 
 
-def _clean_event_body(raw_text: str, name: str) -> str:
+def _clean_event_body(
+    raw_text: str,
+    name: str,
+    date_labels: tuple[str, ...] = (),
+) -> str:
     body = (raw_text or "").strip()
     if not body:
         return ""
@@ -532,11 +551,18 @@ def _clean_event_body(raw_text: str, name: str) -> str:
     first_line = body.splitlines()[0].strip() if body else ""
     if _normalize_event_name(first_line) == norm_name:
         body = "\n".join(body.splitlines()[1:]).strip()
+    normalized_dates = {
+        _normalize_event_name(label)
+        for label in date_labels
+        if (label or "").strip()
+    }
     # Drop structured footer lines we render separately.
     kept: List[str] = []
     for line in body.splitlines():
         stripped = line.strip()
         lower = stripped.lower()
+        if _normalize_event_name(stripped) in normalized_dates:
+            continue
         if lower.startswith("url:") or lower.startswith("location:"):
             continue
         kept.append(stripped)
@@ -581,30 +607,34 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
 
     row = _pick_event_rows(question, rows)[0]
     name = row.get("event_name") or "Event"
-    start_date = row.get("start_date") or row.get("event_date") or ""
+    start_date = _fmt_event_date(row.get("start_date") or row.get("event_date") or "")
     start_time = _fmt_clock(row.get("start_time"))
     end_time = _fmt_clock(row.get("end_time"))
-    when_parts = [str(start_date)] if start_date else []
-    if start_time:
-        when_parts.append(
-            f"{start_time} – {end_time}" if end_time else start_time
-        )
-    when_label = " · ".join(when_parts)
 
-    body = _clean_event_body(row.get("raw_text") or "", name)
+    body = _clean_event_body(
+        row.get("raw_text") or "",
+        name,
+        (str(row.get("event_date") or ""), start_date),
+    )
     url = _extract_event_url(row.get("raw_text") or "")
-
-    lines = [f"**{name}**"]
-    if when_label:
-        lines.append(f"**When:** {when_label}")
-    if body:
-        lines.append("")
-        lines.append(body)
     loc_match = re.search(
         r"LOCATION:\s*(.+?)(?:\n|CONTACT:|$)",
         row.get("raw_text") or "",
         flags=re.IGNORECASE | re.DOTALL,
     )
+
+    lead = f"**{name}**"
+    if start_date:
+        lead += f" is scheduled for **{start_date}**."
+    else:
+        lead += " is listed in the community calendar."
+    lines = [lead]
+    if start_time:
+        time_label = f"{start_time} – {end_time}" if end_time else start_time
+        lines.append(f"**Time:** {time_label}")
+    if body:
+        lines.append("")
+        lines.append(body)
     if loc_match:
         lines.append("")
         lines.append(f"**Location:** {loc_match.group(1).strip()}")
@@ -619,6 +649,15 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
     if url:
         lines.append("")
         lines.append(f"[Event details]({url})")
+    missing: List[str] = []
+    if not body:
+        missing.append("a detailed description")
+    if not loc_match:
+        missing.append("a location")
+    if missing:
+        missing_label = missing[0] if len(missing) == 1 else f"{missing[0]} or {missing[1]}"
+        lines.append("")
+        lines.append(f"The current listing does not include {missing_label}.")
     return "\n".join(lines).strip()
 
 
@@ -1914,7 +1953,7 @@ def _conversational_llm_enabled() -> bool:
 
 def _prepared_should_use_llm(hit: PreparedMatch, question: str = "") -> bool:
     if hit.intent == "event_by_name":
-        return True
+        return False
     if hit.intent in ("crime_homicide_count", "911_unavailable", "911_advisory"):
         return False
     q = (question or "").lower()
@@ -2168,11 +2207,14 @@ def _try_run_compound_prepared_sql(
         sub_q = part.sub_question
         hit = match_prepared_sql(sub_q)
         if hit is None:
+            from resident_response import execution_failure_message  # noqa: WPS433
+
             blocks.append({
                 "topic": part.topic,
                 "sub_question": sub_q,
-                "canonical_facts": (
-                    f"I couldn't run a prepared query for the **{part.topic}** part of your question."
+                "canonical_facts": execution_failure_message(
+                    path="sql",
+                    intent="unavailable",
                 ),
                 "result": {"columns": [], "rows": []},
             })

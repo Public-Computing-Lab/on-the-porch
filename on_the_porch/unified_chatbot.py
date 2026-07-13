@@ -2306,9 +2306,8 @@ def _run_sql(
     if not _dynamic_sql_enabled():
         return {
             "answer": (
-                "I can answer common civic data questions from prepared Boston Open Data "
-                "queries, but generated SQL is disabled on the public chat path. Try a "
-                "specific 311, crime, or events count with a time range."
+                "I can answer common questions from synced Boston Open Data. Try a "
+                "specific 311, crime, or events question with a time range."
             ),
             "sql": "",
             "result": {

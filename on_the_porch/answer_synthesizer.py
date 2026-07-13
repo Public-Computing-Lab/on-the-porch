@@ -15,6 +15,7 @@ from answer_voice import (
     UNAVAILABLE_DATA_INTENTS,
 )
 from execution_plan import FactBundle, FactPart
+from resident_response import sanitize_degraded_answer
 
 from sql_chat import prepared_sql
 
@@ -127,6 +128,13 @@ def synthesize_answer(
     display_question: Optional[str] = None,
 ) -> str:
     """Single LLM call to turn structured facts into a conversational reply."""
+    if (
+        len(bundle.parts) == 1
+        and bundle.parts[0].path == "sql"
+        and bundle.parts[0].intent == "event_by_name"
+        and bundle.parts[0].canonical_facts.strip()
+    ):
+        return bundle.parts[0].canonical_facts.strip()
     if not is_answer_synthesis_enabled():
         return _fallback_answer(bundle)
 
@@ -183,13 +191,19 @@ def validate_answer(
                 prepared_intent=part.intent,
                 question=question or part.sub_question,
             )
-    return polish_conversational_answer(
+    polished = polish_conversational_answer(
         out,
         conversation_history,
         synthesis_blocks=blocks,
         prepared_intent=bundle.prepared_intent,
         question=question,
     )
+    if any(part.error for part in bundle.parts):
+        return sanitize_degraded_answer(
+            polished,
+            fallback=_fallback_answer(bundle),
+        )
+    return polished
 
 
 def synthesize_and_validate(

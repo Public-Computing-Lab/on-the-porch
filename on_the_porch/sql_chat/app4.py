@@ -1023,16 +1023,122 @@ def _llm_refine_sql(
     return sql
 
 
-_FORBIDDEN_SQL_KEYWORDS = re.compile(
-    r"\b(ALTER|CALL|CREATE|DELETE|DROP|EXEC|EXECUTE|GRANT|INSERT|LOAD|MERGE|"
-    r"OUTFILE|REPLACE|REVOKE|TRUNCATE|UPDATE|UPSERT)\b",
-    re.IGNORECASE,
-)
+_SQL_STATEMENT_COMMANDS = frozenset({
+    "ALTER", "CALL", "CREATE", "DELETE", "DROP", "EXEC", "EXECUTE", "GRANT",
+    "INSERT", "LOAD", "MERGE", "REPLACE", "REVOKE", "SELECT", "TRUNCATE",
+    "UPDATE", "UPSERT",
+})
+_FORBIDDEN_SQL_WORDS = (_SQL_STATEMENT_COMMANDS - {"SELECT", "REPLACE"}) | {
+    "OUTFILE",
+}
 
 
 def _strip_sql_comments(sql: str) -> str:
     no_line_comments = re.sub(r"--[^\n\r]*", " ", sql or "")
     return re.sub(r"/\*.*?\*/", " ", no_line_comments, flags=re.DOTALL)
+
+
+def _scan_sql_tokens(sql: str) -> tuple[List[tuple[str, str, int]], List[int]]:
+    """Tokenize outside literals so statement commands and functions stay distinct."""
+    tokens: List[tuple[str, str, int]] = []
+    semicolons: List[int] = []
+    depth = 0
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            while index < len(sql):
+                if sql[index] == "\\":
+                    index += 2
+                    continue
+                if sql[index] == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "`":
+            end = index + 1
+            value: List[str] = []
+            while end < len(sql):
+                if sql[end] == "`":
+                    if end + 1 < len(sql) and sql[end + 1] == "`":
+                        value.append("`")
+                        end += 2
+                        continue
+                    end += 1
+                    break
+                value.append(sql[end])
+                end += 1
+            tokens.append(("identifier", "".join(value), depth))
+            index = end
+            continue
+        if char == "(":
+            tokens.append(("punct", char, depth))
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            tokens.append(("punct", char, depth))
+            index += 1
+            continue
+        if char in (",", ";"):
+            tokens.append(("punct", char, depth))
+            if char == ";":
+                semicolons.append(index)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index + 1
+            while end < len(sql) and (sql[end].isalnum() or sql[end] in ("_", "$")):
+                end += 1
+            tokens.append(("word", sql[index:end].upper(), depth))
+            index = end
+            continue
+        index += 1
+    return tokens, semicolons
+
+
+def _statement_command(tokens: List[tuple[str, str, int]]) -> tuple[str, int]:
+    top_words = [
+        (index, value)
+        for index, (kind, value, depth) in enumerate(tokens)
+        if kind == "word" and depth == 0
+    ]
+    if not top_words:
+        return "", -1
+    first_index, first_word = top_words[0]
+    if first_word != "WITH":
+        return first_word, first_index
+    for index, word in top_words[1:]:
+        if word in _SQL_STATEMENT_COMMANDS:
+            return word, index
+    return "", -1
+
+
+def _extract_cte_names(
+    tokens: List[tuple[str, str, int]],
+    command_index: int,
+) -> set[str]:
+    """Collect aliases declared before the main command in a WITH query."""
+    names: set[str] = set()
+    for index, (kind, value, depth) in enumerate(tokens[:command_index]):
+        if kind != "word" or value != "AS" or depth != 0:
+            continue
+        previous = index - 1
+        while previous >= 0:
+            prev_kind, prev_value, prev_depth = tokens[previous]
+            if prev_depth == 0 and prev_kind in ("word", "identifier"):
+                if prev_value.upper() not in ("WITH", "RECURSIVE"):
+                    names.add(prev_value.lower())
+                break
+            previous -= 1
+    return names
 
 
 def _extract_sql_tables(sql: str) -> List[str]:
@@ -1066,16 +1172,30 @@ def _validate_select_only_sql(sql: str) -> str:
     cleaned = _strip_sql_comments(sql).strip()
     if not cleaned:
         raise ValueError("Empty SQL is not allowed")
-    statements = [part.strip() for part in cleaned.rstrip(";").split(";") if part.strip()]
-    if len(statements) != 1:
+    tokens, semicolons = _scan_sql_tokens(cleaned)
+    if semicolons and (
+        len(semicolons) != 1 or cleaned[semicolons[0] + 1:].strip()
+    ):
         raise ValueError("Only a single SQL statement is allowed")
-    statement = statements[0]
-    if not re.match(r"^\s*SELECT\b", statement, flags=re.IGNORECASE):
+    statement = cleaned[:semicolons[0]].strip() if semicolons else cleaned
+    tokens, _ = _scan_sql_tokens(statement)
+    command, command_index = _statement_command(tokens)
+    if command != "SELECT":
         raise ValueError("Only SELECT statements are allowed")
-    if _FORBIDDEN_SQL_KEYWORDS.search(statement):
+    forbidden = {
+        value
+        for kind, value, _depth in tokens
+        if kind == "word" and value in _FORBIDDEN_SQL_WORDS
+    }
+    if forbidden:
         raise ValueError("DDL/DML keywords are not allowed in public SQL")
     tables = _extract_sql_tables(statement)
-    disallowed = sorted({table for table in tables if table not in SQL_TABLE_ALLOWLIST})
+    cte_names = _extract_cte_names(tokens, command_index)
+    disallowed = sorted({
+        table
+        for table in tables
+        if table not in SQL_TABLE_ALLOWLIST and table not in cte_names
+    })
     if disallowed:
         raise ValueError(f"SQL references disallowed table(s): {', '.join(disallowed)}")
     return _enforce_select_limit(statement)

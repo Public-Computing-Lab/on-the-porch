@@ -19,6 +19,7 @@ from execution_plan import (
 )
 
 from sql_chat import prepared_sql
+from resident_response import execution_failure_message, resident_topic_for_intent
 
 
 def is_execution_pipeline_enabled() -> bool:
@@ -53,12 +54,14 @@ def _sql_part(
     if hit is None:
         return None
 
+    display_topic = topic or resident_topic_for_intent(hit.intent)
+
     if hit.intent in ("911_unavailable", "911_advisory"):
         return PlanPart(
             path="guardrail",
             intent=hit.intent,
             sub_question=sub_q,
-            topic=topic,
+            topic=display_topic,
             guardrail_message=hit.answer_fn(sub_q, {"columns": [], "rows": []}),
         )
 
@@ -70,7 +73,7 @@ def _sql_part(
         path="sql",
         intent=hit.intent,
         sub_question=sub_q,
-        topic=topic,
+        topic=display_topic,
         supplemental_intent=supplemental_intent,
     )
 
@@ -110,9 +113,9 @@ def _build_compound_plan(question: str, routing: Dict[str, Any]) -> Optional[Exe
                 intent="unavailable",
                 sub_question=civic_part.sub_question,
                 topic=civic_part.topic,
-                guardrail_message=(
-                    f"I couldn't run a prepared query for the **{civic_part.topic}** "
-                    "part of your question."
+                guardrail_message=execution_failure_message(
+                    path="sql",
+                    intent="unavailable",
                 ),
             ))
 
@@ -199,8 +202,9 @@ def _public_safety_baseline_part(
         intent="crime_baseline_unavailable",
         sub_question=baseline_question,
         topic="crime",
-        guardrail_message=(
-            "I couldn't load a prepared crime-data baseline for this safety question."
+        guardrail_message=execution_failure_message(
+            path="sql",
+            intent="crime_baseline_unavailable",
         ),
     )
 
