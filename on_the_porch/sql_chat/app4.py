@@ -1033,6 +1033,16 @@ _FORBIDDEN_SQL_WORDS = (_SQL_STATEMENT_COMMANDS - {"SELECT", "REPLACE"}) | {
     "OUTFILE",
 }
 _FORBIDDEN_SELECT_TOKENS = frozenset({"DUMPFILE", "LOAD_FILE", "OUTFILE"})
+_FORBIDDEN_QUERY_EXPRESSION_TOKENS = frozenset({"TABLE"})
+_FORBIDDEN_SQL_FUNCTIONS = frozenset({
+    "BENCHMARK",
+    "GET_LOCK",
+    "IS_FREE_LOCK",
+    "IS_USED_LOCK",
+    "RELEASE_ALL_LOCKS",
+    "RELEASE_LOCK",
+    "SLEEP",
+})
 _FORBIDDEN_SQL_SCHEMAS = frozenset({
     "information_schema",
     "mysql",
@@ -1258,6 +1268,22 @@ def _extract_sql_tables(sql: str) -> List[str]:
     return tables
 
 
+def _called_sql_functions(tokens: List[tuple[str, str, int]]) -> set[str]:
+    """Return executable function names while ignoring words inside literals."""
+    called: set[str] = set()
+    for index, (kind, value, depth) in enumerate(tokens[:-1]):
+        if kind not in ("word", "identifier"):
+            continue
+        next_kind, next_value, next_depth = tokens[index + 1]
+        if (
+            next_kind == "punct"
+            and next_value == "("
+            and next_depth == depth
+        ):
+            called.add(value.upper())
+    return called
+
+
 def _enforce_select_limit(sql: str) -> str:
     text = (sql or "").strip().rstrip(";")
     match = re.search(r"\bLIMIT\s+(\d+)\b", text, flags=re.IGNORECASE)
@@ -1301,6 +1327,19 @@ def _validate_select_only_sql(sql: str) -> str:
     }
     if dangerous_select_tokens:
         raise ValueError("File operations are not allowed in public SQL")
+    executable_query_tokens = {
+        value.upper()
+        for kind, value, _depth in tokens
+        if kind == "word"
+        and value.upper() in _FORBIDDEN_QUERY_EXPRESSION_TOKENS
+    }
+    if executable_query_tokens:
+        raise ValueError("TABLE query expressions are not allowed in public SQL")
+    forbidden_functions = _called_sql_functions(tokens) & _FORBIDDEN_SQL_FUNCTIONS
+    if forbidden_functions:
+        raise ValueError(
+            "Resource-control functions are not allowed in public SQL"
+        )
 
     tables = _extract_sql_tables(statement)
     cte_names = _extract_cte_names(tokens, command_index)

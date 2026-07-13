@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import date
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT / "on_the_porch"))
 import answer_synthesizer  # noqa: E402
 import intent_router  # noqa: E402
 import plan_executor  # noqa: E402
+import plan_builder  # noqa: E402
 import unified_chatbot  # noqa: E402
 from execution_plan import ExecutionPlan, FactBundle, FactPart, PlanPart  # noqa: E402
 from plan_builder import build_execution_plan_rules  # noqa: E402
@@ -109,6 +111,61 @@ def test_schema_allowlist_and_file_operations_are_rejected() -> None:
     )
     for sql in rejected:
         _assert_rejected(sql)
+
+
+def test_table_query_expressions_are_rejected() -> None:
+    rejected = (
+        "TABLE weekly_events",
+        "WITH x AS (TABLE weekly_events) SELECT * FROM x",
+        "WITH x AS (TABLE mysql.user) SELECT * FROM x",
+        "SELECT * FROM (TABLE weekly_events) AS x",
+        "WiTh x AS (TaBlE mysql.user) SeLeCt * FrOm x",
+        "WITH x AS (TABLE/**/mysql.user) SELECT * FROM x",
+        "WITH x AS (/* source */ TABLE mysql.user) SELECT * FROM x",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_table_word_inside_literals_and_comments_is_allowed() -> None:
+    literal = (
+        "SELECT 'The community table is available' AS note "
+        "FROM weekly_events"
+    )
+    quoted_description = (
+        'SELECT "Bring food to the welcome table" AS description '
+        "FROM weekly_events"
+    )
+    commented = (
+        "SELECT event_name FROM weekly_events "
+        "/* TABLE mysql.user is documentation, not executable */"
+    )
+    for sql in (literal, quoted_description, commented):
+        assert app4._validate_select_only_sql(sql).startswith("SELECT")
+
+
+def test_resource_control_functions_are_rejected() -> None:
+    rejected = (
+        "SELECT SLEEP(5)",
+        "SELECT BENCHMARK(1000, SHA2('x', 256))",
+        "SELECT GET_LOCK('porch', 5)",
+        "SELECT RELEASE_LOCK('porch')",
+        "SELECT IS_FREE_LOCK('porch')",
+        "SELECT IS_USED_LOCK('porch')",
+        "SELECT RELEASE_ALL_LOCKS()",
+        "SELECT sLeEp (5)",
+        "SELECT GeT_LoCk /* blocked */ ('porch', 5)",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_resource_control_words_inside_literals_and_comments_are_allowed() -> None:
+    sql = (
+        "SELECT 'SLEEP(5) GET_LOCK(\"porch\", 5)' AS note "
+        "FROM weekly_events /* BENCHMARK(1000, 1) */"
+    )
+    assert app4._validate_select_only_sql(sql).startswith("SELECT")
 
 
 def test_prohibited_words_inside_literals_are_allowed() -> None:
@@ -253,13 +310,77 @@ def test_failure_categories_never_expose_raw_intents() -> None:
         ("safety_overview", "public-safety information"),
         ("transcript", "community information"),
         ("opinion", "community information"),
-        ("unknown_synthetic_intent", "information"),
+        ("unknown_synthetic_intent", "general information"),
     )
     for intent, expected in cases:
         message = execution_failure_message(path="sql", intent=intent)
         assert expected in message.lower(), message
         assert intent not in message
         assert not internal_terms(message), message
+
+
+def test_untrusted_llm_plan_fields_never_become_resident_text() -> None:
+    cases = (
+        ("event_by_name", "event details"),
+        ("crime_monthly_count", "public-safety information"),
+        ("unknown_internal_route", "general information"),
+        ("local news", "local news"),
+    )
+    for topic, expected_category in cases:
+        raw_guardrail = "The RAG pipeline failed with ChromaTimeoutError."
+        content = json.dumps({
+            "routing_mode": "hybrid",
+            "routing_intent": "synthetic_review",
+            "parts": [{
+                "path": "guardrail",
+                "intent": "unknown_synthetic_intent",
+                "sub_question": "What information is available?",
+                "topic": topic,
+                "guardrail_message": raw_guardrail,
+            }],
+        })
+        plan = plan_builder._parse_llm_plan_json(content, "What information is available?")
+        assert plan is not None
+        part = plan.parts[0]
+        assert part.intent == "unknown_synthetic_intent"
+        assert part.topic == expected_category
+        assert part.guardrail_message != raw_guardrail
+        assert not internal_terms(part.guardrail_message or "")
+
+        bundle = plan_executor.execute_plan(
+            plan,
+            "What information is available?",
+            execute_sql=lambda _sql: {"columns": [], "rows": []},
+            retrieve_rag=lambda _q, _p: ([], []),
+        )
+        answer = bundle.parts[0].canonical_facts
+        assert not internal_terms(answer), answer
+        assert raw_guardrail not in answer
+        assert expected_category in answer.lower()
+
+        old_synthesis = os.environ.get("ANSWER_SYNTHESIS_ENABLED")
+        os.environ["ANSWER_SYNTHESIS_ENABLED"] = "false"
+        try:
+            final_answer = answer_synthesizer.synthesize_and_validate(
+                "What information is available?",
+                bundle,
+            )
+        finally:
+            if old_synthesis is None:
+                os.environ.pop("ANSWER_SYNTHESIS_ENABLED", None)
+            else:
+                os.environ["ANSWER_SYNTHESIS_ENABLED"] = old_synthesis
+        assert raw_guardrail not in final_answer
+        assert not internal_terms(final_answer), final_answer
+
+        safe_blocks = answer_synthesizer._resident_prompt_blocks(
+            answer_synthesizer._blocks_from_bundle(bundle)
+        )
+        serialized = json.dumps(safe_blocks)
+        assert topic not in serialized or topic == expected_category
+        assert raw_guardrail not in serialized
+        assert "unknown_synthetic_intent" not in serialized
+        assert safe_blocks[0]["category"] == expected_category
 
 
 def test_internal_guard_is_narrow_and_catches_identifiers() -> None:
@@ -324,6 +445,76 @@ def test_title_and_date_metadata_are_not_duplicated() -> None:
         assert answer.count("CREW & CADET STREET PARADE") == 1, answer
         assert answer.count("Monday, July 13") == 1, answer
         assert "Mon, Jul 13" not in answer, answer
+
+
+def test_event_prose_location_uses_precise_missing_field_wording() -> None:
+    result = {
+        "rows": [{
+            "event_name": "Community Cleanup",
+            "start_date": date(2026, 7, 18),
+            "raw_text": "Community Cleanup\nJoin us at Codman Square.",
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer(
+        "Tell me about the Community Cleanup event", result,
+    )
+    assert "Join us at Codman Square." in answer
+    assert "does not provide a separate location field" in answer
+    assert "does not include a location" not in answer
+
+
+def test_structured_event_location_is_rendered_once() -> None:
+    result = {
+        "rows": [{
+            "event_name": "Community Cleanup",
+            "start_date": date(2026, 7, 18),
+            "raw_text": (
+                "Community Cleanup\nHelp clean neighborhood streets.\n"
+                "LOCATION: Codman Square"
+            ),
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer(
+        "Tell me about the Community Cleanup event", result,
+    )
+    assert "Help clean neighborhood streets." in answer
+    assert "**Location:** Codman Square" in answer
+    assert answer.count("Codman Square") == 1
+    assert "separate location field" not in answer
+
+
+def test_location_mentioned_in_prose_and_structured_field_is_not_duplicated() -> None:
+    result = {
+        "rows": [{
+            "event_name": "Community Cleanup",
+            "start_date": date(2026, 7, 18),
+            "raw_text": (
+                "Community Cleanup\nJoin us at Codman Square.\n"
+                "LOCATION: Codman Square"
+            ),
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer(
+        "Tell me about the Community Cleanup event", result,
+    )
+    assert answer.count("Codman Square") == 1, answer
+    assert "separate location field" not in answer
+
+
+def test_title_date_only_event_uses_precise_missing_fields_message() -> None:
+    result = {
+        "rows": [{
+            "event_name": "CREW & CADET STREET PARADE",
+            "start_date": date(2026, 7, 13),
+            "raw_text": "CREW & CADET STREET PARADE",
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer(SCREENSHOT_QUERY, result)
+    assert answer == (
+        "**CREW & CADET STREET PARADE** is scheduled for **Monday, July 13**.\n\n"
+        "The current listing does not include a detailed description and does not "
+        "provide a separate location field."
+    )
 
 
 def test_inline_event_fields_have_clean_boundaries() -> None:
@@ -411,15 +602,24 @@ def main() -> int:
         test_write_and_chained_statements_are_rejected,
         test_all_prohibited_statement_commands_are_rejected,
         test_schema_allowlist_and_file_operations_are_rejected,
+        test_table_query_expressions_are_rejected,
+        test_table_word_inside_literals_and_comments_is_allowed,
+        test_resource_control_functions_are_rejected,
+        test_resource_control_words_inside_literals_and_comments_are_allowed,
         test_prohibited_words_inside_literals_are_allowed,
         test_exact_event_detail_plan_stays_sql_with_resident_topic,
         test_exact_event_detail_returns_confirmed_title_and_date,
         test_partial_event_record_names_missing_fields_without_total_failure,
         test_event_execution_error_never_exposes_internal_intent,
         test_failure_categories_never_expose_raw_intents,
+        test_untrusted_llm_plan_fields_never_become_resident_text,
         test_internal_guard_is_narrow_and_catches_identifiers,
         test_degraded_hybrid_preserves_completed_fact_with_safe_category,
         test_title_and_date_metadata_are_not_duplicated,
+        test_event_prose_location_uses_precise_missing_field_wording,
+        test_structured_event_location_is_rendered_once,
+        test_location_mentioned_in_prose_and_structured_field_is_not_duplicated,
+        test_title_date_only_event_uses_precise_missing_fields_message,
         test_inline_event_fields_have_clean_boundaries,
         test_registration_url_is_not_duplicated,
         test_normal_event_list_output_is_unchanged,

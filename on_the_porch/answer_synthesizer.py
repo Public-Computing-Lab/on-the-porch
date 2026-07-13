@@ -15,7 +15,7 @@ from answer_voice import (
     UNAVAILABLE_DATA_INTENTS,
 )
 from execution_plan import FactBundle, FactPart
-from resident_response import resident_topic_for_intent, sanitize_degraded_answer
+from resident_response import resident_category, sanitize_degraded_answer
 
 from sql_chat import prepared_sql
 
@@ -96,10 +96,10 @@ def _resident_prompt_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]
         safe = dict(block)
         intent = str(safe.pop("intent", "") or "")
         path = str(safe.pop("path", "") or "")
-        safe["category"] = (
-            safe.get("topic")
-            or resident_topic_for_intent(intent)
-            or "information"
+        topic = safe.pop("topic", None)
+        safe["category"] = resident_category(
+            str(topic or ""),
+            intent=intent,
         )
         if path == "rag":
             safe["evidence_type"] = "community sources"

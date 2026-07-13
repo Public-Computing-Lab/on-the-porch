@@ -19,7 +19,11 @@ from execution_plan import (
 )
 
 from sql_chat import prepared_sql
-from resident_response import execution_failure_message, resident_topic_for_intent
+from resident_response import (
+    execution_failure_message,
+    resident_category,
+    resident_topic_for_intent,
+)
 
 
 def is_execution_pipeline_enabled() -> bool:
@@ -296,14 +300,22 @@ def _parse_llm_plan_json(content: str, question: str) -> Optional[ExecutionPlan]
                 policy_sources=hints_raw.get("policy_sources"),
                 folder_categories=hints_raw.get("folder_categories"),
             )
+        safe_topic = resident_category(item.get("topic"), intent=intent)
+        safe_guardrail = None
+        if path == "guardrail":
+            safe_guardrail = execution_failure_message(
+                path=path,
+                intent=intent,
+                topic=safe_topic,
+            )
         plan_parts.append(PlanPart(
             path=path,  # type: ignore[arg-type]
             intent=intent or path,
             sub_question=sub_q,
-            topic=item.get("topic"),
+            topic=safe_topic,
             supplemental_intent=item.get("supplemental_intent"),
             rag_hints=rag_hints,
-            guardrail_message=item.get("guardrail_message"),
+            guardrail_message=safe_guardrail,
         ))
 
     if not plan_parts:

@@ -7,15 +7,15 @@ from typing import Iterable, Optional
 
 
 _EVENT_DETAIL_INTENTS = frozenset({"event_by_name"})
-_EVENT_INTENTS = frozenset({"events_by_source", "events_list", "events_weekend"})
-_COMMUNITY_INTENTS = frozenset({"community", "opinion", "transcript"})
-_PUBLIC_SAFETY_INTENTS = frozenset({
-    "crime_general",
-    "crime_hybrid",
-    "crime_opinion",
-    "crime_safety_context",
-    "opinion_safety",
-    "safety_overview",
+_RESIDENT_CATEGORIES = frozenset({
+    "city-service information",
+    "community information",
+    "event details",
+    "events",
+    "general information",
+    "local news",
+    "neighborhood information",
+    "public-safety information",
 })
 _INTERNAL_IDENTIFIER_PATTERN = re.compile(
     r"\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b",
@@ -38,42 +38,66 @@ _INTERNAL_TERM_PATTERNS = (
 )
 
 
+def resident_category(
+    topic: Optional[str] = None,
+    *,
+    intent: Optional[str] = None,
+) -> str:
+    """Map untrusted planner labels to a fixed resident-facing vocabulary."""
+    topic_key = re.sub(r"[\s-]+", " ", str(topic or "").strip().lower())
+    if topic_key in _RESIDENT_CATEGORIES:
+        return topic_key
+
+    control_key = " ".join(
+        value for value in (topic_key, str(intent or "").strip().lower()) if value
+    )
+    if "event_by_name" in control_key or "event detail" in control_key:
+        return "event details"
+    if "event" in control_key:
+        return "events"
+    if any(token in control_key for token in ("311", "city service", "pothole")):
+        return "city-service information"
+    if any(token in control_key for token in ("crime", "safety", "shooting", "homicide")):
+        return "public-safety information"
+    if any(token in control_key for token in ("community", "opinion", "transcript")):
+        return "community information"
+    if any(token in control_key for token in ("news", "rss", "article")):
+        return "local news"
+    if any(token in control_key for token in ("neighborhood", "location", "area")):
+        return "neighborhood information"
+    return "general information"
+
+
 def resident_topic_for_intent(intent: Optional[str]) -> Optional[str]:
     """Map internal intent identifiers to a small resident-facing vocabulary."""
-    key = (intent or "").strip().lower()
-    if not key:
+    if not (intent or "").strip():
         return None
-    if key in _EVENT_DETAIL_INTENTS:
-        return "event details"
-    if key in _EVENT_INTENTS or key.startswith("event"):
-        return "event information"
-    if key.startswith("311_"):
-        return "city-service information"
-    if key.startswith("crime_") or key in _PUBLIC_SAFETY_INTENTS or "safety" in key:
-        return "public-safety information"
-    if key in _COMMUNITY_INTENTS or any(
-        token in key for token in ("community", "opinion", "transcript")
-    ):
-        return "community information"
-    return "information"
+    return resident_category(intent=intent)
 
 
 def execution_failure_message(
     *,
     path: str,
     intent: Optional[str] = None,
+    topic: Optional[str] = None,
     timed_out: bool = False,
 ) -> str:
     """Return failure wording without exposing routes, providers, or intent IDs."""
     if (intent or "").lower() in _EVENT_DETAIL_INTENTS:
         return "I found the event listing, but I could not load additional details right now."
-    topic = resident_topic_for_intent(intent)
-    if topic is None:
-        topic = "community information" if path == "rag" else "information"
-    label = topic[0].upper() + topic[1:]
+    safe_topic = (
+        resident_category(topic, intent=intent)
+        if topic
+        else resident_topic_for_intent(intent)
+    )
+    if safe_topic is None:
+        safe_topic = "community information" if path == "rag" else "general information"
+    label = safe_topic[0].upper() + safe_topic[1:]
+    verb = "were" if safe_topic in ("event details", "events") else "was"
+    present_verb = "are" if safe_topic in ("event details", "events") else "is"
     if timed_out:
-        return f"{label} was not available before this request timed out."
-    return f"{label} is temporarily unavailable."
+        return f"{label} {verb} not available before this request timed out."
+    return f"{label} {present_verb} temporarily unavailable."
 
 
 def internal_terms(text: str) -> list[str]:

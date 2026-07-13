@@ -707,7 +707,11 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
         (str(row.get("event_date") or ""), fields.get("date", ""), start_date),
     )
     url = _extract_event_url(raw_text)
-    location = fields.get("location", "")
+    location = str(
+        row.get("location")
+        or row.get("event_location")
+        or fields.get("location", "")
+    ).strip()
     contact = fields.get("contact", "")
     cost = fields.get("cost", "")
     registration = fields.get("registration", "")
@@ -723,7 +727,16 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
     if body:
         lines.append("")
         lines.append(body)
-    if location:
+    body_mentions_location = bool(
+        body
+        and location
+        and re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(location)}(?![A-Za-z0-9])",
+            body,
+            flags=re.IGNORECASE,
+        )
+    )
+    if location and not body_mentions_location:
         lines.append("")
         lines.append(f"**Location:** {location}")
     if cost:
@@ -746,15 +759,18 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
     if url and not url_rendered:
         lines.append("")
         lines.append(f"[Event details]({url})")
-    missing: List[str] = []
-    if not body:
-        missing.append("a detailed description")
-    if not location:
-        missing.append("a location")
-    if missing:
-        missing_label = missing[0] if len(missing) == 1 else f"{missing[0]} or {missing[1]}"
+    if not body and not location:
         lines.append("")
-        lines.append(f"The current listing does not include {missing_label}.")
+        lines.append(
+            "The current listing does not include a detailed description and "
+            "does not provide a separate location field."
+        )
+    elif not body:
+        lines.append("")
+        lines.append("The current listing does not include a detailed description.")
+    elif not location:
+        lines.append("")
+        lines.append("The listing does not provide a separate location field.")
     return "\n".join(lines).strip()
 
 
