@@ -14,9 +14,14 @@ sys.path.insert(0, str(ROOT / "on_the_porch"))
 import answer_synthesizer  # noqa: E402
 import intent_router  # noqa: E402
 import plan_executor  # noqa: E402
+import unified_chatbot  # noqa: E402
 from execution_plan import ExecutionPlan, FactBundle, FactPart, PlanPart  # noqa: E402
 from plan_builder import build_execution_plan_rules  # noqa: E402
-from resident_response import internal_terms, sanitize_degraded_answer  # noqa: E402
+from resident_response import (  # noqa: E402
+    execution_failure_message,
+    internal_terms,
+    sanitize_degraded_answer,
+)
 from sql_chat import app4, prepared_sql  # noqa: E402
 
 
@@ -85,6 +90,41 @@ def test_all_prohibited_statement_commands_are_rejected() -> None:
     )
     for sql in rejected:
         _assert_rejected(sql)
+
+
+def test_schema_allowlist_and_file_operations_are_rejected() -> None:
+    rejected = (
+        "WITH `user` AS (SELECT * FROM `mysql`.`user`) SELECT * FROM `user`",
+        "SELECT * FROM `information_schema`.`tables`",
+        "SELECT * FROM `performance_schema`.`threads`",
+        "SELECT * FROM `sys`.`version`",
+        "SELECT * FROM `other_schema`.`weekly_events`",
+        "SELECT LOAD_FILE('/etc/passwd')",
+        "SELECT `LOAD_FILE`('/etc/passwd')",
+        "SELECT 1 INTO DUMPFILE '/tmp/x'",
+        "SELECT `event_name` FROM `weekly_events` INTO OUTFILE '/tmp/x'",
+        "SeLeCt LoAd_FiLe/**/('/etc/passwd')",
+        "SELECT 1 InTo/**/DuMpFiLe '/tmp/x'",
+        "SELECT `event_name` FROM `weekly_events` InTo /* blocked */ OuTfIlE '/tmp/x'",
+    )
+    for sql in rejected:
+        _assert_rejected(sql)
+
+
+def test_prohibited_words_inside_literals_are_allowed() -> None:
+    sql = (
+        "SELECT REPLACE('LOAD_FILE INTO DUMPFILE REPLACE INTO; DELETE', "
+        "'DELETE', 'safe') AS `label` FROM `weekly_events`"
+    )
+    validated = app4._validate_select_only_sql(sql)
+    assert validated.startswith("SELECT REPLACE(")
+    assert "LIMIT" in validated
+
+    semicolon_literal = (
+        "SELECT 'value; DELETE FROM mysql.user -- not executable' AS `note` "
+        "FROM `weekly_events`"
+    )
+    assert app4._validate_select_only_sql(semicolon_literal).startswith("SELECT '")
 
 
 def test_exact_event_detail_plan_stays_sql_with_resident_topic() -> None:
@@ -206,6 +246,149 @@ def test_event_execution_error_never_exposes_internal_intent() -> None:
     assert sanitize_degraded_answer(factual, fallback=fallback) == factual
 
 
+def test_failure_categories_never_expose_raw_intents() -> None:
+    cases = (
+        ("crime_monthly_count", "public-safety information"),
+        ("311_issue_count", "city-service information"),
+        ("safety_overview", "public-safety information"),
+        ("transcript", "community information"),
+        ("opinion", "community information"),
+        ("unknown_synthetic_intent", "information"),
+    )
+    for intent, expected in cases:
+        message = execution_failure_message(path="sql", intent=intent)
+        assert expected in message.lower(), message
+        assert intent not in message
+        assert not internal_terms(message), message
+
+
+def test_internal_guard_is_narrow_and_catches_identifiers() -> None:
+    fallback = "Community information is temporarily unavailable."
+    ordinary = "Bring a rag and gloves to the neighborhood cleanup."
+    assert sanitize_degraded_answer(ordinary, fallback=fallback) == ordinary
+
+    safe_words = "The event registration page includes neighborhood details."
+    assert sanitize_degraded_answer(safe_words, fallback=fallback) == safe_words
+
+    rejected = (
+        "The RAG pipeline failed.",
+        "I could not load event_by_name data.",
+        "I could not load crime_monthly_count data.",
+    )
+    for answer in rejected:
+        assert sanitize_degraded_answer(answer, fallback=fallback) == fallback
+
+
+def test_degraded_hybrid_preserves_completed_fact_with_safe_category() -> None:
+    answer = unified_chatbot._degraded_hybrid_answer(
+        {
+            "answer": "BPD's open data shows 42 incident reports in the last 30 days.",
+            "result": {"rows": [{"cnt": 42}]},
+            "prepared_intent": "crime_monthly_count",
+            "db_backed": True,
+        },
+        {
+            "answer": "The RAG pipeline failed for safety_overview.",
+            "chunks": [],
+            "metadata": [],
+            "error": "ChromaTimeoutError",
+        },
+        {"intent": "safety_overview"},
+    )
+    assert answer is not None
+    assert "42 incident reports" in answer
+    assert "Public-safety information is temporarily unavailable." in answer
+    assert not internal_terms(answer), answer
+
+
+def test_title_and_date_metadata_are_not_duplicated() -> None:
+    rows = (
+        {
+            "event_name": "CREW & CADET STREET PARADE",
+            "event_date": "Mon, Jul 13",
+            "start_date": date(2026, 7, 13),
+            "raw_text": "CREW & CADET STREET PARADE Mon, Jul 13",
+        },
+        {
+            "event_name": "CREW & CADET STREET PARADE",
+            "event_date": "Mon, Jul 13",
+            "start_date": date(2026, 7, 13),
+            "raw_text": (
+                "CREW & CADET STREET PARADE\nMon, Jul 13\n"
+                "A neighborhood parade for local youth groups."
+            ),
+        },
+    )
+    for row in rows:
+        answer = prepared_sql._format_event_detail_answer(SCREENSHOT_QUERY, {"rows": [row]})
+        assert answer.count("CREW & CADET STREET PARADE") == 1, answer
+        assert answer.count("Monday, July 13") == 1, answer
+        assert "Mon, Jul 13" not in answer, answer
+
+
+def test_inline_event_fields_have_clean_boundaries() -> None:
+    url = "https://example.org/parade"
+    result = {
+        "rows": [{
+            "event_name": "CREW & CADET STREET PARADE",
+            "event_date": "Mon, Jul 13",
+            "start_date": date(2026, 7, 13),
+            "start_time": "13:00:00",
+            "end_time": "15:00:00",
+            "raw_text": (
+                "CREW & CADET STREET PARADE Mon, Jul 13 "
+                "A neighborhood parade for local youth groups. "
+                "LOCATION: Codman Square CONTACT: Jane Doe "
+                f"URL: {url} COST: Free REGISTRATION: Required"
+            ),
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer(SCREENSHOT_QUERY, result)
+    assert "A neighborhood parade for local youth groups." in answer
+    assert "**Time:** 1:00 PM – 3:00 PM" in answer
+    assert "**Location:** Codman Square" in answer
+    assert "**Contact:** Jane Doe" in answer
+    assert "**Cost:** Free" in answer
+    assert "**Registration:** Required" in answer
+    assert answer.count(url) == 1, answer
+    assert "Jane Doe URL" not in answer
+
+
+def test_registration_url_is_not_duplicated() -> None:
+    url = "https://example.org/register"
+    result = {
+        "rows": [{
+            "event_name": "Community Cleanup",
+            "start_date": date(2026, 7, 18),
+            "raw_text": (
+                "Community Cleanup\nHelp clean neighborhood streets.\n"
+                "LOCATION: Codman Square\n"
+                f"REGISTRATION: {url}\nURL: {url}"
+            ),
+        }],
+    }
+    answer = prepared_sql._format_event_detail_answer("Tell me about Community Cleanup", result)
+    assert answer.count(url) == 1, answer
+    assert "**Registration:** [Registration link]" in answer
+
+
+def test_normal_event_list_output_is_unchanged() -> None:
+    question = "What events are happening this weekend?"
+    hit = prepared_sql.match_prepared_sql(question)
+    assert hit is not None and hit.intent == "events_weekend"
+    result = {
+        "columns": ["event_name", "event_date", "start_date", "start_time"],
+        "rows": [{
+            "event_name": "Neighborhood Cleanup",
+            "event_date": "Sat, Jul 18",
+            "start_date": date(2026, 7, 18),
+            "start_time": "10:00:00",
+        }],
+    }
+    expected = app4._format_events_answer_fallback(question, result)
+    assert hit.answer_fn(question, result) == expected
+
+
 def test_exact_event_id_from_demo_db_when_requested() -> None:
     if os.getenv("RUN_EVENT_DETAIL_DB_TEST", "false").lower() not in ("1", "true", "yes"):
         raise SkipTest("set RUN_EVENT_DETAIL_DB_TEST=true to verify local demo row 417")
@@ -227,10 +410,19 @@ def main() -> int:
         test_replace_function_is_allowed_in_cte_select,
         test_write_and_chained_statements_are_rejected,
         test_all_prohibited_statement_commands_are_rejected,
+        test_schema_allowlist_and_file_operations_are_rejected,
+        test_prohibited_words_inside_literals_are_allowed,
         test_exact_event_detail_plan_stays_sql_with_resident_topic,
         test_exact_event_detail_returns_confirmed_title_and_date,
         test_partial_event_record_names_missing_fields_without_total_failure,
         test_event_execution_error_never_exposes_internal_intent,
+        test_failure_categories_never_expose_raw_intents,
+        test_internal_guard_is_narrow_and_catches_identifiers,
+        test_degraded_hybrid_preserves_completed_fact_with_safe_category,
+        test_title_and_date_metadata_are_not_duplicated,
+        test_inline_event_fields_have_clean_boundaries,
+        test_registration_url_is_not_duplicated,
+        test_normal_event_list_output_is_unchanged,
         test_exact_event_id_from_demo_db_when_requested,
     ]
     passed = 0

@@ -1029,13 +1029,58 @@ _SQL_STATEMENT_COMMANDS = frozenset({
     "UPDATE", "UPSERT",
 })
 _FORBIDDEN_SQL_WORDS = (_SQL_STATEMENT_COMMANDS - {"SELECT", "REPLACE"}) | {
+    "DUMPFILE",
     "OUTFILE",
 }
+_FORBIDDEN_SELECT_TOKENS = frozenset({"DUMPFILE", "LOAD_FILE", "OUTFILE"})
+_FORBIDDEN_SQL_SCHEMAS = frozenset({
+    "information_schema",
+    "mysql",
+    "performance_schema",
+    "sys",
+})
 
 
 def _strip_sql_comments(sql: str) -> str:
-    no_line_comments = re.sub(r"--[^\n\r]*", " ", sql or "")
-    return re.sub(r"/\*.*?\*/", " ", no_line_comments, flags=re.DOTALL)
+    """Remove SQL comments without treating comment markers in literals as comments."""
+    text = sql or ""
+    output: List[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in ("'", '"', "`"):
+            quote = char
+            output.append(char)
+            index += 1
+            while index < len(text):
+                output.append(text[index])
+                if text[index] == "\\" and quote != "`" and index + 1 < len(text):
+                    index += 1
+                    output.append(text[index])
+                elif text[index] == quote:
+                    if index + 1 < len(text) and text[index + 1] == quote:
+                        index += 1
+                        output.append(text[index])
+                    else:
+                        index += 1
+                        break
+                index += 1
+            continue
+        if text.startswith("--", index) or char == "#":
+            newline = text.find("\n", index)
+            if newline < 0:
+                break
+            output.append("\n")
+            index = newline + 1
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            output.append(" ")
+            index = len(text) if end < 0 else end + 2
+            continue
+        output.append(char)
+        index += 1
+    return "".join(output)
 
 
 def _scan_sql_tokens(sql: str) -> tuple[List[tuple[str, str, int]], List[int]]:
@@ -1087,7 +1132,7 @@ def _scan_sql_tokens(sql: str) -> tuple[List[tuple[str, str, int]], List[int]]:
             tokens.append(("punct", char, depth))
             index += 1
             continue
-        if char in (",", ";"):
+        if char in (",", ".", ";"):
             tokens.append(("punct", char, depth))
             if char == ";":
                 semicolons.append(index)
@@ -1141,16 +1186,75 @@ def _extract_cte_names(
     return names
 
 
+_FROM_CLAUSE_END_WORDS = frozenset({
+    "EXCEPT", "FOR", "GROUP", "HAVING", "INTERSECT", "INTO", "LIMIT",
+    "LOCK", "ORDER", "PROCEDURE", "QUALIFY", "UNION", "WHERE", "WINDOW",
+})
+
+
+def _table_reference_at(
+    tokens: List[tuple[str, str, int]],
+    start: int,
+    depth: int,
+) -> str:
+    if start >= len(tokens):
+        raise ValueError("Missing table source after FROM or JOIN")
+    kind, value, token_depth = tokens[start]
+    if kind == "punct" and value == "(":
+        next_index = start + 1
+        while next_index < len(tokens) and tokens[next_index][0] == "punct":
+            next_index += 1
+        if (
+            next_index < len(tokens)
+            and tokens[next_index][0] == "word"
+            and tokens[next_index][1] in ("SELECT", "WITH")
+            and tokens[next_index][2] > depth
+        ):
+            return ""
+        raise ValueError("Unsupported parenthesized table source")
+    if token_depth != depth or kind not in ("word", "identifier"):
+        raise ValueError("Unsupported table source")
+
+    first = value.lower()
+    if start + 2 < len(tokens):
+        dot_kind, dot_value, dot_depth = tokens[start + 1]
+        next_kind, next_value, next_depth = tokens[start + 2]
+        if (
+            dot_kind == "punct"
+            and dot_value == "."
+            and dot_depth == depth
+            and next_kind in ("word", "identifier")
+            and next_depth == depth
+        ):
+            return f"{first}.{next_value.lower()}"
+    return first
+
+
 def _extract_sql_tables(sql: str) -> List[str]:
+    """Return unqualified or schema-qualified physical/CTE source references."""
+    tokens, _ = _scan_sql_tokens(sql or "")
     tables: List[str] = []
-    pattern = re.compile(
-        r"\b(?:FROM|JOIN)\s+`?([A-Za-z0-9_]+)`?(?:\s*\.\s*`?([A-Za-z0-9_]+)`?)?",
-        re.IGNORECASE,
-    )
-    for match in pattern.finditer(sql or ""):
-        table = (match.group(2) or match.group(1) or "").lower()
-        if table:
-            tables.append(table)
+    active_from_depths: set[int] = set()
+    for index, (kind, value, depth) in enumerate(tokens):
+        active_from_depths = {item for item in active_from_depths if item <= depth}
+        if kind == "word" and value in _FROM_CLAUSE_END_WORDS:
+            active_from_depths.discard(depth)
+            continue
+        if kind == "word" and value == "FROM":
+            active_from_depths.add(depth)
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
+            continue
+        if kind == "word" and value == "JOIN" and depth in active_from_depths:
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
+            continue
+        if kind == "punct" and value == "," and depth in active_from_depths:
+            table = _table_reference_at(tokens, index + 1, depth)
+            if table:
+                tables.append(table)
     return tables
 
 
@@ -1189,15 +1293,31 @@ def _validate_select_only_sql(sql: str) -> str:
     }
     if forbidden:
         raise ValueError("DDL/DML keywords are not allowed in public SQL")
+    dangerous_select_tokens = {
+        value.upper()
+        for kind, value, _depth in tokens
+        if kind in ("word", "identifier")
+        and value.upper() in _FORBIDDEN_SELECT_TOKENS
+    }
+    if dangerous_select_tokens:
+        raise ValueError("File operations are not allowed in public SQL")
+
     tables = _extract_sql_tables(statement)
     cte_names = _extract_cte_names(tokens, command_index)
-    disallowed = sorted({
-        table
-        for table in tables
-        if table not in SQL_TABLE_ALLOWLIST and table not in cte_names
-    })
+    disallowed: set[str] = set()
+    for table in tables:
+        schema, separator, _base_table = table.partition(".")
+        if separator and schema in _FORBIDDEN_SQL_SCHEMAS:
+            disallowed.add(table)
+            continue
+        if separator:
+            if table not in SQL_TABLE_ALLOWLIST:
+                disallowed.add(table)
+            continue
+        if table not in SQL_TABLE_ALLOWLIST and table not in cte_names:
+            disallowed.add(table)
     if disallowed:
-        raise ValueError(f"SQL references disallowed table(s): {', '.join(disallowed)}")
+        raise ValueError(f"SQL references disallowed table(s): {', '.join(sorted(disallowed))}")
     return _enforce_select_limit(statement)
 
 

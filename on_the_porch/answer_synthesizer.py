@@ -15,7 +15,7 @@ from answer_voice import (
     UNAVAILABLE_DATA_INTENTS,
 )
 from execution_plan import FactBundle, FactPart
-from resident_response import sanitize_degraded_answer
+from resident_response import resident_topic_for_intent, sanitize_degraded_answer
 
 from sql_chat import prepared_sql
 
@@ -68,7 +68,7 @@ def _blocks_from_bundle(
         if part.intent == "crime_by_offense":
             block["notes"] = (
                 "Criminal offense categories only (service calls excluded). Use these categories "
-                "to answer what crimes are reported. Supplement with RAG for street safety, "
+                "to answer what crimes are reported. Supplement with community sources for street safety, "
                 "community programs, and neighborhood context — not as a substitute for these facts."
             )
         if for_validation and part.result:
@@ -87,6 +87,35 @@ def _blocks_from_bundle(
             block["data_unavailable"] = True
         blocks.append(block)
     return blocks
+
+
+def _resident_prompt_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove route and intent identifiers before evidence reaches the answer model."""
+    safe_blocks: List[Dict[str, Any]] = []
+    for block in blocks:
+        safe = dict(block)
+        intent = str(safe.pop("intent", "") or "")
+        path = str(safe.pop("path", "") or "")
+        safe["category"] = (
+            safe.get("topic")
+            or resident_topic_for_intent(intent)
+            or "information"
+        )
+        if path == "rag":
+            safe["evidence_type"] = "community sources"
+        elif path == "sql":
+            safe["evidence_type"] = "official or structured data"
+        else:
+            safe["evidence_type"] = "availability notice"
+        safe_blocks.append(safe)
+    return safe_blocks
+
+
+def _bundle_internal_identifiers(bundle: FactBundle) -> List[str]:
+    values = [part.intent for part in bundle.parts]
+    if bundle.prepared_intent:
+        values.append(bundle.prepared_intent)
+    return values
 
 
 def _fallback_answer(bundle: FactBundle) -> str:
@@ -143,6 +172,7 @@ def synthesize_answer(
     blocks = _blocks_from_bundle(bundle)
     has_rag = any(p.path == "rag" and p.rag_chunks for p in bundle.parts)
     kind = classify_from_bundle_parts(blocks, has_rag=has_rag)
+    prompt_blocks = _resident_prompt_blocks(blocks)
 
     resident_asked = display_question or _display_question(question, conversation_history)
     full_prompt = system_prompt(kind, conversation_history) + "\n\n"
@@ -150,7 +180,7 @@ def synthesize_answer(
     full_prompt += resident_question_block(resident_asked, question)
     full_prompt += (
         f"\nVerified facts (JSON):\n"
-        f"{json.dumps(blocks, ensure_ascii=False, default=str)}"
+        f"{json.dumps(prompt_blocks, ensure_ascii=False, default=str)}"
     )
 
     model = os.getenv("GEMINI_SUMMARY_MODEL", app4.GEMINI_SUMMARY_MODEL)
@@ -202,6 +232,7 @@ def validate_answer(
         return sanitize_degraded_answer(
             polished,
             fallback=_fallback_answer(bundle),
+            internal_identifiers=_bundle_internal_identifiers(bundle),
         )
     return polished
 
@@ -233,4 +264,11 @@ def synthesize_and_validate(
         )
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer validation failed: {exc}")
-        return answer.strip() or _fallback_answer(bundle)
+        fallback = _fallback_answer(bundle)
+        if any(part.error for part in bundle.parts):
+            return sanitize_degraded_answer(
+                answer.strip(),
+                fallback=fallback,
+                internal_identifiers=_bundle_internal_identifiers(bundle),
+            )
+        return answer.strip() or fallback
