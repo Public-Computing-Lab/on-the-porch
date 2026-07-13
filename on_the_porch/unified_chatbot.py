@@ -4,7 +4,7 @@ import sys
 import json
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,11 +44,11 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
 # Escalation model for low-confidence synthesis (Iteration 0+); wired in later iterations.
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
-GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "60"))
+GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "25"))
 GEMINI_STREAM_TIMEOUT = int(
-    os.getenv("GEMINI_STREAM_TIMEOUT", str(max(GEMINI_REQUEST_TIMEOUT, 90)))
+    os.getenv("GEMINI_STREAM_TIMEOUT", str(max(GEMINI_REQUEST_TIMEOUT, 30)))
 )
-GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
 _llm_calls_local = threading.local()
 # Run independent retrievals (and hybrid SQL+RAG) concurrently for lower latency.
@@ -215,8 +215,13 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _generate_content(model, prompt, generation_config):
     """Call Gemini with a per-request timeout and transient retries."""
+    from request_budget import budget_exhausted, gemini_timeout_cap  # noqa: WPS433
+
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
+    if budget_exhausted():
+        raise TimeoutError("Request time budget exhausted before Gemini call")
     last_exc: Optional[Exception] = None
+    call_timeout = gemini_timeout_cap(GEMINI_REQUEST_TIMEOUT)
     for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
         increment_llm_call_counter()
         try:
@@ -225,7 +230,7 @@ def _generate_content(model, prompt, generation_config):
                     return model.generate_content(
                         prompt,
                         generation_config=generation_config,
-                        request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                        request_options={"timeout": gemini_timeout_cap(call_timeout)},
                     )
                 except TypeError:
                     _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
@@ -233,7 +238,9 @@ def _generate_content(model, prompt, generation_config):
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
-                backoff = min(2 ** (attempt - 1), 8) * 0.5
+                if budget_exhausted():
+                    raise
+                backoff = min(2 ** (attempt - 1), 4) * 0.25
                 print(
                     f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
                     f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
@@ -395,17 +402,20 @@ def _build_boston_gov_fallback_answer(question: str, original_answer: str) -> st
         # involves a remote embedding call + a SQLite write. Do it in the
         # background so the user is not blocked waiting on it; the answer we
         # return (excerpt) does not depend on the save succeeding.
-        def _save_boston_gov_answer() -> None:
-            try:
-                boston_gov.add_boston_gov_answer_to_vectordb(
-                    question,
-                    cleaned_ai_text,
-                    link=primary_link,
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ⚠️ Boston.gov fallback vectordb save failed: {exc}")
+        if _chat_vector_writes_enabled():
+            def _save_boston_gov_answer() -> None:
+                try:
+                    boston_gov.add_boston_gov_answer_to_vectordb(
+                        question,
+                        cleaned_ai_text,
+                        link=primary_link,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ⚠️ Boston.gov fallback vectordb save failed: {exc}")
 
-        threading.Thread(target=_save_boston_gov_answer, daemon=True).start()
+            threading.Thread(target=_save_boston_gov_answer, daemon=True).start()
+        else:
+            print("  🏛️ Boston.gov fallback vectordb save skipped (CHAT_VECTOR_WRITES_ENABLED=false)")
         return excerpt
     print("  ⚠️ Boston.gov fallback: classifier said scraped AI answer is not an exact match")
     return _regenerate_with_boston_gov_context(question, original_answer, cleaned_ai_text)
@@ -413,6 +423,13 @@ def _build_boston_gov_fallback_answer(question: str, original_answer: str) -> st
 
 def _boston_gov_async_enabled() -> bool:
     return os.getenv("BOSTON_GOV_ASYNC_ENABLED", "true").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _chat_vector_writes_enabled() -> bool:
+    """Opt-in only: live resident chat should not write to Chroma/Qdrant."""
+    return os.getenv("CHAT_VECTOR_WRITES_ENABLED", "false").strip().lower() in (
         "1", "true", "yes",
     )
 
@@ -457,6 +474,16 @@ def try_boston_gov_enrichment(
     """Attempt Boston.gov enrichment with a bounded wait (post-stream correction)."""
     if not _should_trigger_boston_gov_fallback(original_answer):
         return original_answer
+    try:
+        from request_budget import remaining_seconds  # noqa: WPS433
+
+        remaining = remaining_seconds(floor=0.0) - 0.5
+        if remaining < 0.5:
+            print("  ⏱️ Boston.gov enrichment skipped — request budget nearly exhausted")
+            return original_answer
+        timeout_seconds = min(timeout_seconds, remaining)
+    except Exception:
+        pass
     result: Dict[str, Any] = {"answer": original_answer}
 
     def _job() -> None:
@@ -1220,6 +1247,54 @@ def _check_if_needs_new_data(
         return default_result
 
 
+def _prepared_match_topic(hit: Any) -> Optional[str]:
+    intent = str(getattr(hit, "intent", "") or "").lower().split(":", 1)[0]
+    if intent.startswith("311"):
+        return "311"
+    if intent.startswith("crime"):
+        return "crime"
+    if intent.startswith("event") or intent.startswith("events"):
+        return "events"
+    if intent.startswith("911"):
+        return "911"
+    return None
+
+
+def _routing_plan_topic(question: str, plan: Dict[str, Any]) -> Optional[str]:
+    intent = str(plan.get("intent") or "").lower()
+    if intent.startswith("311"):
+        return "311"
+    if intent.startswith("crime") or intent in {"safety_overview", "opinion_safety"}:
+        return "crime"
+    if intent.startswith("event") or intent == "events":
+        return "events"
+    if intent in {"transcript", "opinion", "community_note"}:
+        return intent
+    if intent.startswith("news"):
+        return "news"
+    if intent == "policy":
+        return "policy"
+    return intent_router.detect_civic_topic(question)
+
+
+def _prepared_topic_matches_route(
+    question: str,
+    plan: Dict[str, Any],
+    hit: Any,
+) -> bool:
+    prepared_topic = _prepared_match_topic(hit)
+    if prepared_topic is None:
+        return False
+    route_topic = _routing_plan_topic(question, plan)
+    if route_topic == prepared_topic:
+        return True
+    if prepared_topic == "crime" and route_topic == "safety":
+        return True
+    if prepared_topic == "911" and route_topic == "crime":
+        return True
+    return False
+
+
 def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, Any]:
     """Validate k/mode and apply RSS/calendar post-rules."""
     mode = str(plan.get("mode", intent_router.infer_parse_failure_mode(question))).lower()
@@ -1251,20 +1326,24 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
         if not folders:
             folders = ["newsletters"]
 
-    query_plan = plan.get("query_plan")
-    if not isinstance(query_plan, dict):
-        query_plan = build_query_plan(question, mode=mode).to_dict()
-
-    # DB-first: prepared catalog hits must use SQL execution, not RAG-only narration.
+    # DB-first, but only when the prepared catalog topic agrees with the router.
+    # This prevents generic event matches like "what's happening" from
+    # overwriting crime/safety/311 routes.
     try:
         from sql_chat import prepared_sql as _prep  # noqa: WPS433
 
-        if _prep.match_prepared_sql(question) and not _prep.has_opinion_angle(question):
-            mode = "sql"
-        elif _prep.match_prepared_sql(question) and mode == "rag":
-            mode = "hybrid"
+        prepared_hit = _prep.match_prepared_sql(question)
+        if prepared_hit is not None and _prepared_topic_matches_route(question, plan, prepared_hit):
+            if mode == "rag":
+                mode = "hybrid" if _prep.has_opinion_angle(question) else "sql"
+            elif mode == "sql" and _prep.has_opinion_angle(question):
+                mode = "hybrid"
     except Exception:
         pass
+
+    query_plan = plan.get("query_plan")
+    if not isinstance(query_plan, dict):
+        query_plan = build_query_plan(question, mode=mode).to_dict()
 
     return {
         "mode": mode,
@@ -1344,6 +1423,25 @@ def _route_question(question: str) -> Dict[str, Any]:
             )
             return _normalize_routing_plan(question, rule_plan)
 
+    from request_budget import budget_exhausted, remaining_seconds  # noqa: WPS433
+
+    if budget_exhausted() or remaining_seconds(floor=0.0) < 8:
+        fallback_mode = intent_router.infer_parse_failure_mode(question)
+        print(f"  🧭 Routing plan (budget fallback): {fallback_mode}")
+        return _normalize_routing_plan(
+            question,
+            {
+                "mode": fallback_mode,
+                "transcript_tags": None,
+                "policy_sources": None,
+                "folder_categories": None,
+                "k": 5,
+                "router": "budget",
+                "intent": "budget_fallback",
+                "confidence": 0.5,
+            },
+        )
+
     plan = _route_question_llm(question)
     print(
         "  🧭 Routing plan (LLM):",
@@ -1409,13 +1507,22 @@ def run_execution_pipeline(
             retrieve_rag=_retrieve_rag,
         )
 
+        from request_budget import budget_exhausted, remaining_seconds  # noqa: WPS433
+
         synth_started = time.perf_counter()
-        answer = synthesize_and_validate(
-            question,
-            facts,
-            conversation_history=conversation_history,
-            display_question=question,
-        )
+        if budget_exhausted() or remaining_seconds(floor=0.0) < 4.0:
+            answer = "\n\n".join(
+                part.canonical_facts
+                for part in facts.parts
+                if (part.canonical_facts or "").strip()
+            ).strip() or _budget_fallback_answer()
+        else:
+            answer = synthesize_and_validate(
+                question,
+                facts,
+                conversation_history=conversation_history,
+                display_question=question,
+            )
         synth_ms = int((time.perf_counter() - synth_started) * 1000)
 
         mode = plan.legacy_mode()
@@ -1804,13 +1911,15 @@ def _build_cache_context_for_answer(cache: Dict[str, Any]) -> str:
 
 def _is_calendar_question(question: str) -> bool:
     """Check if the question is about events, calendar, or schedules."""
+    question_lower = question.lower()
+    if intent_router._generic_event_blocked_by_public_concern(question_lower):
+        return False
     calendar_keywords = [
         "event", "events", "happening", "schedule", "calendar", "activity", "activities",
         "this week", "next week", "today", "tomorrow", "weekend", "saturday", "sunday",
         "monday", "tuesday", "wednesday", "thursday", "friday", "what's on", "what is on",
         "going on", "things to do", "community event", "meeting", "workshop"
     ]
-    question_lower = question.lower()
     return any(kw in question_lower for kw in calendar_keywords)
 
 
@@ -1831,12 +1940,30 @@ _RSS_NEWS_HINTS = (
     "whats happening in",
     "what is happening in",
     "what is going on in",
+    "what's going on with",
+    "whats going on with",
+    "what is going on with",
+    "what's happening with",
+    "whats happening with",
+    "what is happening with",
+    "what happened with",
+    "update on",
+    "updates on",
+    "status of",
+    "latest on",
     "lately in",
     "tell me about",
     "what has",
     "who is",
     "what is",
 )
+
+_NEWS_RAG_INTENTS = frozenset({"news_rss", "news_source"})
+_POLICY_RAG_INTENTS = frozenset({"policy"})
+_TRANSCRIPT_RAG_INTENTS = frozenset({
+    "transcript", "opinion", "community_note", "crime_opinion",
+    "311_opinion", "311_hybrid", "crime_hybrid",
+})
 
 _STRUCTURED_SQL_INTENTS = frozenset({
     "311_stats",
@@ -1872,6 +1999,11 @@ def _question_mentions_rss_source(question: str) -> bool:
     question_lower = (question or "").lower()
     if "event" in question_lower:
         return False
+    if intent_router._mentions_opinion(question_lower) and not any(
+        h in question_lower
+        for h in ("news", "updates", "from", "newsletter", "dotnews", "dorchester reporter")
+    ):
+        return False
     return any(alias in question_lower for alias in _RSS_SOURCE_ALIASES)
 
 
@@ -1879,6 +2011,8 @@ def _looks_like_rss_query(question: str) -> bool:
     question_lower = (question or "").lower()
     if _question_mentions_rss_source(question):
         return True
+    if intent_router._generic_event_blocked_by_public_concern(question_lower):
+        return False
     if any(hint in question_lower for hint in _RSS_NEWS_HINTS):
         return not any(schedule_hint in question_lower for schedule_hint in _SCHEDULE_HINTS)
     return False
@@ -1889,15 +2023,67 @@ def _should_include_rss(question: str, folder_categories: Optional[List[str]]) -
     return "newsletters" in normalized or _looks_like_rss_query(question)
 
 
+def _looks_like_entity_news_query(question: str) -> bool:
+    return intent_router._looks_like_entity_news_query((question or "").lower())
+
+
+def _rag_retrieval_task_names(
+    question: str,
+    plan: Dict[str, Any],
+    *,
+    transcript_first: bool,
+    folders: Optional[List[str]],
+) -> List[str]:
+    """Choose retrieval sources by intent so news queries don't scan every collection."""
+    intent = str(plan.get("intent") or "").strip().lower()
+    if intent in _NEWS_RAG_INTENTS or _looks_like_entity_news_query(question):
+        return ["rss"]
+    if intent in _POLICY_RAG_INTENTS:
+        return ["policies"]
+    if intent in _TRANSCRIPT_RAG_INTENTS or transcript_first:
+        return ["transcripts"]
+    if intent in {"safety_overview", "crime_safety_context", "crime_general", "neighborhood_pulse"}:
+        names = ["transcripts"]
+        if _should_include_rss(question, folders):
+            names.append("rss")
+        return names
+    names = []
+    if transcript_first:
+        names.append("transcripts")
+    if _should_include_rss(question, folders):
+        names.append("rss")
+    if not transcript_first:
+        names.append("transcripts")
+    names.extend(["boston", "policies"])
+    return names
+
+
 def _retrieve_rag(
     question: str,
     plan: Dict[str, Any],
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """Run all RAG retrieval sources (concurrently when enabled).
+    """Run RAG retrieval sources (concurrently when enabled).
 
     Returns (combined_chunks, combined_meta). Kept separate from answer
     composition so the streaming path can retrieve, then stream the answer.
     """
+    from request_budget import (  # noqa: WPS433
+        budget_exhausted,
+        current_deadline,
+        deadline_exhausted,
+        remaining_seconds,
+        retrieval_timeout_cap,
+        use_request_deadline,
+        wait_timeout_cap,
+    )
+
+    if budget_exhausted():
+        print("  ⏱️ RAG retrieval skipped — request budget exhausted")
+        return [], []
+    if remaining_seconds(floor=0.0) < 2.0:
+        print("  ⏱️ RAG retrieval skipped — request budget nearly exhausted")
+        return [], []
+
     k = int(plan.get("k", 5))
     tags = plan.get("transcript_tags")
     sources = plan.get("policy_sources")
@@ -1913,11 +2099,19 @@ def _retrieve_rag(
     combined_meta: List[Dict[str, Any]] = []
 
     retrieval.clear_query_embedding_cache()
-    query_embedding = retrieval.get_query_embedding(question)
+    try:
+        query_embedding = retrieval.get_query_embedding(question)
+    except TimeoutError as exc:
+        print(f"  ⏱️ RAG retrieval skipped — query embedding timed out: {exc}")
+        return [], []
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ RAG retrieval skipped — query embedding failed: {exc}")
+        return [], []
 
-    # Each retrieval source is independent, so run them concurrently. Returns
-    # (label, chunks, metadata). These mostly wait on network (embeddings) and
-    # the vector store, so threads give real concurrency.
+    if budget_exhausted() or remaining_seconds(floor=0.0) < 1.0:
+        print("  ⏱️ RAG retrieval skipped — request budget exhausted after embedding")
+        return [], []
+
     def _task_rss():
         rss_res = retrieval.retrieve_rss(
             question, k=k, query_embedding=query_embedding,
@@ -1954,29 +2148,89 @@ def _retrieve_rag(
             meta = p_res.get("metadata", [])
         return ("📋 Policies", chunks, meta)
 
-    # Fixed order so combined results are deterministic regardless of which task
-    # finishes first. Transcript-focused questions prioritize meeting transcripts.
-    tasks = []
-    if transcript_first:
-        tasks.append(_task_transcripts)
-    if _should_include_rss(question, folders):
-        tasks.append(_task_rss)
-    if not transcript_first:
-        tasks.append(_task_transcripts)
-    tasks.extend([_task_boston, _task_policies])
+    task_by_name = {
+        "rss": _task_rss,
+        "boston": _task_boston,
+        "transcripts": _task_transcripts,
+        "policies": _task_policies,
+    }
+    source_names = _rag_retrieval_task_names(
+        question, plan, transcript_first=transcript_first, folders=folders,
+    )
+    task_entries = [
+        (name, task_by_name[name])
+        for name in source_names
+        if name in task_by_name
+    ]
+    print(f"  🔎 RAG sources: {', '.join(source_names)}")
+
+    deadline = current_deadline()
 
     def _safe_run(fn):
         try:
-            return fn()
+            with use_request_deadline(deadline):
+                return fn()
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ Retrieval task error: {e}")
             return ("(failed)", [], [])
 
-    if _PARALLEL_RETRIEVAL and len(tasks) > 1:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            results = list(executor.map(_safe_run, tasks))
+    per_task_timeout = retrieval_timeout_cap(12.0)
+    if task_entries and (_PARALLEL_RETRIEVAL or deadline is not None):
+        executor = ThreadPoolExecutor(max_workers=len(task_entries))
+        future_map: Dict[Future[Tuple[str, List[str], List[Dict[str, Any]]]], tuple[int, str]] = {}
+        pending: set[Future[Tuple[str, List[str], List[Dict[str, Any]]]]] = set()
+        collected: Dict[int, Tuple[str, List[str], List[Dict[str, Any]]]] = {}
+        try:
+            for index, (name, fn) in enumerate(task_entries):
+                future = executor.submit(_safe_run, fn)
+                future_map[future] = (index, name)
+                pending.add(future)
+
+            while pending:
+                if deadline_exhausted(deadline, safety_margin=0.25):
+                    break
+                wait_timeout = wait_timeout_cap(
+                    per_task_timeout,
+                    deadline,
+                    safety_margin=0.25,
+                )
+                if wait_timeout is not None and wait_timeout <= 0.0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    index, _name = future_map[future]
+                    try:
+                        collected[index] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  ⚠️ Retrieval task future failed: {exc}")
+                        collected[index] = ("(failed)", [], [])
+
+            for future in pending:
+                future.cancel()
+            for future in pending:
+                index, name = future_map[future]
+                print(f"  ⏱️ Retrieval task {name} timed out before request deadline")
+                collected.setdefault(index, ("(timeout)", [], []))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        results = [
+            collected[index]
+            for index in range(len(task_entries))
+            if index in collected
+        ]
     else:
-        results = [_safe_run(fn) for fn in tasks]
+        results = []
+        for _name, fn in task_entries:
+            if deadline_exhausted(deadline, safety_margin=0.25):
+                results.append(("(timeout)", [], []))
+                break
+            results.append(_safe_run(fn))
 
     for label, chunks, meta in results:
         print(f"  {label}: {len(chunks)} chunks found")
@@ -1997,6 +2251,12 @@ def _run_rag(
     if apply_fallback:
         answer = _apply_default_fallback_if_needed(question, answer)
     return {"answer": answer, "chunks": combined_chunks, "metadata": combined_meta}
+
+
+def _dynamic_sql_enabled() -> bool:
+    return os.getenv("DYNAMIC_SQL_ENABLED", "false").strip().lower() in (
+        "1", "true", "yes",
+    )
 
 
 def _run_sql(
@@ -2042,6 +2302,22 @@ def _run_sql(
             return out
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠️ Fast events path failed ({exc}); falling back to LLM SQL")
+
+    if not _dynamic_sql_enabled():
+        return {
+            "answer": (
+                "I can answer common civic data questions from prepared Boston Open Data "
+                "queries, but generated SQL is disabled on the public chat path. Try a "
+                "specific 311, crime, or events count with a time range."
+            ),
+            "sql": "",
+            "result": {
+                "columns": [],
+                "rows": [],
+                "error": "dynamic_sql_disabled",
+            },
+            "db_backed": False,
+        }
 
     database = os.environ.get("PGSCHEMA", "public")
     schema = app4._fetch_schema_snapshot(database)
@@ -2140,13 +2416,101 @@ def _run_hybrid_parts(
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Run the SQL and RAG halves of a hybrid query (concurrently when enabled)."""
+    from request_budget import (  # noqa: WPS433
+        current_deadline,
+        deadline_exhausted,
+        use_request_deadline,
+        wait_timeout_cap,
+    )
+
+    deadline = current_deadline()
+
+    def _with_budget(fn, *args, **kwargs):
+        with use_request_deadline(deadline):
+            return fn(*args, **kwargs)
+
+    def _sql_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        return {
+            "answer": "I couldn't load structured data before the request timed out.",
+            "sql": "",
+            "result": {"columns": [], "rows": [], "error": reason},
+            "db_backed": False,
+            "error": reason,
+        }
+
+    def _rag_unavailable(reason: str = "request_budget_exhausted") -> Dict[str, Any]:
+        return {
+            "answer": "I couldn't load community context before the request timed out.",
+            "chunks": [],
+            "metadata": [],
+            "error": reason,
+        }
+
     # SQL and RAG are independent. SQL uses its own thread-local DB connection
     # and RAG uses the shared (read-only) vector store, so this is safe.
     if _PARALLEL_RETRIEVAL:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            sql_future = executor.submit(_run_sql, question, conversation_history, False)
-            rag_future = executor.submit(_run_rag, question, plan, conversation_history, False)
-            return sql_future.result(), rag_future.result()
+        executor = ThreadPoolExecutor(max_workers=2)
+        future_map: Dict[Future[Dict[str, Any]], str] = {}
+        pending: set[Future[Dict[str, Any]]] = set()
+        collected: Dict[str, Dict[str, Any]] = {}
+        try:
+            sql_future = executor.submit(
+                _with_budget, _run_sql, question, conversation_history, False,
+            )
+            rag_future = executor.submit(
+                _with_budget, _run_rag, question, plan, conversation_history, False,
+            )
+            future_map[sql_future] = "sql"
+            future_map[rag_future] = "rag"
+            pending.update({sql_future, rag_future})
+
+            while pending:
+                if deadline_exhausted(deadline, safety_margin=0.25):
+                    break
+                wait_timeout = (
+                    None
+                    if deadline is None
+                    else wait_timeout_cap(
+                        5.0,
+                        deadline,
+                        safety_margin=0.25,
+                    )
+                )
+                if wait_timeout is not None and wait_timeout <= 0.0:
+                    break
+                done, pending = wait(
+                    pending,
+                    timeout=wait_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    label = future_map[future]
+                    try:
+                        collected[label] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  ⚠️ Hybrid {label} part failed: {exc}")
+                        if label == "sql":
+                            collected[label] = _sql_unavailable(str(exc))
+                        else:
+                            collected[label] = _rag_unavailable(str(exc))
+
+            for future in pending:
+                future.cancel()
+            for future in pending:
+                label = future_map[future]
+                print(f"  ⏱️ Hybrid {label} part timed out before request deadline")
+                if label == "sql":
+                    collected.setdefault(label, _sql_unavailable())
+                else:
+                    collected.setdefault(label, _rag_unavailable())
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+        return (
+            collected.get("sql") or _sql_unavailable(),
+            collected.get("rag") or _rag_unavailable(),
+        )
     sql_part = _run_sql(question, conversation_history, apply_fallback=False)
     rag_part = _run_rag(question, plan, conversation_history, apply_fallback=False)
     return sql_part, rag_part
@@ -2218,8 +2582,12 @@ def _generate_text_non_stream(model_name: str, prompt: str, temperature: float) 
 
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
     """Yield text deltas from a streaming Gemini generation with retries."""
+    from request_budget import budget_exhausted, remaining_seconds  # noqa: WPS433
+
     last_exc: Optional[Exception] = None
     for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+        if budget_exhausted():
+            raise TimeoutError("Request time budget exhausted before Gemini stream")
         yielded = False
         try:
             for piece in _stream_model_text_once(model_name, prompt, temperature):
@@ -2235,10 +2603,16 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
                     f"  ⚠️ Stream transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
                     f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
                 )
+                if remaining_seconds(floor=0.0) <= backoff:
+                    raise TimeoutError("Request time budget exhausted before stream retry") from exc
                 time.sleep(backoff)
                 continue
             break
-    if last_exc is not None and _is_timeout_error(last_exc):
+    if (
+        last_exc is not None
+        and _is_timeout_error(last_exc)
+        and remaining_seconds(floor=0.0) >= 4.0
+    ):
         try:
             text = _generate_text_non_stream(model_name, prompt, temperature)
             if text:
@@ -2255,16 +2629,21 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
 
 def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
     """Single streaming attempt (no retry)."""
+    from request_budget import budget_exhausted, gemini_timeout_cap  # noqa: WPS433
+
+    if budget_exhausted():
+        raise TimeoutError("Request time budget exhausted before Gemini stream")
     client = _get_llm_client()
     model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
+    stream_timeout = gemini_timeout_cap(GEMINI_STREAM_TIMEOUT)
     try:
         try:
             stream = model.generate_content(
                 prompt,
                 generation_config={"temperature": temperature},
                 stream=True,
-                request_options={"timeout": GEMINI_STREAM_TIMEOUT},
+                request_options={"timeout": stream_timeout},
             )
         except TypeError:
             stream = model.generate_content(
@@ -2276,6 +2655,8 @@ def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
         print(f"  ⚠️ Streaming generation failed to start: {exc}")
         raise
     for chunk in stream:
+        if budget_exhausted():
+            raise TimeoutError("Request time budget exhausted during Gemini stream")
         try:
             piece = getattr(chunk, "text", "") or ""
         except Exception:  # noqa: BLE001
@@ -2291,6 +2672,19 @@ def _pseudo_stream(text: str):
     words = text.split(" ")
     for i, word in enumerate(words):
         yield word if i == 0 else " " + word
+
+
+def _budget_nearly_exhausted(seconds: float = 3.0) -> bool:
+    from request_budget import budget_exhausted, remaining_seconds  # noqa: WPS433
+
+    return budget_exhausted() or remaining_seconds(floor=0.0) < seconds
+
+
+def _budget_fallback_answer() -> str:
+    return (
+        "I am running out of time to answer this safely. Please try a narrower "
+        "question, such as a specific 311 count, event window, or safety topic."
+    )
 
 
 def stream_agent_response(
@@ -2375,6 +2769,9 @@ def stream_agent_response(
         if prompt is None:
             answer = "I don't have any previous conversation or data to reference. Could you ask your question again?"
             yield ("delta", answer)
+        elif _budget_nearly_exhausted(4.0):
+            answer = _budget_fallback_answer()
+            yield ("delta", answer)
         else:
             acc: List[str] = []
             try:
@@ -2401,6 +2798,17 @@ def stream_agent_response(
 
     plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
+    if _budget_nearly_exhausted(2.5):
+        answer = _budget_fallback_answer()
+        yield ("delta", answer)
+        yield ("final", {
+            "answer": answer,
+            "mode": "budget_timeout",
+            "result": {"answer": answer, "error": "request_budget_exhausted"},
+            "retrieval_cache": cache,
+            "query_plan": plan.get("query_plan"),
+        })
+        return
 
     try:
         pipeline_out = run_execution_pipeline(
@@ -2466,6 +2874,9 @@ def stream_agent_response(
         if prompt is None:
             answer = "No relevant information found."
             yield ("delta", answer)
+        elif _budget_nearly_exhausted(4.0):
+            answer = _budget_fallback_answer()
+            yield ("delta", answer)
         else:
             acc = []
             try:
@@ -2499,18 +2910,24 @@ def stream_agent_response(
     else:
         prompt = _build_hybrid_merge_prompt(message, sql_part, rag_part, conversation_history)
         acc = []
-        try:
-            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
-                acc.append(piece)
-                yield ("delta", piece)
-        except Exception as exc:  # noqa: BLE001
-            if not acc:
-                raise
-            print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
-        answer = "".join(acc).strip()
-        if not answer:
+        if _budget_nearly_exhausted(4.0):
             answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
+            if not answer.strip():
+                answer = _budget_fallback_answer()
             yield ("delta", answer)
+        else:
+            try:
+                for piece in _stream_model_text(GEMINI_MODEL, prompt, 0):
+                    acc.append(piece)
+                    yield ("delta", piece)
+            except Exception as exc:  # noqa: BLE001
+                if not acc:
+                    raise
+                print(f"  ⚠️ Hybrid stream ended early: {exc.__class__.__name__}")
+            answer = "".join(acc).strip()
+            if not answer:
+                answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
+                yield ("delta", answer)
     result = {
         "answer": answer,
         "sql": sql_part,

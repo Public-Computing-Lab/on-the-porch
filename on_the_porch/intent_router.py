@@ -21,9 +21,19 @@ _DEFAULT_PLAN: Dict[str, Any] = {
 }
 
 _EVENT_HINTS = (
-    "event", "events", "happening", "going on", "what's on", "whats on",
+    "event", "events", "what's on", "whats on",
     "calendar", "schedule", "activities", "activity", "things to do",
     "workshop", "workshops", "meeting", "meetings",
+)
+_EXPLICIT_EVENT_HINTS = (
+    "event", "events", "what's on", "whats on",
+    "calendar", "schedule", "activities", "activity", "things to do",
+    "workshop", "workshops",
+)
+_GENERIC_EVENT_PHRASES = (
+    "what's happening", "whats happening", "what is happening",
+    "what's going on", "whats going on", "what is going on",
+    "going on",
 )
 _SCHEDULE_HINTS = (
     "today", "tomorrow", "this week", "next week", "weekend",
@@ -48,10 +58,16 @@ _STATS_HINTS = (
 _OPINION_HINTS = (
     "what do people", "what do residents", "how do people", "how do residents",
     "what are people saying", "community feel", "community thinks",
+    "what are residents saying", "people saying", "residents saying",
     "perspective", "opinion", "opinions", "sentiment", "concerned about",
     "what concerns", "concerns do", "residents raise", "residents say",
     "safety concern", "safety concerns", "main concern", "main concerns",
     "main safety", "public safety",
+)
+_COMMUNITY_CONCERN_HINTS = (
+    "resident", "residents", "community", "community concern",
+    "community concerns", "concern", "concerns", "concerned",
+    "worry", "worried", "issue", "issues", "problem", "problems",
 )
 _POLICY_HINTS = (
     "policy", "policies", "plan", "plans", "ordinance", "zoning",
@@ -61,6 +77,9 @@ _RSS_NEWS_HINTS = (
     "news", "recent news", "latest news", "news about", "news from",
     "updates from", "recent updates", "what's going on in", "whats going on in",
     "what's happening in", "whats happening in", "what is happening in",
+    "what's going on with", "whats going on with", "what is going on with",
+    "what's happening with", "whats happening with", "what is happening with",
+    "update on", "updates on", "status of", "what happened with",
     "lately in", "dorchester reporter", "dotnews", "dot news",
 )
 _RSS_SOURCE_ALIASES = (
@@ -100,6 +119,12 @@ def rule_confidence_threshold() -> float:
 def infer_parse_failure_mode(question: str) -> str:
     """Default mode when LLM routing JSON fails — prefer rag over hybrid."""
     q = (question or "").lower()
+    if _generic_event_blocked_by_public_concern(q):
+        if any(h in q for h in _311_HINTS + _311_ISSUE_HINTS):
+            return "hybrid"
+        if any(h in q for h in _CRIME_HINTS + ("safety", "safe")):
+            return "hybrid"
+        return "rag"
     if any(h in q for h in _EVENT_HINTS + _311_HINTS + _CRIME_HINTS + _STATS_HINTS):
         if any(h in q for h in _OPINION_HINTS):
             return "hybrid"
@@ -150,10 +175,40 @@ def _mentions_opinion(q: str) -> bool:
     return any(h in q for h in _OPINION_HINTS)
 
 
+def _mentions_public_concern(q: str) -> bool:
+    return any(h in q for h in _COMMUNITY_CONCERN_HINTS)
+
+
+def _prepared_311_sql_intent(question: str) -> Optional[str]:
+    """Prepared 311 stats/breakdown queries should beat generic issue wording."""
+    try:
+        from sql_chat import prepared_sql  # noqa: WPS433
+
+        hit = prepared_sql.match_prepared_sql(question)
+    except Exception:
+        return None
+    if hit is None or not hit.intent.startswith("311_"):
+        return None
+    return hit.intent
+
+
+def _generic_event_blocked_by_public_concern(q: str) -> bool:
+    if not any(phrase in q for phrase in _GENERIC_EVENT_PHRASES):
+        return False
+    if any(h in q for h in _EXPLICIT_EVENT_HINTS):
+        return False
+    blockers = _CRIME_HINTS + _311_HINTS + _311_ISSUE_HINTS + _COMMUNITY_CONCERN_HINTS + (
+        "safety", "safe", "public safety",
+    )
+    return any(h in q for h in blockers)
+
+
 def _looks_like_safety_overview(q: str) -> bool:
     """Broad safety questions — recent crime stats plus community/transcript context."""
     if "safety" not in q and "safe" not in q:
         return False
+    if re.search(r"\bis\s+[a-z0-9\s'-]{2,80}\bsafe\b", q):
+        return True
     return any(
         h in q
         for h in (
@@ -168,19 +223,44 @@ def _looks_like_safety_overview(q: str) -> bool:
 def _mentions_rss_source(q: str) -> bool:
     if "event" in q:
         return False
+    if _mentions_opinion(q) and not any(
+        h in q for h in ("news", "updates", "from", "newsletter", "dotnews", "dorchester reporter")
+    ):
+        return False
     return any(alias in q for alias in _RSS_SOURCE_ALIASES)
 
 
 def _looks_like_rss_news(q: str) -> bool:
     if _mentions_rss_source(q):
         return True
+    if _generic_event_blocked_by_public_concern(q):
+        return False
     if any(h in q for h in _RSS_NEWS_HINTS):
         return not any(h in q for h in _EVENT_HINTS + _SCHEDULE_HINTS)
     return False
 
 
+def _looks_like_entity_news_query(q: str) -> bool:
+    """Topic/entity news lookups (e.g. 'what's going on with Eversource')."""
+    entity_patterns = (
+        "what's going on with", "whats going on with", "what is going on with",
+        "what's happening with", "whats happening with", "what is happening with",
+        "what happened with", "update on", "updates on", "status of",
+        "latest on", "news on", "news about",
+    )
+    if not any(p in q for p in entity_patterns):
+        return False
+    # Calendar/event windows only — not bare "going on" (matches entity news queries).
+    calendar_blockers = _SCHEDULE_HINTS + (
+        "event", "events", "calendar", "what's on", "whats on", "things to do",
+    )
+    return not any(h in q for h in calendar_blockers)
+
+
 def _looks_like_neighborhood_pulse(q: str) -> bool:
     """'What's going on in Dorchester lately?' — news + optional 311 context."""
+    if _generic_event_blocked_by_public_concern(q):
+        return False
     pulse = (
         "what's going on", "whats going on", "what is going on",
         "what's happening", "whats happening", "what is happening",
@@ -197,8 +277,13 @@ def _looks_like_neighborhood_pulse(q: str) -> bool:
 def _looks_like_transcript_query(q: str) -> bool:
     if "transcript" in q:
         return True
+    if "meeting" in q and any(h in q for h in _SCHEDULE_HINTS + _EXPLICIT_EVENT_HINTS):
+        return False
     return "meeting" in q and any(
-        h in q for h in ("say", "said", "residents", "displacement", "community", "discuss")
+        h in q for h in (
+            "say", "said", "residents", "displacement", "community",
+            "discuss", "tell me about",
+        )
     )
 
 
@@ -252,9 +337,31 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
 
     # 311 stats → sql (before events — "this week" appears in both)
     if any(h in q for h in _311_HINTS) or any(h in q for h in _311_ISSUE_HINTS):
-        if _mentions_opinion(q) and _mentions_stats(q):
-            return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
+        prepared_311_intent = _prepared_311_sql_intent(question)
+        if prepared_311_intent and not _mentions_opinion(q):
+            return _base_plan(mode="sql", intent="311_stats", confidence=0.94, k=5)
+        if _mentions_opinion(q) or (
+            _mentions_public_concern(q)
+            and not _mentions_stats(q)
+        ):
+            return _base_plan(
+                mode="hybrid",
+                intent="311_opinion",
+                confidence=0.86,
+                k=5,
+                transcript_tags=["community"],
+            )
         return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)
+
+    if any(h in q for h in _CRIME_HINTS) and _mentions_opinion(q):
+        intent = "crime_hybrid" if _mentions_stats(q) else "crime_opinion"
+        return _base_plan(
+            mode="hybrid",
+            intent=intent,
+            confidence=0.9,
+            k=5,
+            transcript_tags=["safety", "violence", "community"],
+        )
 
     # Crime / safety — factual BPD lookups → SQL; neighborhood-safety judgment → hybrid
     try:
@@ -327,12 +434,26 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
             folder_categories=["newsletters"],
         )
 
+    # Entity/topic news (e.g. utility company) → rag before calendar event routing
+    if _looks_like_entity_news_query(q):
+        return _base_plan(
+            mode="rag",
+            intent="news_rss",
+            confidence=0.88,
+            k=5,
+            folder_categories=["newsletters"],
+        )
+
     # Events / calendar → sql
-    if any(h in q for h in _EVENT_HINTS):
+    if any(h in q for h in _EVENT_HINTS) and not _generic_event_blocked_by_public_concern(q):
         return _base_plan(mode="sql", intent="events", confidence=0.95, k=5)
-    if any(h in q for h in _SCHEDULE_HINTS) and any(
-        h in q
-        for h in ("happening", "going on", "what's on", "whats on", "on saturday", "on sunday")
+    if (
+        not _generic_event_blocked_by_public_concern(q)
+        and any(h in q for h in _SCHEDULE_HINTS)
+        and any(
+            h in q
+            for h in ("happening", "going on", "what's on", "whats on", "on saturday", "on sunday")
+        )
     ):
         return _base_plan(mode="sql", intent="events", confidence=0.88, k=5)
 
@@ -454,15 +575,17 @@ def detect_civic_topic(question: str) -> Optional[str]:
     if any(h in q for h in _CRIME_HINTS):
         return "crime"
 
-    if any(h in q for h in _EVENT_HINTS):
-        return "events"
-    if any(h in q for h in _SCHEDULE_HINTS) and any(
-        h in q for h in ("happening", "going on", "what's on", "whats on", "event", "on")
-    ):
-        return "events"
-
     if _looks_like_transcript_query(q):
         return "transcript"
+
+    if any(h in q for h in _EVENT_HINTS) and not _generic_event_blocked_by_public_concern(q):
+        return "events"
+    if (
+        not _generic_event_blocked_by_public_concern(q)
+        and any(h in q for h in _SCHEDULE_HINTS)
+        and any(h in q for h in ("happening", "going on", "what's on", "whats on", "event", "on"))
+    ):
+        return "events"
 
     if any(h in q for h in _POLICY_HINTS):
         return "policy"

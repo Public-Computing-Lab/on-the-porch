@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional
 
 from execution_plan import (
@@ -33,6 +33,7 @@ def _sanitize_rows(rows: List[Dict[str, Any]], *, limit: int = 10) -> List[Dict[
 
 
 _MAX_WORKERS = max(1, min(4, int(os.getenv("EXECUTION_PIPELINE_MAX_WORKERS", "4"))))
+_BUDGET_WAIT_MARGIN_SECONDS = float(os.getenv("REQUEST_BUDGET_WAIT_MARGIN_SECONDS", "0.25"))
 
 
 def _supplemental_sql_for_part(
@@ -169,6 +170,41 @@ def _derive_prepared_intent(plan: ExecutionPlan, parts: List[FactPart]) -> Optio
     return None
 
 
+def _timeout_fact_part(part: PlanPart) -> FactPart:
+    if part.path == "rag":
+        message = "I couldn't load community context before the request timed out."
+    elif part.path == "sql":
+        message = "I couldn't load structured data before the request timed out."
+    else:
+        message = part.guardrail_message or "That part of the answer timed out."
+    return FactPart(
+        path=part.path,
+        intent=part.intent,
+        topic=part.topic,
+        sub_question=part.sub_question,
+        canonical_facts=message,
+        error="request_budget_exhausted",
+    )
+
+
+def _exception_fact_part(part: PlanPart, exc: Exception) -> FactPart:
+    print(f"  ⚠️ Plan part failed ({part.path}/{part.intent}): {exc}")
+    if part.path == "rag":
+        message = "I couldn't load community context right now."
+    elif part.path == "sql":
+        message = "I couldn't load structured data right now."
+    else:
+        message = part.guardrail_message or "That part of the answer is unavailable."
+    return FactPart(
+        path=part.path,
+        intent=part.intent,
+        topic=part.topic,
+        sub_question=part.sub_question,
+        canonical_facts=message,
+        error=str(exc),
+    )
+
+
 def execute_plan(
     plan: ExecutionPlan,
     question: str,
@@ -178,6 +214,20 @@ def execute_plan(
 ) -> FactBundle:
     """Execute all plan parts without LLM calls."""
     started = time.perf_counter()
+    try:
+        from request_budget import (  # noqa: WPS433
+            current_deadline,
+            deadline_exhausted,
+            use_request_deadline,
+            wait_timeout_cap,
+        )
+
+        deadline = current_deadline()
+    except Exception:
+        deadline = None
+        deadline_exhausted = None  # type: ignore[assignment]
+        use_request_deadline = None  # type: ignore[assignment]
+        wait_timeout_cap = None  # type: ignore[assignment]
 
     def _run(part: PlanPart) -> FactPart:
         if part.path == "sql":
@@ -195,12 +245,74 @@ def execute_plan(
             error="unknown_path",
         )
 
-    if len(plan.parts) == 1:
-        fact_parts = [_run(plan.parts[0])]
+    def _run_with_budget(part: PlanPart) -> FactPart:
+        if use_request_deadline is None:
+            return _run(part)
+        with use_request_deadline(deadline):
+            return _run(part)
+
+    def _has_budget() -> bool:
+        if deadline is None or deadline_exhausted is None:
+            return True
+        return not deadline_exhausted(
+            deadline,
+            safety_margin=_BUDGET_WAIT_MARGIN_SECONDS,
+        )
+
+    if deadline is None and len(plan.parts) == 1:
+        fact_parts = [_run_with_budget(plan.parts[0])]
     else:
         workers = min(_MAX_WORKERS, len(plan.parts))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            fact_parts = list(executor.map(_run, plan.parts))
+        executor = ThreadPoolExecutor(max_workers=workers)
+        future_map: Dict[Future[FactPart], tuple[int, PlanPart]] = {}
+        collected: Dict[int, FactPart] = {}
+        pending: set[Future[FactPart]] = set()
+        try:
+            for index, part in enumerate(plan.parts):
+                future = executor.submit(_run_with_budget, part)
+                future_map[future] = (index, part)
+                pending.add(future)
+
+            while pending:
+                if not _has_budget():
+                    break
+                if deadline is None or wait_timeout_cap is None:
+                    timeout = None
+                else:
+                    timeout = wait_timeout_cap(
+                        5.0,
+                        deadline,
+                        safety_margin=_BUDGET_WAIT_MARGIN_SECONDS,
+                    )
+                    if timeout <= 0.0:
+                        break
+                done, pending = wait(
+                    pending,
+                    timeout=timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    break
+                for future in done:
+                    index, part = future_map[future]
+                    try:
+                        collected[index] = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        collected[index] = _exception_fact_part(part, exc)
+
+            for future in pending:
+                future.cancel()
+            for future in pending:
+                index, part = future_map[future]
+                collected.setdefault(index, _timeout_fact_part(part))
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        fact_parts = [
+            collected[index]
+            for index in range(len(plan.parts))
+            if index in collected
+        ]
 
     execute_ms = int((time.perf_counter() - started) * 1000)
     bundle = FactBundle(

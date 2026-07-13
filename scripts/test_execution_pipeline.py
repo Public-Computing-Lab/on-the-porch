@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "on_the_porch"))
 
+import intent_router  # noqa: E402
 from plan_builder import build_execution_plan_rules  # noqa: E402
 
 
@@ -16,6 +17,22 @@ def _routing(mode: str, intent: str, **kwargs):
     base = {"mode": mode, "intent": intent, "confidence": 0.9, "k": 5}
     base.update(kwargs)
     return base
+
+
+def _plan_for_question(question: str):
+    routing = intent_router.route_with_rules(question)
+    assert routing is not None, f"no rules route for {question!r}"
+    plan = build_execution_plan_rules(question, routing)
+    assert plan is not None, f"no execution plan for {question!r}: {routing}"
+    return plan
+
+
+def _paths(plan):
+    return {part.path for part in plan.parts}
+
+
+def _part(plan, path: str):
+    return next(part for part in plan.parts if part.path == path)
 
 
 def test_compound_311_911_calls_dispatch_guardrail():
@@ -78,6 +95,60 @@ def test_hybrid_crime_opinion():
     assert "rag" in paths
 
 
+def test_safety_overview_hybrid_includes_sql_and_rag():
+    plan = _plan_for_question("Is Dorchester safe right now?")
+    assert plan.legacy_mode() == "hybrid"
+    assert plan.routing_mode == "hybrid"
+    assert "sql" in _paths(plan)
+    assert "rag" in _paths(plan)
+    sql_part = _part(plan, "sql")
+    rag_part = _part(plan, "rag")
+    assert sql_part.intent == "crime_monthly_count"
+    assert "crime incidents" in sql_part.sub_question.lower()
+    assert "last 30 days" in sql_part.sub_question.lower()
+    assert rag_part.intent in {"safety_overview", "crime_safety_context"}
+
+
+def test_shootings_happening_hybrid_includes_sql_and_rag():
+    plan = _plan_for_question("What's happening with shootings in Dorchester?")
+    assert plan.legacy_mode() == "hybrid"
+    assert "sql" in _paths(plan)
+    assert "rag" in _paths(plan)
+    sql_part = _part(plan, "sql")
+    assert sql_part.intent == "crime_shooting_count"
+    assert "shootings" in sql_part.sub_question.lower()
+
+
+def test_shootings_and_concerns_keeps_sql_and_rag():
+    plan = _plan_for_question(
+        "How many shootings were there last month and what concerns do residents raise?",
+    )
+    assert plan.legacy_mode() == "hybrid"
+    assert "sql" in _paths(plan)
+    assert "rag" in _paths(plan)
+    assert _part(plan, "sql").intent == "crime_shooting_count"
+
+
+def test_codman_resident_concerns_stays_rag_only():
+    plan = _plan_for_question("What are residents concerned about near Codman Square?")
+    assert plan.legacy_mode() == "rag"
+    assert _paths(plan) == {"rag"}
+
+
+def test_events_weekend_stays_sql():
+    plan = _plan_for_question("What events are happening this weekend?")
+    assert plan.legacy_mode() == "sql"
+    assert _paths(plan) == {"sql"}
+    assert _part(plan, "sql").intent == "events_weekend"
+
+
+def test_311_week_stays_sql():
+    plan = _plan_for_question("How many 311 requests were filed last week?")
+    assert plan.legacy_mode() == "sql"
+    assert _paths(plan) == {"sql"}
+    assert _part(plan, "sql").intent == "311_weekly_count"
+
+
 def test_compound_311_includes_types():
     q = "How many 311 and 911 calls in Dorchester last month?"
     plan = build_execution_plan_rules(q, _routing("sql", "311_stats"))
@@ -113,6 +184,12 @@ def main() -> int:
         test_single_311_count,
         test_311_with_breakdown,
         test_hybrid_crime_opinion,
+        test_safety_overview_hybrid_includes_sql_and_rag,
+        test_shootings_happening_hybrid_includes_sql_and_rag,
+        test_shootings_and_concerns_keeps_sql_and_rag,
+        test_codman_resident_concerns_stays_rag_only,
+        test_events_weekend_stays_sql,
+        test_311_week_stays_sql,
         test_rag_transcript,
         test_911_routes_guardrail_not_sql,
     ]

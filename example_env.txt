@@ -17,9 +17,16 @@ GEMINI_SUMMARY_MODEL=gemini-2.5-flash-lite
 GEMINI_FAST_MODEL=gemini-2.5-flash-lite
 GEMINI_FALLBACK_MODEL=gemini-2.5-pro
 GEMINI_EMBED_MODEL=models/gemini-embedding-001
-GEMINI_REQUEST_TIMEOUT=60
-GEMINI_STREAM_TIMEOUT=90
-GEMINI_MAX_ATTEMPTS=3
+GEMINI_REQUEST_TIMEOUT=25
+GEMINI_STREAM_TIMEOUT=30
+GEMINI_MAX_ATTEMPTS=2
+REQUEST_BUDGET_SECONDS=30
+CHROMA_MAX_ATTEMPTS=2
+DYNAMIC_SQL_ENABLED=false
+CHAT_VECTOR_WRITES_ENABLED=false
+ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false
+SQL_QUERY_TIMEOUT_SECONDS=8
+SQL_RESULT_LIMIT=500
 
 # ============================================================================
 # API and session configuration
@@ -79,16 +86,19 @@ RETHINKAI_API_KEYS=legacy-api-key-1,legacy-api-key-2
 # Production server (gunicorn via ./start_api.sh)
 # ============================================================================
 GUNICORN_BIND=127.0.0.1:8888
-GUNICORN_WORKERS=3
-GUNICORN_THREADS=8
-GUNICORN_TIMEOUT=180
+GUNICORN_WORKERS=2
+GUNICORN_THREADS=4
+GUNICORN_TIMEOUT=75
 # SSE keepalive interval (seconds) while waiting on LLM/SQL during /messages/stream
 SSE_KEEPALIVE_INTERVAL=12
 GUNICORN_WORKER_CLASS=gthread
+# DreamHost 8 GB: use GUNICORN_WORKERS=1 when EMBED_PROVIDER=local loads
+# sentence-transformers in the API process; otherwise 1-2 workers is the
+# recommended range.
 # Optional tuning (defaults shown in api/gunicorn_conf.py):
 # GUNICORN_GRACEFUL_TIMEOUT=30
 # GUNICORN_KEEPALIVE=5
-# GUNICORN_MAX_REQUESTS=1000
+# GUNICORN_MAX_REQUESTS=500
 # GUNICORN_MAX_REQUESTS_JITTER=100
 # GUNICORN_ACCESS_LOG=-
 # GUNICORN_ERROR_LOG=-
@@ -138,6 +148,9 @@ ROUTER_RULE_CONFIDENCE_THRESHOLD=0.75
 BOSTON_GOV_ASYNC_ENABLED=true
 BOSTON_GOV_BLOCKING=false
 BOSTON_GOV_ASYNC_TIMEOUT_SECONDS=8
+CHAT_VECTOR_WRITES_ENABLED=false
+ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false
+DYNAMIC_SQL_ENABLED=false
 
 # ============================================================================
 # Embeddings and vector retrieval
@@ -162,7 +175,7 @@ VECTORDB_DIR=../vectordb_new
 VECTORDB_BGE_DIR=../vectordb_bge_v1
 PARALLEL_RETRIEVAL=true
 VECTORDB_SINGLETON=true
-CHROMA_MAX_ATTEMPTS=3
+CHROMA_MAX_ATTEMPTS=2
 
 # ============================================================================
 # Materialized MySQL summaries, ingest jobs, freshness SLOs
@@ -191,7 +204,7 @@ MYSQL_PORT=3306
 MYSQL_USER=root
 MYSQL_PASSWORD=your-mysql-password
 MYSQL_DB=rethink_ai_boston
-MYSQL_POOL_SIZE=10
+MYSQL_POOL_SIZE=6
 MYSQL_CONNECT_TIMEOUT=10
 
 # ============================================================================

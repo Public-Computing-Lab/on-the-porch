@@ -3,6 +3,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 
 import chromadb
@@ -36,7 +37,8 @@ VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_GEMIN
 _embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).
-_CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "5")))
+_CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "2")))
+_GEMINI_EMBED_SUPPORTS_REQUEST_OPTIONS = True
 # Tracks which vector-store paths have already had WAL mode enabled.
 _WAL_ENABLED_PATHS: set[str] = set()
 
@@ -75,7 +77,36 @@ class GeminiEmbeddings:
         self.model = model or GEMINI_EMBED_MODEL
 
     def _embed(self, text: str):
-        res = genai.embed_content(model=self.model, content=text)
+        global _GEMINI_EMBED_SUPPORTS_REQUEST_OPTIONS
+
+        deadline, timeout = _embedding_budget_timeout()
+
+        def _call_embed():
+            global _GEMINI_EMBED_SUPPORTS_REQUEST_OPTIONS
+            if _GEMINI_EMBED_SUPPORTS_REQUEST_OPTIONS:
+                try:
+                    return genai.embed_content(
+                        model=self.model,
+                        content=text,
+                        request_options={"timeout": timeout},
+                    )
+                except TypeError:
+                    _GEMINI_EMBED_SUPPORTS_REQUEST_OPTIONS = False
+            return genai.embed_content(model=self.model, content=text)
+
+        if deadline is None:
+            res = _call_embed()
+        else:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(_call_embed)
+            try:
+                res = future.result(timeout=timeout)
+            except FuturesTimeout as exc:
+                future.cancel()
+                raise TimeoutError("Gemini embedding exceeded request budget") from exc
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+        _check_request_budget("Gemini embedding")
         return res["embedding"]
 
     def embed_documents(self, texts):
@@ -161,7 +192,10 @@ def get_embeddings():
 
 def embed_text(text: str) -> list:
     """Embed a single string (query or cache key)."""
-    return get_embeddings().embed_query(text)
+    _check_request_budget("embedding")
+    vec = get_embeddings().embed_query(text)
+    _check_request_budget("embedding")
+    return vec
 
 
 def clear_query_embedding_cache() -> None:
@@ -177,10 +211,57 @@ def get_query_embedding(query: str) -> list:
         _query_embed_local, "vec", None
     ):
         return _query_embed_local.vec
+    _check_request_budget("query embedding")
     vec = get_embeddings().embed_query(key)
+    _check_request_budget("query embedding")
     _query_embed_local.key = key
     _query_embed_local.vec = vec
     return vec
+
+
+def _request_deadline():
+    try:
+        from request_budget import current_deadline  # type: ignore
+
+        return current_deadline()
+    except Exception:
+        return None
+
+
+def _request_remaining_seconds(default: float = 30.0) -> float:
+    try:
+        from request_budget import remaining_seconds  # type: ignore
+
+        return remaining_seconds(floor=0.0)
+    except Exception:
+        return default
+
+
+def _check_request_budget(phase: str, *, minimum_seconds: float = 0.25) -> None:
+    if _request_deadline() is None:
+        return
+    if _request_remaining_seconds() <= minimum_seconds:
+        raise TimeoutError(f"Request time budget exhausted during {phase}")
+
+
+def _embedding_budget_timeout() -> tuple[object | None, float]:
+    deadline = _request_deadline()
+    if deadline is None:
+        return None, float(os.getenv("GEMINI_EMBED_TIMEOUT", "30"))
+    _check_request_budget("embedding", minimum_seconds=0.5)
+    try:
+        from request_budget import wait_timeout_cap  # type: ignore
+
+        timeout = wait_timeout_cap(
+            float(os.getenv("GEMINI_EMBED_TIMEOUT", "30")),
+            deadline,
+            safety_margin=0.25,
+        )
+    except Exception:
+        timeout = max(0.0, _request_remaining_seconds() - 0.25)
+    if timeout <= 0.0:
+        raise TimeoutError("Request time budget exhausted before embedding")
+    return deadline, timeout
 
 
 def _is_locked_error(exc: Exception) -> bool:
