@@ -574,6 +574,8 @@ def _event_source_label(source_pdf: str) -> str:
 def build_event_sources(
     rows: List[Dict[str, Any]],
     question: str = "",
+    *,
+    include_entity_ref: bool = False,
 ) -> List[Dict[str, str]]:
     """Build citation objects for weekly_events rows (org label + event URL)."""
     if not rows:
@@ -585,7 +587,16 @@ def build_event_sources(
     raw = str(row.get("raw_text") or "")
     url = _extract_event_url(raw)
     label = _event_source_label(str(row.get("source_pdf") or ""))
-    return [{"type": "event", "source": label, "path": url}]
+    entry = {"type": "event", "source": label}
+    if url:
+        entry["path"] = url
+    try:
+        event_id = int(row.get("id"))
+    except (TypeError, ValueError):
+        event_id = 0
+    if include_entity_ref and event_id > 0:
+        entry["entity_ref"] = f"event:{event_id}"
+    return [entry]
 
 
 def _metadata_prefix_pattern(value: str) -> str:
@@ -772,6 +783,11 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("The listing does not provide a separate location field.")
     return "\n".join(lines).strip()
+
+
+def format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
+    """Public deterministic formatter for an authoritative selected event row."""
+    return _format_event_detail_answer(question, result)
 
 
 def _match_event_by_name(question: str) -> Optional[PreparedMatch]:
