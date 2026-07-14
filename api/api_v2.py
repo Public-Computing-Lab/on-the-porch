@@ -105,6 +105,12 @@ from event_context import (  # noqa: E402
     resolve_event_context,
     validate_event_ui_context,
 )
+from conversation_relationship import (  # noqa: E402
+    ReasonCode,
+    RelationshipDecision,
+    classify_shadow_relationship,
+    conservative_fallback,
+)
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
     build_semantic_cache_backend,
@@ -2310,6 +2316,74 @@ def _assistant_message_metadata(
     return metadata
 
 
+def _relationship_llm_classifier(prompt: str, timeout_seconds: float) -> str:
+    """One bounded structured classifier call used only when explicitly enabled."""
+    client = _get_llm_client()
+    model_name = os.getenv(
+        "GEMINI_FAST_MODEL",
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+    )
+    model = client.GenerativeModel(model_name)
+    increment_llm_call_counter()
+    response = model.generate_content(
+        prompt,
+        generation_config={"temperature": 0, "response_mime_type": "application/json"},
+        request_options={"timeout": max(0.25, float(timeout_seconds))},
+    )
+    return str(getattr(response, "text", "") or "")
+
+
+def _classify_relationship_shadow(
+    message: str,
+    history_rows: List[Dict[str, Any]],
+    *,
+    thread_id: str,
+) -> Optional[RelationshipDecision]:
+    if not Config.CONVERSATION_RELATIONSHIP_SHADOW_ENABLED:
+        return None
+    try:
+        decision = classify_shadow_relationship(
+            message,
+            history_rows,
+            enabled=True,
+            llm_fallback_enabled=Config.CONVERSATION_RELATIONSHIP_LLM_FALLBACK_ENABLED,
+            llm_classifier=(
+                _relationship_llm_classifier
+                if Config.CONVERSATION_RELATIONSHIP_LLM_FALLBACK_ENABLED
+                else None
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_exception("Conversation relationship shadow classification failed", exc)
+        decision = conservative_fallback(ReasonCode.CLASSIFIER_FAILURE)
+    diagnostic = decision.to_dict()
+    log_payload = {
+        "event": "conversation_relationship_shadow",
+        "thread_id": thread_id,
+        "relationship": diagnostic["relationship"],
+        "decision_source": diagnostic["decision_source"],
+        "reason_code": diagnostic["reason_code"],
+    }
+    request_id = get_request_id()
+    if request_id:
+        log_payload["request_id"] = request_id
+    print(json_dumps(log_payload), file=sys.stderr, flush=True)
+    return decision
+
+
+def _user_message_metadata(
+    *,
+    event_context: Optional[ValidatedEventContext],
+    relationship: Optional[RelationshipDecision],
+) -> Optional[Dict[str, Any]]:
+    metadata: Dict[str, Any] = {}
+    if event_context is not None:
+        metadata.update(event_context.user_message_metadata())
+    if relationship is not None:
+        metadata["conversation_relationship"] = relationship.to_dict()
+    return metadata or None
+
+
 # =============================================================================
 # Request lifecycle
 # =============================================================================
@@ -2862,6 +2936,12 @@ def post_conversation_message(thread_id: str):
         conn.close()
         conn = None
 
+        relationship = _classify_relationship_shadow(
+            message,
+            history_rows,
+            thread_id=thread_id,
+        )
+
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
         agent_result = _execute_agent_response_with_event_context(
@@ -2888,7 +2968,10 @@ def post_conversation_message(thread_id: str):
             user_id=g.current_user_row["id"],
             role="user",
             content=message,
-            message_meta=(event_context.user_message_metadata() if event_context else None),
+            message_meta=_user_message_metadata(
+                event_context=event_context,
+                relationship=relationship,
+            ),
         )
 
         assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
@@ -3009,6 +3092,11 @@ def post_conversation_message_stream(thread_id: str):
     session_id = g.session_row["session_id"]
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
+    relationship = _classify_relationship_shadow(
+        message,
+        history_rows,
+        thread_id=thread_id,
+    )
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
@@ -3141,7 +3229,10 @@ def post_conversation_message_stream(thread_id: str):
                 return
             user_message_row = _insert_message(
                 conn2, thread_id=thread_id, user_id=user_id, role="user", content=message,
-                message_meta=(event_context.user_message_metadata() if event_context else None),
+                message_meta=_user_message_metadata(
+                    event_context=event_context,
+                    relationship=relationship,
+                ),
             )
             assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
             assistant_message_row = _insert_message(
