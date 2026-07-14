@@ -669,10 +669,25 @@ def run_live_api_tests(base_url: str) -> None:
         user_meta = json.loads(rows[user_id]["message_meta_json"])
         assistant_meta = json.loads(rows[assistant_id]["message_meta_json"])
         sources = json.loads(rows[assistant_id]["sources_json"])
-        assert user_meta == validate_event_ui_context(context).user_message_metadata()
+        expected_ui_meta = validate_event_ui_context(context).user_message_metadata()
+        assert user_meta["ui_context"] == expected_ui_meta["ui_context"]
+        relationship = user_meta["conversation_relationship"]
+        assert relationship["relationship"] == "STANDALONE"
+        assert relationship["decision_source"] == "rule"
+        assert relationship["shadow"] is True
+        assert set(relationship) == {
+            "relationship",
+            "confidence",
+            "reason_code",
+            "retained",
+            "cleared",
+            "requires_clarification",
+            "decision_source",
+            "shadow",
+        }
         assert "entity_title" not in json.dumps(user_meta)
         assert "entity_date" not in json.dumps(user_meta)
-        assert len(json.dumps(user_meta).encode("utf-8")) < 1024
+        assert len(json.dumps(user_meta).encode("utf-8")) < 2048
         assert assistant_meta["resolved_entity"] == json_payload["resolved_entity"]
         assert sources[0]["entity_ref"] == "event:435"
         assert rows[assistant_id]["model_name"] is None
