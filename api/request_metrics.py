@@ -47,6 +47,28 @@ def get_llm_calls() -> int:
         return int(getattr(_metrics_local, "llm_calls", 0))
 
 
+def resolve_execution_model_name(
+    result: Dict[str, Any],
+    *,
+    configured_model: Optional[str],
+    llm_calls: Optional[int] = None,
+) -> Optional[str]:
+    """Return persisted model metadata from what this request actually executed."""
+    if "model_name" in result:
+        explicit = result.get("model_name")
+        if explicit is None:
+            return None
+        if isinstance(explicit, str) and explicit.strip():
+            return explicit.strip()
+
+    calls = get_llm_calls() if llm_calls is None else max(0, int(llm_calls))
+    if calls == 0:
+        return None
+
+    model = (configured_model or "").strip()
+    return model or None
+
+
 def elapsed_ms() -> int:
     started = getattr(_metrics_local, "started_at", None)
     if started is None:

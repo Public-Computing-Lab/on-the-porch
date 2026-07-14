@@ -687,7 +687,7 @@ def test_structured_event_location_is_rendered_once() -> None:
         "Tell me about the Community Cleanup event", result,
     )
     assert "Help clean neighborhood streets." in answer
-    assert "**Location:** Codman Square" in answer
+    assert "It will be held at Codman Square." in answer
     assert answer.count("Codman Square") == 1
     assert "separate location field" not in answer
 
@@ -720,9 +720,9 @@ def test_title_date_only_event_uses_precise_missing_fields_message() -> None:
     }
     answer = prepared_sql._format_event_detail_answer(SCREENSHOT_QUERY, result)
     assert answer == (
-        "**CREW & CADET STREET PARADE** is scheduled for **Monday, July 13**.\n\n"
-        "The current listing does not include a detailed description and does not "
-        "provide a separate location field."
+        "**CREW & CADET STREET PARADE** is scheduled for **Monday, July 13**. "
+        "The current listing does not provide a time, a detailed description, or a "
+        "separate location."
     )
 
 
@@ -745,11 +745,10 @@ def test_inline_event_fields_have_clean_boundaries() -> None:
     }
     answer = prepared_sql._format_event_detail_answer(SCREENSHOT_QUERY, result)
     assert "A neighborhood parade for local youth groups." in answer
-    assert "**Time:** 1:00 PM – 3:00 PM" in answer
-    assert "**Location:** Codman Square" in answer
-    assert "**Contact:** Jane Doe" in answer
-    assert "**Cost:** Free" in answer
-    assert "**Registration:** Required" in answer
+    assert "from **1:00 PM to 3:00 PM**" in answer
+    assert "It will be held at Codman Square." in answer
+    assert "For registration information, contact Jane Doe." in answer
+    assert "The listing says the event is free." in answer
     assert answer.count(url) == 1, answer
     assert "Jane Doe URL" not in answer
 
@@ -769,7 +768,8 @@ def test_registration_url_is_not_duplicated() -> None:
     }
     answer = prepared_sql._format_event_detail_answer("Tell me about Community Cleanup", result)
     assert answer.count(url) == 1, answer
-    assert "**Registration:** [Registration link]" in answer
+    assert "Registration information is available on the event page." in answer
+    assert "[event page]" in answer
 
 
 def test_normal_event_list_output_is_unchanged() -> None:
