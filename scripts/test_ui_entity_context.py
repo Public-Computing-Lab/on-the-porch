@@ -412,18 +412,20 @@ def run_live_api_tests(base_url: str) -> None:
     try:
         cursor.execute(
             "SELECT id, event_name, start_date FROM weekly_events WHERE id = %s LIMIT 1",
-            (417,),
+            (435,),
         )
         event = cursor.fetchone()
     finally:
         cursor.close()
         db.close()
-    assert event, "local demo DB must contain weekly_events.id=417"
+    assert event, "local demo DB must contain weekly_events.id=435"
 
     context = {
-        **VALID_CONTEXT,
+        "entity_type": "event",
+        "entity_id": "435",
         "entity_title": "FAKE CLIENT TITLE",
         "entity_date": "2026-07-14",
+        "source": "events_sidebar",
     }
     message = "Tell me more about this event"
     client_a = LiveGuestClient(base_url)
@@ -437,7 +439,7 @@ def run_live_api_tests(base_url: str) -> None:
     )
     events_response.raise_for_status()
     sidebar_event = next(
-        (item for item in events_response.json().get("events", []) if item.get("id") == 417),
+        (item for item in events_response.json().get("events", []) if item.get("id") == 435),
         None,
     )
     assert sidebar_event is not None
@@ -471,7 +473,7 @@ def run_live_api_tests(base_url: str) -> None:
     assert record["resolution"] == "exact_id"
     assert record["mode"] == "sql"
     assert record["internal_terms"] == []
-    assert record["sources"][0]["entity_ref"] == "event:417"
+    assert record["sources"][0]["entity_ref"] == "event:435"
     assert json_payload["assistant_message"]["model_name"] is None
 
     started = time_module.perf_counter()
@@ -492,6 +494,7 @@ def run_live_api_tests(base_url: str) -> None:
     )
     assert stream_payload["answer"] == json_answer
     assert stream_payload["resolved_entity"] == json_payload["resolved_entity"]
+    assert stream_payload["assistant_message"]["model_name"] is None
     assert stream_record["sources"] == record["sources"]
     assert stream_record["internal_terms"] == []
 
@@ -543,9 +546,10 @@ def run_live_api_tests(base_url: str) -> None:
     assert invalid_stream_response.json()["code"] == "invalid_ui_context"
 
     started = time_module.perf_counter()
+    typed_message = "Tell me more about the 'Virtual Baby Cafe' event happening on Jul 15."
     typed_response = client_a.send_json(
         json_thread,
-        {"message": "What events are happening this week?"},
+        {"message": typed_message},
     )
     typed_latency = round((time_module.perf_counter() - started) * 1000)
     assert typed_response.status_code == 201
@@ -562,11 +566,40 @@ def run_live_api_tests(base_url: str) -> None:
             "mode": typed_payload["assistant_message"]["response_mode"],
         },
         latency_ms=typed_latency,
-        deterministic=False,
+        deterministic=True,
     )
     assert typed_payload.get("resolved_entity") is None
     assert typed_payload["assistant_message"].get("resolved_entity") is None
+    assert typed_payload["assistant_message"]["model_name"] is None
     assert typed_record["internal_terms"] == []
+
+    typed_stream_thread = client_a.create_thread("Typed event stream")
+    typed_stream_response, typed_stream_payload = client_a.send_stream(
+        typed_stream_thread,
+        {"message": typed_message},
+    )
+    assert typed_stream_response.status_code == 200
+    assert typed_stream_payload is not None
+    assert typed_stream_payload["answer"] == typed_answer
+    assert typed_stream_payload["assistant_message"]["model_name"] is None
+    assert (
+        typed_stream_payload["assistant_message"]["model_name"]
+        == typed_payload["assistant_message"]["model_name"]
+    )
+
+    history_response = client_a.session.get(
+        f"{base_url}/conversations/{json_thread}/messages",
+        headers=client_a.headers(),
+        timeout=15,
+    )
+    history_response.raise_for_status()
+    persisted_assistant = {
+        item["id"]: item
+        for item in history_response.json()["messages"]
+        if item["role"] == "assistant"
+    }
+    assert persisted_assistant[json_payload["assistant_message"]["id"]]["model_name"] is None
+    assert persisted_assistant[typed_payload["assistant_message"]["id"]]["model_name"] is None
 
     legacy_response = client_a.session.post(
         f"{base_url}/chat",
@@ -613,7 +646,7 @@ def run_live_api_tests(base_url: str) -> None:
         timeout=45,
     )
     assert auth_send.status_code == 201, auth_send.text
-    assert auth_send.json()["assistant_message"]["resolved_entity"]["id"] == "417"
+    assert auth_send.json()["assistant_message"]["resolved_entity"]["id"] == "435"
     cross_auth = auth_b.get(
         f"{base_url}/conversations/{auth_thread}/messages",
         headers={"X-CSRF-Token": csrf_b},
@@ -641,7 +674,7 @@ def run_live_api_tests(base_url: str) -> None:
         assert "entity_date" not in json.dumps(user_meta)
         assert len(json.dumps(user_meta).encode("utf-8")) < 1024
         assert assistant_meta["resolved_entity"] == json_payload["resolved_entity"]
-        assert sources[0]["entity_ref"] == "event:417"
+        assert sources[0]["entity_ref"] == "event:435"
         assert rows[assistant_id]["model_name"] is None
         cursor.execute(
             "SELECT thread_state_json FROM conversation_threads WHERE id = %s",

@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "on_the_porch"))
+sys.path.insert(0, str(ROOT / "api"))
 
 from event_context import (  # noqa: E402
     EventResolution,
@@ -16,6 +17,7 @@ from event_context import (  # noqa: E402
     build_selected_event_response,
 )
 from sql_chat import app4, prepared_sql  # noqa: E402
+from request_metrics import resolve_execution_model_name  # noqa: E402
 
 
 EVENT_435_URL = "https://www.codman.org/event/virtual-baby-cafe-4/2026-07-15/"
@@ -276,6 +278,24 @@ def test_typed_and_selected_paths_use_the_same_answer() -> None:
     assert selected.sources[0]["path"] == EVENT_435_URL
 
 
+def test_model_metadata_reflects_actual_execution() -> None:
+    configured = "gemini-default"
+    assert resolve_execution_model_name(
+        {"model_name": None}, configured_model=configured, llm_calls=0,
+    ) is None
+    assert resolve_execution_model_name(
+        {}, configured_model=configured, llm_calls=0,
+    ) is None
+    assert resolve_execution_model_name(
+        {"model_name": "mock-answer-model"},
+        configured_model=configured,
+        llm_calls=1,
+    ) == "mock-answer-model"
+    assert resolve_execution_model_name(
+        {}, configured_model=configured, llm_calls=1,
+    ) == configured
+
+
 def main() -> int:
     tests = [
         test_event_435_is_coherent_and_deduplicated,
@@ -289,6 +309,7 @@ def main() -> int:
         test_incidental_virtual_word_does_not_set_modality,
         test_event_list_answer_is_unchanged,
         test_typed_and_selected_paths_use_the_same_answer,
+        test_model_metadata_reflects_actual_execution,
     ]
     failed = 0
     for test in tests:

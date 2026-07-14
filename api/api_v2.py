@@ -28,7 +28,13 @@ from mysql.connector.pooling import MySQLConnectionPool
 from db_migrations import run_migrations
 from mysql_cache import MySQLCacheStore
 from ops_health import check_ingestion_lag, check_311_feed_balance, validate_production_config
-from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
+from request_metrics import (
+    get_llm_calls,
+    get_request_id,
+    log_chat_metrics,
+    reset_request_metrics,
+    resolve_execution_model_name,
+)
 from rate_limit import RateLimiter
 from security import (
     generate_token,
@@ -80,6 +86,7 @@ from unified_chatbot import (  # noqa: E402
     build_retrieval_cache_from_result,
     build_small_talk_result,
     create_empty_cache,
+    increment_llm_call_counter,
     is_small_talk,
     apply_post_stream_fallback,
     resolve_effective_question,
@@ -227,7 +234,10 @@ def _iter_stream_agent_with_keepalive(
                     for item in stream_agent_response(message, conversation_history, thread_state):
                         event_queue.put(item)
         except Exception as exc:  # noqa: BLE001
+            event_queue.put(("_execution_metrics", {"llm_calls": get_llm_calls()}))
             event_queue.put(exc)
+        else:
+            event_queue.put(("_execution_metrics", {"llm_calls": get_llm_calls()}))
         finally:
             event_queue.put(done)
 
@@ -2890,7 +2900,10 @@ def post_conversation_message(thread_id: str):
             content=answer,
             response_mode=mode,
             sources=sources,
-            model_name=agent_result.get("model_name", os.getenv("GEMINI_MODEL", "")),
+            model_name=resolve_execution_model_name(
+                agent_result,
+                configured_model=os.getenv("GEMINI_MODEL", ""),
+            ),
             message_meta=assistant_meta,
         )
 
@@ -3016,6 +3029,7 @@ def post_conversation_message_stream(thread_id: str):
         cached_sources: List[Dict[str, str]] = []
         selected_sources: List[Dict[str, str]] = []
         resolved_entity: Optional[Dict[str, str]] = None
+        execution_metadata: Dict[str, Any] = {}
 
         try:
             yield ": keepalive\n\n"
@@ -3064,6 +3078,12 @@ def post_conversation_message_stream(thread_id: str):
                         mode = data.get("mode", "hybrid")
                         result_payload = data.get("result", {})
                         next_cache = data.get("retrieval_cache", thread_state)
+                        if "model_name" in data:
+                            execution_metadata["model_name"] = data.get("model_name")
+                    elif kind == "_execution_metrics":
+                        llm_calls = max(0, int(data.get("llm_calls", 0)))
+                        execution_metadata["llm_calls"] = llm_calls
+                        increment_llm_call_counter(llm_calls)
                 if not full_answer and streamed_text:
                     full_answer = streamed_text
             if not full_answer and not cache_hit:
@@ -3127,7 +3147,19 @@ def post_conversation_message_stream(thread_id: str):
             assistant_message_row = _insert_message(
                 conn2, thread_id=thread_id, user_id=user_id, role="assistant",
                 content=full_answer, response_mode=mode, sources=sources,
-                model_name=(None if selected_request else os.getenv("GEMINI_MODEL", "")),
+                model_name=resolve_execution_model_name(
+                    (
+                        selected
+                        if selected_request
+                        else execution_metadata
+                    ),
+                    configured_model=os.getenv("GEMINI_MODEL", ""),
+                    llm_calls=(
+                        0
+                        if selected_request or cache_hit
+                        else execution_metadata.get("llm_calls", get_llm_calls())
+                    ),
+                ),
                 message_meta=assistant_meta,
             )
             if existing_title == "New conversation" and is_first_message:
