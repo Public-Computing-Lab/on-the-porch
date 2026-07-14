@@ -63,6 +63,15 @@ class ReasonCode(str, Enum):
     CLASSIFIER_FAILURE = "classifier_failure"
 
 
+class EventProperty(str, Enum):
+    LOCATION = "location"
+    DATE_TIME = "date_time"
+    COST = "cost"
+    REGISTRATION_CONTACT = "registration_contact"
+    ORGANIZER = "organizer"
+    DETAILS = "details"
+
+
 _CIVIC_TOPICS = frozenset(
     {
         "311",
@@ -180,6 +189,7 @@ class RelationshipContext:
     previous_topic: Optional[str]
     previous_route: Optional[str]
     previous_result_exists: bool
+    authoritative_active_event: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -192,6 +202,7 @@ class RelationshipContext:
             "previous_topic": self.previous_topic,
             "previous_route": self.previous_route,
             "previous_result_exists": self.previous_result_exists,
+            "authoritative_active_event": self.authoritative_active_event,
         }
 
     def to_llm_dict(self) -> Dict[str, Any]:
@@ -213,6 +224,7 @@ class RelationshipContext:
             "previous_topic": self.previous_topic,
             "previous_route": self.previous_route,
             "previous_result_exists": self.previous_result_exists,
+            "authoritative_active_event": self.authoritative_active_event,
         }
 
 
@@ -300,6 +312,7 @@ def build_relationship_context(
     history_rows: Sequence[Mapping[str, Any]],
     *,
     topic_detector: Optional[Callable[[str], Optional[str]]] = None,
+    authoritative_active_event: bool = False,
 ) -> RelationshipContext:
     """Build a compact context without cache rows, source text, or client metadata."""
     detect = topic_detector or _topic_detector
@@ -346,6 +359,7 @@ def build_relationship_context(
         previous_topic=previous_topic,
         previous_route=previous_route,
         previous_result_exists=previous_result_exists,
+        authoritative_active_event=bool(authoritative_active_event),
     )
 
 
@@ -390,10 +404,31 @@ def conservative_fallback(reason: ReasonCode = ReasonCode.AMBIGUOUS_CONTEXT) -> 
     )
 
 
-_EVENT_PROPERTY_PATTERN = re.compile(
-    r"^(?:where is it|when does it start|what time does it start|is it free|"
-    r"how do i register|who is organizing it|who organizes it|tell me more about it)\??$",
-    flags=re.IGNORECASE,
+_EVENT_PROPERTY_PATTERNS = (
+    (EventProperty.LOCATION, re.compile(
+        r"^(?:where is it|is it virtual|is it online|where does it take place)\??$",
+        flags=re.IGNORECASE,
+    )),
+    (EventProperty.DATE_TIME, re.compile(
+        r"^(?:when is it|when does it start|what time does it start|when does it end)\??$",
+        flags=re.IGNORECASE,
+    )),
+    (EventProperty.COST, re.compile(
+        r"^(?:is it free|how much does it cost)\??$",
+        flags=re.IGNORECASE,
+    )),
+    (EventProperty.REGISTRATION_CONTACT, re.compile(
+        r"^(?:how do i register|who do i contact|do i need to sign up)\??$",
+        flags=re.IGNORECASE,
+    )),
+    (EventProperty.ORGANIZER, re.compile(
+        r"^(?:who is organizing it|who organizes it|who is hosting it)\??$",
+        flags=re.IGNORECASE,
+    )),
+    (EventProperty.DETAILS, re.compile(
+        r"^(?:tell me more about it)\??$",
+        flags=re.IGNORECASE,
+    )),
 )
 _CORRECTION_PATTERN = re.compile(
     r"^(?:no[, ]+i mean|i meant|not that one|no[, ]+not|actually[, ]+i mean)\b",
@@ -420,6 +455,14 @@ _REFERENTIAL_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _WHY_PATTERN = re.compile(r"^(?:why|why is that|how come)\??$", flags=re.IGNORECASE)
+
+
+def detect_event_property(message: str) -> Optional[EventProperty]:
+    normalized = _bounded_text(message, 200).rstrip(" .!?")
+    for property_name, pattern in _EVENT_PROPERTY_PATTERNS:
+        if pattern.fullmatch(normalized):
+            return property_name
+    return None
 
 
 def classify_with_rules(context: RelationshipContext) -> Optional[RelationshipDecision]:
@@ -454,11 +497,14 @@ def classify_with_rules(context: RelationshipContext) -> Optional[RelationshipDe
         )
 
     active_event = (
-        context.resolved_entity is not None
-        and context.resolved_entity.entity_type == "event"
-        and context.previous_topic in (None, "events")
+        context.authoritative_active_event
+        or (
+            context.resolved_entity is not None
+            and context.resolved_entity.entity_type == "event"
+            and context.previous_topic in (None, "events")
+        )
     )
-    if _EVENT_PROPERTY_PATTERN.fullmatch(message):
+    if detect_event_property(message) is not None:
         if active_event:
             return _decision(
                 ConversationRelationship.FOLLOW_UP,
@@ -633,6 +679,7 @@ def classify_shadow_relationship(
     llm_fallback_enabled: bool = False,
     llm_classifier: Optional[Callable[[str, float], str]] = None,
     topic_detector: Optional[Callable[[str], Optional[str]]] = None,
+    authoritative_active_event: bool = False,
 ) -> Optional[RelationshipDecision]:
     if not enabled:
         return None
@@ -640,6 +687,7 @@ def classify_shadow_relationship(
         current_message,
         history_rows,
         topic_detector=topic_detector,
+        authoritative_active_event=authoritative_active_event,
     )
     return classify_relationship(
         context,

@@ -13,10 +13,11 @@ sys.path.insert(0, str(ROOT / "on_the_porch"))
 sys.path.insert(0, str(ROOT / "on_the_porch" / "rag stuff"))
 
 import plan_executor  # noqa: E402
+import plan_builder  # noqa: E402
 import request_budget  # noqa: E402
 import retrieval  # noqa: E402
 import unified_chatbot  # noqa: E402
-from execution_plan import ExecutionPlan, PlanPart  # noqa: E402
+from execution_plan import ExecutionPlan, FactBundle, FactPart, PlanPart  # noqa: E402
 from semantic_cache import SemanticResponseCache  # noqa: E402
 
 
@@ -139,6 +140,61 @@ def test_hybrid_parts_return_partial_without_waiting() -> None:
         _clear_budget()
 
 
+def test_pipeline_preserves_degraded_signal_after_legacy_conversion() -> None:
+    plan = ExecutionPlan(
+        question="What did residents discuss at the community meeting?",
+        parts=[
+            PlanPart(
+                path="rag",
+                intent="transcript",
+                topic="community",
+                sub_question="What did residents discuss at the community meeting?",
+            ),
+        ],
+        routing_mode="rag",
+    )
+    facts = FactBundle(
+        question=plan.question,
+        parts=[
+            FactPart(
+                path="rag",
+                intent="transcript",
+                topic="community",
+                sub_question=plan.question,
+                canonical_facts="City-service information is temporarily unavailable.",
+                error="request_budget_exhausted",
+            ),
+        ],
+    )
+    old_enabled = plan_builder.is_execution_pipeline_enabled
+    old_build = plan_builder.build_execution_plan
+    old_execute = plan_executor.execute_plan
+    old_fallback = unified_chatbot._apply_default_fallback_if_needed
+    try:
+        plan_builder.is_execution_pipeline_enabled = lambda: True  # type: ignore[assignment]
+        plan_builder.build_execution_plan = lambda *_args, **_kwargs: plan  # type: ignore[assignment]
+        plan_executor.execute_plan = lambda *_args, **_kwargs: facts  # type: ignore[assignment]
+        unified_chatbot._apply_default_fallback_if_needed = (  # type: ignore[assignment]
+            lambda _question, answer: answer
+        )
+        _reset_budget(10.0)
+        pipeline = unified_chatbot.run_execution_pipeline(
+            plan.question,
+            routing_plan={"mode": "rag", "intent": "transcript"},
+        )
+        assert pipeline is not None
+        mode, result, metrics = pipeline
+        assert mode == "rag"
+        assert "error" not in result
+        assert metrics["execution_degraded"] is True
+    finally:
+        plan_builder.is_execution_pipeline_enabled = old_enabled  # type: ignore[assignment]
+        plan_builder.build_execution_plan = old_build  # type: ignore[assignment]
+        plan_executor.execute_plan = old_execute  # type: ignore[assignment]
+        unified_chatbot._apply_default_fallback_if_needed = old_fallback  # type: ignore[assignment]
+        _clear_budget()
+
+
 class _SlowGemini:
     def __init__(self) -> None:
         self.calls = 0
@@ -221,6 +277,7 @@ def main() -> int:
         test_rag_retrieval_task_timeout_returns_empty,
         test_plan_executor_returns_completed_parts_without_waiting,
         test_hybrid_parts_return_partial_without_waiting,
+        test_pipeline_preserves_degraded_signal_after_legacy_conversion,
         test_slow_gemini_embedding_degrades_before_vector_search,
         test_semantic_cache_embedding_timeout_uses_same_budget_path,
     ]

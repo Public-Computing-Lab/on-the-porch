@@ -100,17 +100,34 @@ from unified_chatbot import (  # noqa: E402
 from event_context import (  # noqa: E402
     EventContextValidationError,
     EventResolution,
+    MISSING_EVENT_REFERENCE_MESSAGE,
     ValidatedEventContext,
+    build_active_event_response,
     build_selected_event_response,
+    resolve_event_by_id,
     resolve_event_context,
     validate_event_ui_context,
 )
 from conversation_relationship import (  # noqa: E402
+    ConversationRelationship,
+    EventProperty,
     ReasonCode,
     RelationshipDecision,
     classify_shadow_relationship,
     conservative_fallback,
+    detect_event_property,
 )
+from conversation_state import (  # noqa: E402
+    ConversationState,
+    ConversationStateError,
+    ProposedTransition,
+    ThreadStateEnvelope,
+    load_thread_state,
+    merge_for_commit,
+    response_allows_state_transition,
+    serialize_thread_state,
+)
+from intent_router import detect_civic_topic  # noqa: E402
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
     build_semantic_cache_backend,
@@ -1611,7 +1628,15 @@ def _create_thread(conn, user_id: str, title: Optional[str]) -> Dict[str, Any]:
             INSERT INTO conversation_threads (id, user_id, title, thread_state_json, last_message_at)
             VALUES (%s, %s, %s, %s, %s)
             """,
-            (thread_id, user_id, final_title, json_dumps(create_empty_cache()), utcnow()),
+            (
+                thread_id,
+                user_id,
+                final_title,
+                serialize_thread_state(
+                    ThreadStateEnvelope(retrieval_cache=create_empty_cache())
+                ),
+                utcnow(),
+            ),
         )
     finally:
         cursor.close()
@@ -1733,13 +1758,102 @@ def _insert_message(
 
 
 
-def _update_thread_state(conn, thread_id: str, thread_state: Dict[str, Any]) -> None:
-    cursor = conn.cursor()
+def _load_thread_state_envelope(raw: Any) -> ThreadStateEnvelope:
+    try:
+        return load_thread_state(raw, empty_retrieval_cache=create_empty_cache())
+    except ConversationStateError as exc:
+        print(
+            json_dumps({
+                "event": "conversation_state_load_failed",
+                "reason": exc.__class__.__name__,
+            }),
+            file=sys.stderr,
+            flush=True,
+        )
+        return ThreadStateEnvelope(retrieval_cache=create_empty_cache())
+
+
+def _commit_thread_state(
+    conn,
+    *,
+    thread_id: str,
+    user_id: str,
+    expected_envelope: ThreadStateEnvelope,
+    next_retrieval_cache: Dict[str, Any],
+    transition: ProposedTransition,
+    last_substantive_message_id: str,
+) -> Dict[str, Any]:
+    """Commit cache/state after message inserts without overwriting newer state."""
+    cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
-            "UPDATE conversation_threads SET thread_state_json = %s, last_message_at = %s WHERE id = %s",
-            (json_dumps(thread_state), utcnow(), thread_id),
+            "SELECT thread_state_json FROM conversation_threads "
+            "WHERE id = %s AND user_id = %s AND deleted_at IS NULL FOR UPDATE",
+            (thread_id, user_id),
         )
+        row = cursor.fetchone()
+        if not row:
+            raise LookupError("conversation thread no longer exists")
+
+        current = _load_thread_state_envelope(row.get("thread_state_json"))
+        current_state = current.conversation_state
+        if current_state.state_version != transition.expected_state_version:
+            print(
+                json_dumps({
+                    "event": "conversation_state_version_conflict",
+                    "thread_id": thread_id,
+                    "expected_version": transition.expected_state_version,
+                    "current_version": current_state.state_version,
+                    "transition": transition.action.value,
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            cursor.execute(
+                "UPDATE conversation_threads SET last_message_at = %s "
+                "WHERE id = %s AND user_id = %s",
+                (utcnow(), thread_id, user_id),
+            )
+            return {
+                "transition_applied": False,
+                "cache_update_applied": False,
+                "state": current_state,
+                "version_conflict": True,
+            }
+
+        merged = merge_for_commit(
+            current,
+            expected_envelope,
+            next_retrieval_cache=next_retrieval_cache,
+            transition=transition,
+            last_substantive_message_id=last_substantive_message_id,
+        )
+        if not merged.cache_update_applied:
+            print(
+                json_dumps({
+                    "event": "retrieval_cache_version_conflict",
+                    "thread_id": thread_id,
+                    "transition": transition.action.value,
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+        cursor.execute(
+            "UPDATE conversation_threads SET thread_state_json = %s, last_message_at = %s "
+            "WHERE id = %s AND user_id = %s",
+            (
+                serialize_thread_state(merged.envelope),
+                utcnow(),
+                thread_id,
+                user_id,
+            ),
+        )
+        return {
+            "transition_applied": merged.transition_applied,
+            "cache_update_applied": merged.cache_update_applied,
+            "state": merged.envelope.conversation_state,
+            "version_conflict": False,
+        }
     finally:
         cursor.close()
 
@@ -2078,6 +2192,7 @@ def _execute_agent_response(
                 "sources": cached.get("sources", []),
                 "result": cached.get("agent_result", {"answer": cached["answer"]}),
                 "retrieval_cache": cache,
+                "execution_degraded": bool(cached.get("execution_degraded")),
             }
             _log_agent_metrics(
                 mode=out["mode"],
@@ -2129,7 +2244,11 @@ def _execute_agent_response(
         answer = result.get("answer", "I couldn't find an answer to your question.")
         next_cache = build_retrieval_cache_from_result(mode, message, result)
         sources = extract_sources(mode, result)
-        if semantic_eligible and _is_cacheable_semantic_answer(answer):
+        if (
+            semantic_eligible
+            and not pipeline_metrics.get("execution_degraded")
+            and _is_cacheable_semantic_answer(answer)
+        ):
             _semantic_cache.put(
                 message,
                 {
@@ -2137,6 +2256,7 @@ def _execute_agent_response(
                     "mode": mode,
                     "sources": sources,
                     "agent_result": result,
+                    "execution_degraded": False,
                 },
             )
         _log_agent_metrics(
@@ -2159,6 +2279,7 @@ def _execute_agent_response(
             "sources": sources,
             "result": result,
             "retrieval_cache": next_cache,
+            "execution_degraded": bool(pipeline_metrics.get("execution_degraded")),
         }
 
     if mode == "sql":
@@ -2277,6 +2398,135 @@ def _selected_event_agent_result(
     }
 
 
+def _active_event_agent_result(
+    message: str,
+    resolution: EventResolution,
+    property_name: EventProperty,
+    retrieval_cache: Dict[str, Any],
+) -> Dict[str, Any]:
+    selected = build_active_event_response(
+        message,
+        resolution,
+        property_name=property_name.value,
+    )
+    return {
+        "answer": selected.answer,
+        "mode": selected.mode,
+        "sources": selected.sources,
+        "result": selected.result,
+        "retrieval_cache": retrieval_cache,
+        "resolved_entity": selected.resolved_entity if resolution.event else None,
+        "model_name": None,
+    }
+
+
+def _missing_event_reference_agent_result(retrieval_cache: Dict[str, Any]) -> Dict[str, Any]:
+    answer = MISSING_EVENT_REFERENCE_MESSAGE
+    return {
+        "answer": answer,
+        "mode": "clarification",
+        "sources": [],
+        "result": {"answer": answer},
+        "retrieval_cache": retrieval_cache,
+        "model_name": None,
+    }
+
+
+def _resolve_active_event_request(
+    conn,
+    message: str,
+    *,
+    state: ConversationState,
+    relationship: Optional[RelationshipDecision],
+    retrieval_cache: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    property_name = detect_event_property(message)
+    if property_name is None or relationship is None:
+        return None, False
+    if relationship.reason_code is ReasonCode.MISSING_REFERENCE:
+        return _missing_event_reference_agent_result(retrieval_cache), False
+    if relationship.reason_code is not ReasonCode.ACTIVE_EVENT_PROPERTY_QUESTION:
+        return None, False
+    active_entity = state.active_entity
+    if active_entity is None or active_entity.entity_type != "event":
+        return _missing_event_reference_agent_result(retrieval_cache), False
+    resolution = resolve_event_by_id(conn, active_entity.entity_id)
+    return (
+        _active_event_agent_result(
+            message,
+            resolution,
+            property_name,
+            retrieval_cache,
+        ),
+        not bool(resolution.event),
+    )
+
+
+def _typed_authoritative_event_id(agent_result: Dict[str, Any]) -> Optional[str]:
+    if agent_result.get("mode") != "sql":
+        return None
+    result = agent_result.get("result")
+    if not isinstance(result, dict):
+        return None
+    if result.get("prepared_intent") != "event_by_name" or not result.get("db_backed"):
+        return None
+    sql_result = result.get("result")
+    rows = sql_result.get("rows") if isinstance(sql_result, dict) else None
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    try:
+        event_id = int(rows[0].get("id"))
+    except (TypeError, ValueError):
+        return None
+    return str(event_id) if event_id > 0 else None
+
+
+def _propose_conversation_transition(
+    *,
+    state: ConversationState,
+    relationship: Optional[RelationshipDecision],
+    message: str,
+    mode: str,
+    agent_result: Dict[str, Any],
+    selected_resolution: Optional[EventResolution],
+    stale_active_event: bool,
+) -> ProposedTransition:
+    if selected_resolution is not None and selected_resolution.event and selected_resolution.status in {
+        "exact_id", "fallback_title_date",
+    }:
+        return ProposedTransition.activate_event(
+            state,
+            selected_resolution.event["id"],
+            previous_route="sql",
+        )
+    if stale_active_event:
+        return ProposedTransition.clear_event(state, previous_route="sql")
+    if (
+        relationship is not None
+        and relationship.reason_code is ReasonCode.ACTIVE_EVENT_PROPERTY_QUESTION
+    ):
+        return ProposedTransition.preserve(state)
+    typed_event_id = _typed_authoritative_event_id(agent_result)
+    if typed_event_id is not None:
+        return ProposedTransition.activate_event(state, typed_event_id, previous_route="sql")
+    current_topic = detect_civic_topic(message)
+    should_clear = (
+        state.active_entity is not None
+        and current_topic not in (None, "events")
+        and relationship is not None
+        and (
+            relationship.relationship is ConversationRelationship.NEW_TOPIC
+            or (
+                relationship.relationship is ConversationRelationship.STANDALONE
+                and relationship.reason_code is ReasonCode.SELF_CONTAINED_CIVIC_QUESTION
+            )
+        )
+    )
+    if should_clear:
+        return ProposedTransition.clear_event(state, previous_route=mode)
+    return ProposedTransition.preserve(state)
+
+
 def _execute_agent_response_with_event_context(
     message: str,
     *,
@@ -2338,6 +2588,7 @@ def _classify_relationship_shadow(
     history_rows: List[Dict[str, Any]],
     *,
     thread_id: str,
+    authoritative_active_event: bool = False,
 ) -> Optional[RelationshipDecision]:
     if not Config.CONVERSATION_RELATIONSHIP_SHADOW_ENABLED:
         return None
@@ -2352,6 +2603,7 @@ def _classify_relationship_shadow(
                 if Config.CONVERSATION_RELATIONSHIP_LLM_FALLBACK_ENABLED
                 else None
             ),
+            authoritative_active_event=authoritative_active_event,
         )
     except Exception as exc:  # noqa: BLE001
         _log_exception("Conversation relationship shadow classification failed", exc)
@@ -2375,12 +2627,15 @@ def _user_message_metadata(
     *,
     event_context: Optional[ValidatedEventContext],
     relationship: Optional[RelationshipDecision],
+    active_event_behavior_applied: bool = False,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
         metadata.update(event_context.user_message_metadata())
     if relationship is not None:
         metadata["conversation_relationship"] = relationship.to_dict()
+    if active_event_behavior_applied:
+        metadata["active_event_followup_applied"] = True
     return metadata or None
 
 
@@ -2924,6 +3179,7 @@ def post_conversation_message(thread_id: str):
 
     conn = None
     try:
+        reset_request_metrics()
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
@@ -2932,30 +3188,64 @@ def post_conversation_message(thread_id: str):
 
         history_rows = _fetch_recent_history(conn, thread_id, limit=20)
         conversation_history = _conversation_history_from_rows(history_rows)
-        thread_state = json_loads(thread.get("thread_state_json"), create_empty_cache())
-        conn.close()
-        conn = None
-
+        state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
+        retrieval_cache = state_envelope.retrieval_cache
+        conversation_state = state_envelope.conversation_state
         relationship = _classify_relationship_shadow(
             message,
             history_rows,
             thread_id=thread_id,
+            authoritative_active_event=conversation_state.active_entity is not None,
         )
+        active_event_result = None
+        stale_active_event = False
+        if event_resolution is None:
+            active_event_result, stale_active_event = _resolve_active_event_request(
+                conn,
+                message,
+                state=conversation_state,
+                relationship=relationship,
+                retrieval_cache=retrieval_cache,
+            )
+        conn.close()
+        conn = None
 
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
-        agent_result = _execute_agent_response_with_event_context(
-            message,
-            conversation_history=conversation_history,
-            retrieval_cache=thread_state,
-            event_resolution=event_resolution,
-            thread_id=thread_id,
-        )
+        if active_event_result is not None:
+            agent_result = active_event_result
+            _log_agent_metrics(
+                mode=agent_result["mode"],
+                thread_id=thread_id,
+                streaming=False,
+                extra={"active_event_followup": True},
+            )
+        else:
+            agent_result = _execute_agent_response_with_event_context(
+                message,
+                conversation_history=conversation_history,
+                retrieval_cache=retrieval_cache,
+                event_resolution=event_resolution,
+                thread_id=thread_id,
+            )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
         resolved_entity = agent_result.get("resolved_entity")
+        transition = (
+            _propose_conversation_transition(
+                state=conversation_state,
+                relationship=relationship,
+                message=message,
+                mode=mode,
+                agent_result=agent_result,
+                selected_resolution=event_resolution,
+                stale_active_event=stale_active_event,
+            )
+            if response_allows_state_transition(agent_result)
+            else ProposedTransition.preserve(conversation_state)
+        )
 
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
@@ -2971,6 +3261,7 @@ def post_conversation_message(thread_id: str):
             message_meta=_user_message_metadata(
                 event_context=event_context,
                 relationship=relationship,
+                active_event_behavior_applied=active_event_result is not None,
             ),
         )
 
@@ -2992,7 +3283,15 @@ def post_conversation_message(thread_id: str):
 
         if thread["title"] == "New conversation" and len(history_rows) == 0:
             _update_thread(conn, thread_id, title=summarize_thread_title(message))
-        _update_thread_state(conn, thread_id, next_cache)
+        _commit_thread_state(
+            conn,
+            thread_id=thread_id,
+            user_id=g.current_user_row["id"],
+            expected_envelope=state_envelope,
+            next_retrieval_cache=next_cache,
+            transition=transition,
+            last_substantive_message_id=assistant_message_row["id"],
+        )
 
         log_id = log_interaction(
             session_id=g.session_row["session_id"],
@@ -3071,6 +3370,7 @@ def post_conversation_message_stream(thread_id: str):
     # Load context up front, then release the DB before the long LLM work.
     conn = None
     try:
+        reset_request_metrics()
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
@@ -3078,7 +3378,25 @@ def post_conversation_message_stream(thread_id: str):
         event_resolution = _resolve_validated_event_context(conn, event_context)
         history_rows = _fetch_recent_history(conn, thread_id, limit=20)
         conversation_history = _conversation_history_from_rows(history_rows)
-        thread_state = json_loads(thread.get("thread_state_json"), create_empty_cache())
+        state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
+        retrieval_cache = state_envelope.retrieval_cache
+        conversation_state = state_envelope.conversation_state
+        relationship = _classify_relationship_shadow(
+            message,
+            history_rows,
+            thread_id=thread_id,
+            authoritative_active_event=conversation_state.active_entity is not None,
+        )
+        active_event_result = None
+        stale_active_event = False
+        if event_resolution is None:
+            active_event_result, stale_active_event = _resolve_active_event_request(
+                conn,
+                message,
+                state=conversation_state,
+                relationship=relationship,
+                retrieval_cache=retrieval_cache,
+            )
     except Exception as exc:
         _log_exception("Error preparing streamed message", exc)
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
@@ -3092,11 +3410,6 @@ def post_conversation_message_stream(thread_id: str):
     session_id = g.session_row["session_id"]
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
-    relationship = _classify_relationship_shadow(
-        message,
-        history_rows,
-        thread_id=thread_id,
-    )
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
@@ -3106,11 +3419,13 @@ def post_conversation_message_stream(thread_id: str):
         full_answer = ""
         mode = "hybrid"
         result_payload: Dict[str, Any] = {}
-        next_cache = thread_state
+        next_cache = retrieval_cache
         selected_request = event_resolution is not None
+        active_event_request = active_event_result is not None
+        deterministic_request = selected_request or active_event_request
         semantic_eligible = (
             False
-            if selected_request
+            if deterministic_request
             else _semantic_cache_eligible(message, conversation_history)
         )
         cache_hit = False
@@ -3118,27 +3433,32 @@ def post_conversation_message_stream(thread_id: str):
         selected_sources: List[Dict[str, str]] = []
         resolved_entity: Optional[Dict[str, str]] = None
         execution_metadata: Dict[str, Any] = {}
+        deterministic_result: Optional[Dict[str, Any]] = None
+        generation_degraded = False
 
         try:
             yield ": keepalive\n\n"
-            if selected_request:
-                selected = _selected_event_agent_result(
+            if active_event_request:
+                deterministic_result = active_event_result
+            elif selected_request:
+                deterministic_result = _selected_event_agent_result(
                     message,
                     event_resolution,
-                    thread_state,
+                    retrieval_cache,
                 )
-                full_answer = selected["answer"]
-                mode = selected["mode"]
-                result_payload = selected["result"]
-                next_cache = selected["retrieval_cache"]
-                selected_sources = selected["sources"]
-                resolved_entity = selected["resolved_entity"]
+            if deterministic_result is not None:
+                full_answer = deterministic_result["answer"]
+                mode = deterministic_result["mode"]
+                result_payload = deterministic_result["result"]
+                next_cache = deterministic_result["retrieval_cache"]
+                selected_sources = deterministic_result["sources"]
+                resolved_entity = deterministic_result.get("resolved_entity")
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
                 cached = _semantic_cache.get(message) if semantic_eligible else None
             if (
-                not selected_request
+                not deterministic_request
                 and cached
                 and _is_cacheable_semantic_answer(cached.get("answer", ""))
             ):
@@ -3147,12 +3467,15 @@ def post_conversation_message_stream(thread_id: str):
                 mode = cached.get("mode", "semantic_cache")
                 result_payload = cached.get("agent_result", {"answer": full_answer})
                 cached_sources = cached.get("sources", [])
+                execution_metadata["execution_degraded"] = bool(
+                    cached.get("execution_degraded")
+                )
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
-            elif not selected_request:
+            elif not deterministic_request:
                 streamed_text = ""
                 for item in _iter_stream_agent_with_keepalive(
-                    message, conversation_history, thread_state,
+                    message, conversation_history, retrieval_cache,
                 ):
                     if item is None:
                         yield ": keepalive\n\n"
@@ -3165,7 +3488,10 @@ def post_conversation_message_stream(thread_id: str):
                         full_answer = data.get("answer", streamed_text)
                         mode = data.get("mode", "hybrid")
                         result_payload = data.get("result", {})
-                        next_cache = data.get("retrieval_cache", thread_state)
+                        next_cache = data.get("retrieval_cache", retrieval_cache)
+                        pipeline_metrics = data.get("pipeline_metrics")
+                        if isinstance(pipeline_metrics, dict):
+                            execution_metadata.update(pipeline_metrics)
                         if "model_name" in data:
                             execution_metadata["model_name"] = data.get("model_name")
                     elif kind == "_execution_metrics":
@@ -3180,12 +3506,13 @@ def post_conversation_message_stream(thread_id: str):
         except Exception as exc:  # noqa: BLE001
             if full_answer.strip():
                 _log_exception("Stream ended with partial answer after error", exc)
+                generation_degraded = True
             else:
                 _log_exception("Error during streamed generation", exc)
                 yield _sse({"type": "error", "error": _stream_generation_error(exc)})
                 return
 
-        if full_answer and not selected_request:
+        if full_answer and not deterministic_request:
             enriched = apply_post_stream_fallback(
                 message,
                 full_answer,
@@ -3199,6 +3526,7 @@ def post_conversation_message_stream(thread_id: str):
             if (
                 semantic_eligible
                 and mode != "semantic_cache"
+                and not execution_metadata.get("execution_degraded")
                 and _is_cacheable_semantic_answer(full_answer)
             ):
                 sources_for_cache = extract_sources(mode, result_payload)
@@ -3209,12 +3537,13 @@ def post_conversation_message_stream(thread_id: str):
                         "mode": mode,
                         "sources": sources_for_cache,
                         "agent_result": result_payload,
+                        "execution_degraded": False,
                     },
                 )
 
         conn2 = None
         try:
-            if selected_request:
+            if deterministic_request:
                 sources = selected_sources
             else:
                 sources = (
@@ -3232,6 +3561,7 @@ def post_conversation_message_stream(thread_id: str):
                 message_meta=_user_message_metadata(
                     event_context=event_context,
                     relationship=relationship,
+                    active_event_behavior_applied=active_event_request,
                 ),
             )
             assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
@@ -3240,14 +3570,14 @@ def post_conversation_message_stream(thread_id: str):
                 content=full_answer, response_mode=mode, sources=sources,
                 model_name=resolve_execution_model_name(
                     (
-                        selected
-                        if selected_request
+                        deterministic_result
+                        if deterministic_request
                         else execution_metadata
                     ),
                     configured_model=os.getenv("GEMINI_MODEL", ""),
                     llm_calls=(
                         0
-                        if selected_request or cache_hit
+                        if deterministic_request or cache_hit
                         else execution_metadata.get("llm_calls", get_llm_calls())
                     ),
                 ),
@@ -3255,7 +3585,36 @@ def post_conversation_message_stream(thread_id: str):
             )
             if existing_title == "New conversation" and is_first_message:
                 _update_thread(conn2, thread_id, title=summarize_thread_title(message))
-            _update_thread_state(conn2, thread_id, next_cache)
+            transition_result = deterministic_result or {
+                "answer": full_answer,
+                "mode": mode,
+                "sources": sources,
+                "result": result_payload,
+                "retrieval_cache": next_cache,
+                "execution_degraded": bool(execution_metadata.get("execution_degraded")),
+            }
+            transition = (
+                ProposedTransition.preserve(conversation_state)
+                if generation_degraded or not response_allows_state_transition(transition_result)
+                else _propose_conversation_transition(
+                    state=conversation_state,
+                    relationship=relationship,
+                    message=message,
+                    mode=mode,
+                    agent_result=transition_result,
+                    selected_resolution=event_resolution,
+                    stale_active_event=stale_active_event,
+                )
+            )
+            _commit_thread_state(
+                conn2,
+                thread_id=thread_id,
+                user_id=user_id,
+                expected_envelope=state_envelope,
+                next_retrieval_cache=next_cache,
+                transition=transition,
+                last_substantive_message_id=assistant_message_row["id"],
+            )
             log_id = log_interaction(
                 session_id=session_id, client_query=message, app_response=full_answer,
                 mode=mode, user_id=user_id, thread_id=thread_id,
@@ -3285,7 +3644,7 @@ def post_conversation_message_stream(thread_id: str):
             # Post-final Boston.gov correction (bounded wait; does not block first token).
             if (
                 full_answer
-                and not selected_request
+                and not deterministic_request
                 and Config.BOSTON_GOV_ASYNC_ENABLED
                 and not Config.BOSTON_GOV_BLOCKING
                 and should_apply_boston_gov_fallback(message, full_answer, mode)
@@ -3314,10 +3673,10 @@ def post_conversation_message_stream(thread_id: str):
                 thread_id=thread_id,
                 streaming=True,
                 extra=(
-                    {"ui_event_resolution": event_resolution.status}
-                    if event_resolution is not None
-                    else None
-                ),
+                        {"ui_event_resolution": event_resolution.status}
+                        if event_resolution is not None
+                        else ({"active_event_followup": True} if active_event_request else None)
+                    ),
             )
         except Exception as exc:  # noqa: BLE001
             if conn2:
