@@ -90,6 +90,14 @@ from unified_chatbot import (  # noqa: E402
     _try_311_advisory_response,
     _try_crime_clarification_response,
 )
+from event_context import (  # noqa: E402
+    EventContextValidationError,
+    EventResolution,
+    ValidatedEventContext,
+    build_selected_event_response,
+    resolve_event_context,
+    validate_event_ui_context,
+)
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
     build_semantic_cache_backend,
@@ -1498,7 +1506,7 @@ def _serialize_thread(row: Dict[str, Any]) -> Dict[str, Any]:
 
 def _serialize_message(row: Dict[str, Any]) -> Dict[str, Any]:
     meta = json_loads(row.get("message_meta_json"), {})
-    return {
+    serialized = {
         "id": row["id"],
         "thread_id": row["thread_id"],
         "role": row["role"],
@@ -1509,6 +1517,9 @@ def _serialize_message(row: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "log_id": meta.get("log_id"),
     }
+    if isinstance(meta.get("resolved_entity"), dict):
+        serialized["resolved_entity"] = meta["resolved_entity"]
+    return serialized
 
 
 
@@ -2208,6 +2219,87 @@ def _execute_agent_response(
     }
 
 
+def _validate_optional_event_context(
+    payload: Dict[str, Any],
+) -> Optional[ValidatedEventContext]:
+    if "ui_context" not in payload:
+        return None
+    return validate_event_ui_context(payload["ui_context"])
+
+
+def _resolve_validated_event_context(
+    conn,
+    context: Optional[ValidatedEventContext],
+) -> Optional[EventResolution]:
+    if context is None:
+        return None
+    resolution = resolve_event_context(conn, context)
+    if resolution.diagnostic_mismatches:
+        fields = ",".join(resolution.diagnostic_mismatches)
+        print(
+            "UI event context differs from the authoritative row: "
+            f"event_id={context.entity_id}, fields={fields}",
+            file=sys.stderr,
+        )
+    return resolution
+
+
+def _selected_event_agent_result(
+    message: str,
+    resolution: EventResolution,
+    retrieval_cache: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    selected = build_selected_event_response(message, resolution)
+    return {
+        "answer": selected.answer,
+        "mode": selected.mode,
+        "sources": selected.sources,
+        "result": selected.result,
+        "retrieval_cache": retrieval_cache or create_empty_cache(),
+        "resolved_entity": selected.resolved_entity,
+        "model_name": None,
+    }
+
+
+def _execute_agent_response_with_event_context(
+    message: str,
+    *,
+    conversation_history: List[Dict[str, str]],
+    retrieval_cache: Optional[Dict[str, Any]],
+    event_resolution: Optional[EventResolution],
+    thread_id: Optional[str] = None,
+    streaming: bool = False,
+) -> Dict[str, Any]:
+    if event_resolution is None:
+        return _execute_agent_response(
+            message,
+            conversation_history=conversation_history,
+            retrieval_cache=retrieval_cache,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+    reset_request_metrics()
+    result = _selected_event_agent_result(message, event_resolution, retrieval_cache)
+    _log_agent_metrics(
+        mode=result["mode"],
+        thread_id=thread_id,
+        streaming=streaming,
+        extra={"ui_event_resolution": event_resolution.status},
+    )
+    return result
+
+
+def _assistant_message_metadata(
+    *,
+    log_id: Optional[int] = None,
+    resolved_entity: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {"log_id": log_id}
+    if resolved_entity:
+        metadata["resolved_entity"] = resolved_entity
+    return metadata
+
+
 # =============================================================================
 # Request lifecycle
 # =============================================================================
@@ -2740,6 +2832,11 @@ def post_conversation_message(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
+    try:
+        event_context = _validate_optional_event_context(payload)
+    except EventContextValidationError as exc:
+        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     conn = None
     try:
@@ -2747,6 +2844,7 @@ def post_conversation_message(thread_id: str):
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
+        event_resolution = _resolve_validated_event_context(conn, event_context)
 
         history_rows = _fetch_recent_history(conn, thread_id, limit=20)
         conversation_history = _conversation_history_from_rows(history_rows)
@@ -2756,16 +2854,18 @@ def post_conversation_message(thread_id: str):
 
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
-        agent_result = _execute_agent_response(
+        agent_result = _execute_agent_response_with_event_context(
             message,
             conversation_history=conversation_history,
             retrieval_cache=thread_state,
+            event_resolution=event_resolution,
             thread_id=thread_id,
         )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
+        resolved_entity = agent_result.get("resolved_entity")
 
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
@@ -2778,8 +2878,10 @@ def post_conversation_message(thread_id: str):
             user_id=g.current_user_row["id"],
             role="user",
             content=message,
+            message_meta=(event_context.user_message_metadata() if event_context else None),
         )
 
+        assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
         assistant_message_row = _insert_message(
             conn,
             thread_id=thread_id,
@@ -2788,7 +2890,8 @@ def post_conversation_message(thread_id: str):
             content=answer,
             response_mode=mode,
             sources=sources,
-            model_name=os.getenv("GEMINI_MODEL", ""),
+            model_name=agent_result.get("model_name", os.getenv("GEMINI_MODEL", "")),
+            message_meta=assistant_meta,
         )
 
         if thread["title"] == "New conversation" and len(history_rows) == 0:
@@ -2804,19 +2907,24 @@ def post_conversation_message(thread_id: str):
             thread_id=thread_id,
             message_id=assistant_message_row["id"],
         )
-        _update_message_meta(conn, assistant_message_row["id"], {"log_id": log_id})
+        assistant_meta = _assistant_message_metadata(
+            log_id=log_id,
+            resolved_entity=resolved_entity,
+        )
+        _update_message_meta(conn, assistant_message_row["id"], assistant_meta)
         conn.commit()
 
         refreshed_thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
+        assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
 
-        return jsonify(
-            {
-                "thread": _serialize_thread(refreshed_thread),
-                "user_message": _serialize_message(user_message_row),
-                "assistant_message": _serialize_message(assistant_message_row),
-            }
-        ), 201
+        response_payload = {
+            "thread": _serialize_thread(refreshed_thread),
+            "user_message": _serialize_message(user_message_row),
+            "assistant_message": _serialize_message(assistant_message_row),
+        }
+        if resolved_entity:
+            response_payload["resolved_entity"] = resolved_entity
+        return jsonify(response_payload), 201
     except Exception as exc:
         if conn:
             conn.rollback()
@@ -2858,6 +2966,11 @@ def post_conversation_message_stream(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
+    try:
+        event_context = _validate_optional_event_context(payload)
+    except EventContextValidationError as exc:
+        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     # Load context up front, then release the DB before the long LLM work.
     conn = None
@@ -2866,6 +2979,7 @@ def post_conversation_message_stream(thread_id: str):
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
+        event_resolution = _resolve_validated_event_context(conn, event_context)
         history_rows = _fetch_recent_history(conn, thread_id, limit=20)
         conversation_history = _conversation_history_from_rows(history_rows)
         thread_state = json_loads(thread.get("thread_state_json"), create_empty_cache())
@@ -2892,14 +3006,40 @@ def post_conversation_message_stream(thread_id: str):
         mode = "hybrid"
         result_payload: Dict[str, Any] = {}
         next_cache = thread_state
-        semantic_eligible = _semantic_cache_eligible(message, conversation_history)
+        selected_request = event_resolution is not None
+        semantic_eligible = (
+            False
+            if selected_request
+            else _semantic_cache_eligible(message, conversation_history)
+        )
         cache_hit = False
         cached_sources: List[Dict[str, str]] = []
+        selected_sources: List[Dict[str, str]] = []
+        resolved_entity: Optional[Dict[str, str]] = None
 
         try:
             yield ": keepalive\n\n"
-            cached = _semantic_cache.get(message) if semantic_eligible else None
-            if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
+            if selected_request:
+                selected = _selected_event_agent_result(
+                    message,
+                    event_resolution,
+                    thread_state,
+                )
+                full_answer = selected["answer"]
+                mode = selected["mode"]
+                result_payload = selected["result"]
+                next_cache = selected["retrieval_cache"]
+                selected_sources = selected["sources"]
+                resolved_entity = selected["resolved_entity"]
+                for i, word in enumerate(full_answer.split()):
+                    yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
+            else:
+                cached = _semantic_cache.get(message) if semantic_eligible else None
+            if (
+                not selected_request
+                and cached
+                and _is_cacheable_semantic_answer(cached.get("answer", ""))
+            ):
                 cache_hit = True
                 full_answer = cached.get("answer", "")
                 mode = cached.get("mode", "semantic_cache")
@@ -2907,7 +3047,7 @@ def post_conversation_message_stream(thread_id: str):
                 cached_sources = cached.get("sources", [])
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
-            else:
+            elif not selected_request:
                 streamed_text = ""
                 for item in _iter_stream_agent_with_keepalive(
                     message, conversation_history, thread_state,
@@ -2937,7 +3077,7 @@ def post_conversation_message_stream(thread_id: str):
                 yield _sse({"type": "error", "error": _stream_generation_error(exc)})
                 return
 
-        if full_answer:
+        if full_answer and not selected_request:
             enriched = apply_post_stream_fallback(
                 message,
                 full_answer,
@@ -2966,11 +3106,14 @@ def post_conversation_message_stream(thread_id: str):
 
         conn2 = None
         try:
-            sources = (
-                cached_sources
-                if cache_hit and cached_sources
-                else extract_sources(mode, result_payload)
-            )
+            if selected_request:
+                sources = selected_sources
+            else:
+                sources = (
+                    cached_sources
+                    if cache_hit and cached_sources
+                    else extract_sources(mode, result_payload)
+                )
             conn2 = get_db_connection()
             thread2 = _fetch_thread(conn2, user_id, thread_id)
             if not thread2:
@@ -2978,11 +3121,14 @@ def post_conversation_message_stream(thread_id: str):
                 return
             user_message_row = _insert_message(
                 conn2, thread_id=thread_id, user_id=user_id, role="user", content=message,
+                message_meta=(event_context.user_message_metadata() if event_context else None),
             )
+            assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
             assistant_message_row = _insert_message(
                 conn2, thread_id=thread_id, user_id=user_id, role="assistant",
                 content=full_answer, response_mode=mode, sources=sources,
-                model_name=os.getenv("GEMINI_MODEL", ""),
+                model_name=(None if selected_request else os.getenv("GEMINI_MODEL", "")),
+                message_meta=assistant_meta,
             )
             if existing_title == "New conversation" and is_first_message:
                 _update_thread(conn2, thread_id, title=summarize_thread_title(message))
@@ -2992,11 +3138,15 @@ def post_conversation_message_stream(thread_id: str):
                 mode=mode, user_id=user_id, thread_id=thread_id,
                 message_id=assistant_message_row["id"],
             )
-            _update_message_meta(conn2, assistant_message_row["id"], {"log_id": log_id})
+            assistant_meta = _assistant_message_metadata(
+                log_id=log_id,
+                resolved_entity=resolved_entity,
+            )
+            _update_message_meta(conn2, assistant_message_row["id"], assistant_meta)
             conn2.commit()
             refreshed_thread = _fetch_thread(conn2, user_id, thread_id)
-            assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
-            yield _sse({
+            assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
+            final_payload = {
                 "type": "final",
                 "answer": full_answer,
                 "mode": mode,
@@ -3004,11 +3154,15 @@ def post_conversation_message_stream(thread_id: str):
                 "thread": _serialize_thread(refreshed_thread),
                 "user_message": _serialize_message(user_message_row),
                 "assistant_message": _serialize_message(assistant_message_row),
-            })
+            }
+            if resolved_entity:
+                final_payload["resolved_entity"] = resolved_entity
+            yield _sse(final_payload)
 
             # Post-final Boston.gov correction (bounded wait; does not block first token).
             if (
                 full_answer
+                and not selected_request
                 and Config.BOSTON_GOV_ASYNC_ENABLED
                 and not Config.BOSTON_GOV_BLOCKING
                 and should_apply_boston_gov_fallback(message, full_answer, mode)
@@ -3036,6 +3190,11 @@ def post_conversation_message_stream(thread_id: str):
                 cache_hit=cache_hit,
                 thread_id=thread_id,
                 streaming=True,
+                extra=(
+                    {"ui_event_resolution": event_resolution.status}
+                    if event_resolution is not None
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             if conn2:
@@ -3075,6 +3234,11 @@ def chat():
     message_error = _validate_message(message)
     if message_error:
         return message_error
+    try:
+        event_context = _validate_optional_event_context(data)
+    except EventContextValidationError as exc:
+        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     session_id = g.get("session_id") or str(uuid.uuid4())
     if g.get("api_key_authenticated") and "session_id" not in session:
@@ -3085,11 +3249,19 @@ def chat():
 
     retrieval_cache = _session_cache.get(session_id)
 
+    conn = None
     try:
-        agent_result = _execute_agent_response(
+        event_resolution = None
+        if event_context is not None:
+            conn = get_db_connection()
+            event_resolution = _resolve_validated_event_context(conn, event_context)
+            conn.close()
+            conn = None
+        agent_result = _execute_agent_response_with_event_context(
             message,
             conversation_history=conversation_history,
             retrieval_cache=retrieval_cache,
+            event_resolution=event_resolution,
         )
         _session_cache.set(session_id, agent_result["retrieval_cache"])
         log_id = log_interaction(
@@ -3099,18 +3271,22 @@ def chat():
             mode=agent_result["mode"],
             user_id=g.current_user_row["id"] if g.get("current_user_row") else None,
         )
-        return jsonify(
-            {
-                "session_id": session_id,
-                "response": agent_result["answer"],
-                "sources": agent_result["sources"],
-                "mode": agent_result["mode"],
-                "log_id": log_id,
-            }
-        )
+        response_payload = {
+            "session_id": session_id,
+            "response": agent_result["answer"],
+            "sources": agent_result["sources"],
+            "mode": agent_result["mode"],
+            "log_id": log_id,
+        }
+        if agent_result.get("resolved_entity"):
+            response_payload["resolved_entity"] = agent_result["resolved_entity"]
+        return jsonify(response_payload)
     except Exception as exc:
         _log_exception("Error in /chat", exc)
         return _json_error("Internal server error.", 500, "chat_failed")
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/log", methods=["POST", "PUT"])

@@ -17,6 +17,15 @@ const state = {
   authReturnToApp: false,
 };
 
+const eventContextStore = window.UiEntityContext
+  ? window.UiEntityContext.createPendingEventContextStore()
+  : Object.freeze({
+    clear: () => {},
+    setEvent: () => null,
+    createOutboundPayload: (message) => Object.freeze({ message }),
+    restoreOutboundPayload: () => false,
+  });
+
 const elements = {
   authView: document.getElementById('auth-view'),
   profileView: document.getElementById('profile-view'),
@@ -369,6 +378,7 @@ function updateAuthChrome() {
 }
 
 function resetAppState({ clearGuestSession = false } = {}) {
+  eventContextStore.clear();
   state.user = null;
   state.isGuest = false;
   state.threads = [];
@@ -661,6 +671,7 @@ function createEmptyStateElement() {
       <span class="empty-state-card-copy">${escapeHtml(prompt.query)}</span>
     `;
     card.addEventListener('click', () => {
+      eventContextStore.clear();
       elements.chatInput.value = prompt.query;
       elements.chatInput.focus();
     });
@@ -892,8 +903,11 @@ function renderEvents(events) {
         return;
       }
 
+      const selection = eventContextStore.setEvent(event, date);
       const eventName = event.event_name || 'this event';
-      elements.chatInput.value = `Tell me more about "${eventName}" event happening on ${date}.`;
+      elements.chatInput.value = selection
+        ? selection.message
+        : `Tell me more about "${eventName}" event happening on ${date}.`;
       elements.chatInput.focus();
     });
     elements.eventsList.appendChild(card);
@@ -1089,6 +1103,7 @@ async function loadThreads(selectThreadId = null) {
 }
 
 async function loadMessages(threadId) {
+  eventContextStore.clear();
   const requestVersion = ++state.messageVersion;
   const result = await ApiClient.fetchMessages(threadId, { limit: 50 });
   if (!result.success) {
@@ -1132,6 +1147,7 @@ async function ensureActiveThread() {
   state.threads.unshift(result.data.thread);
   state.activeThreadId = result.data.thread.id;
   state.messages = [];
+  eventContextStore.clear();
   renderThreads();
   updateThreadHeader();
   renderMessages();
@@ -1139,6 +1155,7 @@ async function ensureActiveThread() {
 }
 
 async function createThread() {
+  eventContextStore.clear();
   setError(elements.chatError, '');
   state.messageVersion += 1;
   const result = await ApiClient.createThread({});
@@ -1230,6 +1247,7 @@ async function submitDeleteThread() {
     setError(elements.threadModalError, result.error);
     return;
   }
+  eventContextStore.clear();
   state.threads = state.threads.filter((entry) => entry.id !== thread.id);
   state.activeThreadId = null;
   state.messages = [];
@@ -1250,11 +1268,18 @@ async function submitDeleteThread() {
   showToast('Conversation deleted.', 'warning');
 }
 
+function restoreFailedChatComposer(message, outboundPayload) {
+  if (elements.chatInput.value) return;
+  elements.chatInput.value = message;
+  eventContextStore.restoreOutboundPayload(outboundPayload);
+}
+
 async function sendChatMessage(event) {
   event.preventDefault();
   if (state.isSendingMessage) return;
   const message = elements.chatInput.value.trim();
   if (!message) return;
+  const outboundPayload = eventContextStore.createOutboundPayload(message);
 
   if (!state.activeThreadId) {
     const ready = await ensureActiveThread();
@@ -1274,6 +1299,7 @@ async function sendChatMessage(event) {
 
   setError(elements.chatError, '');
   elements.chatInput.value = '';
+  eventContextStore.clear();
   state.messages = [
     ...state.messages,
     optimisticMessage,
@@ -1303,7 +1329,7 @@ async function sendChatMessage(event) {
 
   try {
     if (instant) {
-      const result = await ApiClient.sendMessage(threadId, { message });
+      const result = await ApiClient.sendMessage(threadId, outboundPayload);
       removeTypingIndicator();
 
       if (!result.success) {
@@ -1312,6 +1338,7 @@ async function sendChatMessage(event) {
           showToast(result.error, 'warning');
         }
         if (result.status === 409 && result.data && result.data.code === 'profile_incomplete') {
+          restoreFailedChatComposer(message, outboundPayload);
           showView('profile');
           return;
         }
@@ -1319,9 +1346,7 @@ async function sendChatMessage(event) {
           (entry) => entry.id !== optimisticMessageId && entry.id !== assistantPendingId,
         );
         renderMessages();
-        if (!elements.chatInput.value) {
-          elements.chatInput.value = message;
-        }
+        restoreFailedChatComposer(message, outboundPayload);
         setError(elements.chatError, result.error);
         return;
       }
@@ -1399,7 +1424,7 @@ async function sendChatMessage(event) {
         elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
       };
 
-      const streamResult = await ApiClient.sendMessageStream(threadId, { message }, {
+      const streamResult = await ApiClient.sendMessageStream(threadId, outboundPayload, {
         onDelta: (text) => {
           if (isStale() || !text) return;
           ensureAssistantBubble();
@@ -1423,7 +1448,7 @@ async function sendChatMessage(event) {
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
         // Retry once via the JSON endpoint, which completes without a live stream.
-        const retryResult = await ApiClient.sendMessage(threadId, { message });
+        const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
         if (retryResult.success) {
           const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
           if (threadIndex >= 0) {
@@ -1453,9 +1478,7 @@ async function sendChatMessage(event) {
         // (which never held it) removes it cleanly.
         state.messages = state.messages.filter((item) => item.id !== optimisticMessageId);
         renderMessages();
-        if (!elements.chatInput.value) {
-          elements.chatInput.value = message;
-        }
+        restoreFailedChatComposer(message, outboundPayload);
         setError(elements.chatError, streamResult.error);
         return;
       }
@@ -1491,7 +1514,7 @@ async function sendChatMessage(event) {
       return;
     }
 
-    const result = await ApiClient.sendMessage(threadId, { message });
+    const result = await ApiClient.sendMessage(threadId, outboundPayload);
     removeTypingIndicator();
 
     if (!result.success) {
@@ -1500,14 +1523,13 @@ async function sendChatMessage(event) {
         showToast(result.error, 'warning');
       }
       if (result.status === 409 && result.data && result.data.code === 'profile_incomplete') {
+        restoreFailedChatComposer(message, outboundPayload);
         showView('profile');
         return;
       }
       state.messages = state.messages.filter((entry) => entry.id !== optimisticMessageId);
       renderMessages();
-      if (!elements.chatInput.value) {
-        elements.chatInput.value = message;
-      }
+      restoreFailedChatComposer(message, outboundPayload);
       setError(elements.chatError, result.error);
       return;
     }
@@ -1821,6 +1843,9 @@ function initEventListeners() {
     elements.eventsResizer.addEventListener('pointerdown', beginEventsPanelResize);
   }
   elements.chatForm.addEventListener('submit', sendChatMessage);
+  elements.chatInput.addEventListener('input', () => {
+    eventContextStore.clear();
+  });
   elements.threadList.addEventListener('click', handleThreadListClick);
   elements.eventsRefresh.addEventListener('click', loadEvents);
   elements.eventsDays.addEventListener('change', loadEvents);
@@ -1838,6 +1863,7 @@ function initEventListeners() {
   elements.suggestions.addEventListener('click', (event) => {
     const button = event.target.closest('.suggestion-chip');
     if (!button) return;
+    eventContextStore.clear();
     elements.chatInput.value = button.dataset.query || '';
     elements.chatInput.focus();
   });
