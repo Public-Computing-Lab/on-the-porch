@@ -1540,6 +1540,7 @@ def run_execution_pipeline(
             "plan_ms": plan_ms,
             "execute_ms": facts.execute_ms,
             "synthesize_ms": synth_ms,
+            "execution_degraded": any(part.error for part in facts.parts),
             "prepared_intent": facts.prepared_intent,
             "intent": routing.get("intent"),
             "router": routing.get("router"),
