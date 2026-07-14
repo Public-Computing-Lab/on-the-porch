@@ -248,8 +248,9 @@ def test_partial_stale_and_ambiguous_answers_are_resident_safe() -> None:
         "Tell me more",
         EventResolution(status="exact_id", context=None, event=partial),
     )
-    assert "does not include a detailed description" in exact.answer
-    assert "does not provide a separate location field" in exact.answer
+    assert "does not provide" in exact.answer
+    assert "a detailed description" in exact.answer
+    assert "a separate location" in exact.answer
 
     for status in ("stale", "ambiguous"):
         response = build_selected_event_response(

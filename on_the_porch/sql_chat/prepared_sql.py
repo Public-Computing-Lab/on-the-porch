@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -502,18 +504,55 @@ def _fmt_event_date(value) -> str:
 
 _EVENT_FIELD_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])"
-    r"(DATE|TIME|LOCATION|CONTACT|URL|COST|REGISTRATION)\s*:\s*",
+    r"(DATE|TIME|LOCATION|CONTACT|URL|COST|REGISTRATION|RSVP)\s*:\s*",
+    flags=re.IGNORECASE,
+)
+
+_EVENT_PHONE_PATTERN = re.compile(
+    r"(?<!\d)(?:\+?1[\s.\-]*)?\(?([2-9]\d{2})\)?[\s.\-]*"
+    r"(\d{3})[\s.\-]*(\d{4})(?!\d)"
+)
+_EVENT_EMAIL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])"
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+)
+_EVENT_URL_PATTERN = re.compile(r"https?://[^\s,;]+", flags=re.IGNORECASE)
+_REGISTRATION_CUE_PATTERN = re.compile(
+    r"\b(?:register(?:\s+here)?|registration|rsvp|sign[\s-]*up|"
+    r"call\s+to\s+register|pre[\s-]*registration)\b",
     flags=re.IGNORECASE,
 )
 
 
+def _normalize_event_content(value: Any, *, preserve_newlines: bool = True) -> str:
+    """Remove scraper formatting artifacts without changing event meaning."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    cleaned: List[str] = []
+    for char in text:
+        category = unicodedata.category(char)
+        if category == "Cf":
+            continue
+        if category == "Cc":
+            if preserve_newlines and char in ("\r", "\n"):
+                cleaned.append("\n")
+            elif char == "\t":
+                cleaned.append(" ")
+            continue
+        cleaned.append(" " if char == "\u00a0" else char)
+    normalized = "".join(cleaned).replace("\r\n", "\n").replace("\r", "\n")
+    if not preserve_newlines:
+        return re.sub(r"\s+", " ", normalized).strip()
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in normalized.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
+
+
 def _clean_event_field_value(value: str) -> str:
-    return (value or "").strip().strip(",;|").strip()
+    return _normalize_event_content(value, preserve_newlines=False).strip(",;|").strip()
 
 
 def _parse_labeled_event_fields(raw_text: str) -> tuple[str, Dict[str, str]]:
     """Split event prose from recognized line or inline LABEL: value fields."""
-    raw = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    raw = _normalize_event_content(raw_text)
     if not raw:
         return "", {}
     matches = list(_EVENT_FIELD_PATTERN.finditer(raw))
@@ -524,6 +563,8 @@ def _parse_labeled_event_fields(raw_text: str) -> tuple[str, Dict[str, str]]:
     fields: Dict[str, str] = {}
     for index, match in enumerate(matches):
         label = match.group(1).lower()
+        if label == "rsvp":
+            label = "registration"
         end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
         segment = raw[match.end():end].strip()
         lines = [
@@ -537,7 +578,12 @@ def _parse_labeled_event_fields(raw_text: str) -> tuple[str, Dict[str, str]]:
         if label == "url":
             url_match = re.search(r"https?://[^\s,;]+", segment, flags=re.IGNORECASE)
             value = url_match.group(0).rstrip(").,]") if url_match else value
-        fields.setdefault(label, value)
+        # Feed adapters append canonical Location/URL fields after scraped prose.
+        # Prefer those final authoritative values when the same label appears twice.
+        if label in ("location", "url"):
+            fields[label] = value
+        else:
+            fields.setdefault(label, value)
         if len(lines) > 1:
             description_parts.extend(lines[1:])
 
@@ -548,7 +594,7 @@ def _parse_labeled_event_fields(raw_text: str) -> tuple[str, Dict[str, str]]:
 def _extract_event_url(raw_text: str) -> str:
     _description, fields = _parse_labeled_event_fields(raw_text)
     for candidate in (fields.get("url", ""), fields.get("registration", "")):
-        match = re.search(r"https?://[^\s,;]+", candidate, flags=re.IGNORECASE)
+        match = _EVENT_URL_PATTERN.search(candidate)
         if match:
             return match.group(0).rstrip(").,]")
     return ""
@@ -662,6 +708,288 @@ def _clean_event_body(
     return _strip_leading_event_metadata(description, name, date_labels)
 
 
+def _event_match_tokens(value: str) -> List[str]:
+    normalized = unicodedata.normalize("NFKD", _normalize_event_content(value, preserve_newlines=False))
+    ascii_text = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.findall(r"[a-z0-9]+", ascii_text.lower())
+
+
+def _strip_reordered_title_prefix(body: str, name: str) -> str:
+    """Remove a leading title repetition even when feed words are reordered."""
+    title_tokens = _event_match_tokens(name)
+    if not title_tokens:
+        return body
+    matches = list(re.finditer(r"[A-Za-z0-9À-ÖØ-öø-ÿ]+", body))
+    if len(matches) < len(title_tokens):
+        return body
+    prefix_matches = matches[:len(title_tokens)]
+    prefix = body[prefix_matches[0].start():prefix_matches[-1].end()]
+    if Counter(_event_match_tokens(prefix)) != Counter(title_tokens):
+        return body
+    return body[prefix_matches[-1].end():].lstrip(" \t\n-|,:;·–—")
+
+
+def _strip_event_prefix(body: str, value: str) -> str:
+    pattern = _metadata_prefix_pattern(value)
+    if not body or not pattern:
+        return body
+    return re.sub(
+        rf"^\s*{pattern}(?=$|\s|[-–—|,:;·])",
+        "",
+        body,
+        count=1,
+        flags=re.IGNORECASE,
+    ).lstrip(" \t\n-|,:;·–—")
+
+
+def _clock_text_pattern(value: Any, *, suffix_optional: bool = True) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    parts = text.split(":")
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1][:2]) if len(parts) > 1 else 0
+    except (TypeError, ValueError):
+        return ""
+    hour12 = hour % 12 or 12
+    suffix = "a" if hour < 12 else "p"
+    minute_part = rf"(?::?{minute:02d})?" if minute == 0 else rf":?{minute:02d}"
+    suffix_pattern = rf"\s*{suffix}\.?\s*m\.?"
+    if suffix_optional:
+        suffix_pattern = rf"(?:{suffix_pattern})?"
+    return rf"0?{hour12}{minute_part}{suffix_pattern}"
+
+
+def _strip_structured_time(body: str, start_value: Any, end_value: Any) -> str:
+    start_pattern = _clock_text_pattern(start_value, suffix_optional=True)
+    if not start_pattern:
+        return body
+    end_pattern = _clock_text_pattern(end_value, suffix_optional=False)
+    if end_pattern:
+        pattern = (
+            rf"(?:\b(?:when\??\s*|from\s+|at\s+))?\b{start_pattern}\s*"
+            rf"(?:-|–|—|to)\s*{end_pattern}(?=\s|[.,;!?]|$)\.?"
+        )
+    else:
+        pattern = (
+            rf"(?:\b(?:when\??\s*|at\s+))?\b{start_pattern}"
+            rf"(?=\s|[.,;!?]|$)\.?"
+        )
+    return re.sub(pattern, " ", body, flags=re.IGNORECASE)
+
+
+def _normalized_phone(match: re.Match[str]) -> str:
+    return f"({match.group(1)}) {match.group(2)}-{match.group(3)}"
+
+
+def _event_phones(value: str) -> List[str]:
+    phones: List[str] = []
+    for match in _EVENT_PHONE_PATTERN.finditer(value or ""):
+        phone = _normalized_phone(match)
+        if phone not in phones:
+            phones.append(phone)
+    return phones
+
+
+def _event_emails(value: str) -> List[str]:
+    emails: List[str] = []
+    for match in _EVENT_EMAIL_PATTERN.finditer(value or ""):
+        email = match.group(0)
+        if email.lower() not in {item.lower() for item in emails}:
+            emails.append(email)
+    return emails
+
+
+def _phone_has_registration_cue(raw_text: str) -> bool:
+    for phone_match in _EVENT_PHONE_PATTERN.finditer(raw_text or ""):
+        start = max(0, phone_match.start() - 100)
+        end = min(len(raw_text), phone_match.end() + 100)
+        if _REGISTRATION_CUE_PATTERN.search(raw_text[start:end]):
+            return True
+    return False
+
+
+def _strip_surfaced_contact_details(body: str) -> str:
+    body = _EVENT_PHONE_PATTERN.sub(" ", body)
+    body = _EVENT_EMAIL_PATTERN.sub(" ", body)
+    body = _REGISTRATION_CUE_PATTERN.sub(" ", body)
+    body = re.sub(
+        r"\b(?:for\s+questions|contact|call)(?:\s+(?:us|the\s+organizer))?"
+        r"(?:\s+at)?\s*[,;:\-]*\s*(?=[.!?]|$)",
+        " ",
+        body,
+        flags=re.IGNORECASE,
+    )
+    return body
+
+
+def _sentences(value: str) -> List[str]:
+    text = _normalize_event_content(value, preserve_newlines=False)
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", text) if part.strip()]
+
+
+def _token_overlap(left: str, right: str) -> float:
+    left_tokens = set(_event_match_tokens(left))
+    right_tokens = set(_event_match_tokens(right))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+
+def _strip_duplicate_location_sentence(body: str, location: str) -> str:
+    if not body or not location:
+        return body
+    parts = _sentences(body)
+    kept: List[str] = []
+    removed_location = False
+    for part in parts:
+        marker_only = bool(re.fullmatch(r"(?:where|location)\??:?", part, flags=re.IGNORECASE))
+        if marker_only:
+            kept.append(part)
+            continue
+        if _token_overlap(part, location) >= 0.72:
+            removed_location = True
+            if kept and re.fullmatch(r"(?:where|location)\??:?", kept[-1], flags=re.IGNORECASE):
+                kept.pop()
+            continue
+        kept.append(part)
+    return " ".join(kept) if removed_location else body
+
+
+def _clean_human_event_body(
+    description: str,
+    *,
+    name: str,
+    organizer: str,
+    date_labels: tuple[str, ...],
+    start_time: Any,
+    end_time: Any,
+    location: str,
+) -> str:
+    body = _strip_leading_event_metadata(description, name, date_labels)
+    without_organizer = _strip_event_prefix(body, organizer)
+    without_organizer_title = _strip_reordered_title_prefix(without_organizer, name)
+    if without_organizer_title != without_organizer:
+        body = without_organizer_title
+    else:
+        body = _strip_reordered_title_prefix(body, name)
+    body = _EVENT_URL_PATTERN.sub(" ", body)
+    body = _strip_structured_time(body, start_time, end_time)
+    body = _strip_surfaced_contact_details(body)
+    body = _strip_duplicate_location_sentence(body, location)
+    body = re.sub(r"^\s*what\s*:\s*", "", body, flags=re.IGNORECASE)
+    body = re.sub(r"\b(?:when|where)\s*\?\s*(?=[.!?]|$)", " ", body, flags=re.IGNORECASE)
+    body = re.sub(r"\s+([,.;!?])", r"\1", body)
+    body = re.sub(r"(?:^|\s)[|,:;–—-]+(?=\s|$)", " ", body)
+    body = re.sub(r"\s+", " ", body).strip(" \t\n-|,:;·–—")
+    if not body:
+        return ""
+    parts = _sentences(body)
+    concise = " ".join(parts[:2]).strip() if parts else body
+    if len(concise) > 520:
+        clipped = concise[:520].rsplit(" ", 1)[0].rstrip(" ,;:")
+        concise = f"{clipped}."
+    if concise[-1] not in ".!?":
+        concise += "."
+    return concise
+
+
+def _reliable_event_organizer(source_pdf: str) -> str:
+    key = _normalize_event_content(source_pdf, preserve_newlines=False).lower()
+    if "codman" in key:
+        return "Codman Square Health Center"
+    if "csndc" in key:
+        return "CSNDC"
+    return ""
+
+
+def _is_explicitly_virtual(raw_text: str, location: str, name: str) -> bool:
+    location_key = _normalize_event_content(location, preserve_newlines=False).lower().strip(" .")
+    if location_key in ("virtual", "online"):
+        return True
+    if re.search(
+        r"\bvirtual\s+(?:public|community|information|info|therapy|support|"
+        r"meeting|session|workshop|group)\b",
+        name,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    normalized = _normalize_event_content(raw_text)
+    return any(line.strip().lower() == "virtual" for line in normalized.splitlines())
+
+
+def _contact_sentence(
+    *,
+    raw_text: str,
+    fields: Dict[str, str],
+    phones: List[str],
+    emails: List[str],
+    organizer: str,
+) -> str:
+    registration_value = _normalize_event_content(fields.get("registration", ""), preserve_newlines=False)
+    registration_supported = bool(registration_value or _REGISTRATION_CUE_PATTERN.search(raw_text))
+    registration_phone = registration_supported and _phone_has_registration_cue(raw_text)
+    if phones:
+        joined = " or ".join(phones)
+        if registration_phone:
+            if organizer:
+                return (
+                    "Anyone interested in joining or confirming registration details can "
+                    f"contact the organizer at {joined}."
+                )
+            return f"For registration information, call {joined}."
+        if organizer:
+            return f"For more information, contact the organizer at {joined}."
+        return f"For more information, call {joined}."
+    if emails:
+        return f"For more information, contact {' or '.join(emails)}."
+    contact_value = _normalize_event_content(fields.get("contact", ""), preserve_newlines=False)
+    contact_value = _EVENT_URL_PATTERN.sub("", contact_value).strip(" ,;:-")
+    if contact_value and len(contact_value) <= 160:
+        if registration_supported:
+            return f"For registration information, contact {contact_value.rstrip('.')}."
+        return f"For more information, contact {contact_value.rstrip('.')}."
+    lowered = registration_value.lower()
+    raw_registration_required = re.search(
+        r"\b(?:pre[\s-]*)?registration\s+(?:is\s+)?required\b",
+        raw_text,
+        flags=re.IGNORECASE,
+    )
+    if "required" in lowered or raw_registration_required:
+        return "The listing says advance registration is required."
+    if registration_supported and _extract_event_url(raw_text):
+        return "Registration information is available on the event page."
+    return ""
+
+
+def _missing_event_sentence(
+    *,
+    has_time: bool,
+    has_body: bool,
+    has_location: bool,
+    has_contact: bool,
+    has_url: bool,
+) -> str:
+    if not has_body and not has_location:
+        missing = []
+        if not has_time:
+            missing.append("a time")
+        missing.extend(("a detailed description", "a separate location"))
+        if len(missing) == 2:
+            joined = " or ".join(missing)
+        else:
+            joined = ", ".join(missing[:-1]) + f", or {missing[-1]}"
+        return f"The current listing does not provide {joined}."
+    if not has_body and not (has_contact or has_url):
+        return "The current listing does not provide a detailed description."
+    if has_body and not has_location:
+        return "The listing does not provide a separate location field."
+    return ""
+
+
 def _pick_event_rows(question: str, rows: List[dict]) -> List[dict]:
     target = _parse_mentioned_event_date(question)
     if target is not None:
@@ -695,8 +1023,8 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
         )
 
     row = _pick_event_rows(question, rows)[0]
-    name = row.get("event_name") or "Event"
-    raw_text = str(row.get("raw_text") or "")
+    name = _normalize_event_content(row.get("event_name") or "Event", preserve_newlines=False)
+    raw_text = _normalize_event_content(row.get("raw_text") or "")
     description_text, fields = _parse_labeled_event_fields(raw_text)
     start_date = _fmt_event_date(
         row.get("start_date")
@@ -706,83 +1034,87 @@ def _format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
     )
     start_time = _fmt_clock(row.get("start_time"))
     end_time = _fmt_clock(row.get("end_time"))
-    time_label = ""
-    if start_time:
-        time_label = f"{start_time} – {end_time}" if end_time else start_time
-    elif fields.get("time"):
-        time_label = fields["time"]
-
-    body = _strip_leading_event_metadata(
-        description_text,
-        name,
-        (str(row.get("event_date") or ""), fields.get("date", ""), start_date),
-    )
     url = _extract_event_url(raw_text)
-    location = str(
+    location = _normalize_event_content(
         row.get("location")
         or row.get("event_location")
-        or fields.get("location", "")
-    ).strip()
-    contact = fields.get("contact", "")
-    cost = fields.get("cost", "")
-    registration = fields.get("registration", "")
+        or fields.get("location", ""),
+        preserve_newlines=False,
+    )
+    organizer = _reliable_event_organizer(str(row.get("source_pdf") or ""))
+    phone_text = " ".join((raw_text, fields.get("contact", ""), fields.get("registration", "")))
+    phones = _event_phones(phone_text)
+    emails = _event_emails(" ".join((fields.get("contact", ""), fields.get("registration", ""))))
+    is_virtual = _is_explicitly_virtual(raw_text, location, name)
+    date_labels = (str(row.get("event_date") or ""), fields.get("date", ""), start_date)
+    body = _clean_human_event_body(
+        description_text,
+        name=name,
+        organizer=organizer,
+        date_labels=date_labels,
+        start_time=row.get("start_time"),
+        end_time=row.get("end_time"),
+        location=location,
+    )
 
     lead = f"**{name}**"
     if start_date:
-        lead += f" is scheduled for **{start_date}**."
+        lead += f" is scheduled for **{start_date}**"
     else:
-        lead += " is listed in the community calendar."
-    lines = [lead]
-    if time_label:
-        lines.append(f"**Time:** {time_label}")
-    if body:
-        lines.append("")
-        lines.append(body)
-    body_mentions_location = bool(
-        body
-        and location
-        and re.search(
-            rf"(?<![A-Za-z0-9]){re.escape(location)}(?![A-Za-z0-9])",
-            body,
-            flags=re.IGNORECASE,
-        )
-    )
-    if location and not body_mentions_location:
-        lines.append("")
-        lines.append(f"**Location:** {location}")
-    if cost:
-        lines.append("")
-        lines.append(f"**Cost:** {cost}")
-    url_rendered = False
-    if registration:
-        lines.append("")
-        registration_label = registration
-        if url and url in registration_label:
-            registration_label = registration_label.replace(
-                url,
-                f"[Registration link]({url})",
+        lead += " is listed in the community calendar"
+    if start_time and end_time:
+        lead += f", from **{start_time} to {end_time}**."
+    elif start_time:
+        lead += f" at **{start_time}**."
+    elif fields.get("time"):
+        lead += f" at **{_clean_event_field_value(fields['time'])}**."
+    else:
+        lead += "."
+
+    sentences = [lead]
+    if is_virtual:
+        if organizer:
+            sentences.append(
+                f"It is a virtual session hosted by {organizer}, so participants can attend remotely."
             )
-            url_rendered = True
-        lines.append(f"**Registration:** {registration_label}")
-    if contact:
-        lines.append("")
-        lines.append(f"**Contact:** {contact}")
-    if url and not url_rendered:
-        lines.append("")
-        lines.append(f"[Event details]({url})")
-    if not body and not location:
-        lines.append("")
-        lines.append(
-            "The current listing does not include a detailed description and "
-            "does not provide a separate location field."
-        )
-    elif not body:
-        lines.append("")
-        lines.append("The current listing does not include a detailed description.")
-    elif not location:
-        lines.append("")
-        lines.append("The listing does not provide a separate location field.")
-    return "\n".join(lines).strip()
+        else:
+            sentences.append("It is a virtual session, so participants can attend remotely.")
+    elif location:
+        sentences.append(f"It will be held at {location.rstrip('.')}.")
+    if body:
+        sentences.append(body)
+
+    contact_sentence = _contact_sentence(
+        raw_text=raw_text,
+        fields=fields,
+        phones=phones,
+        emails=emails,
+        organizer=organizer,
+    )
+    if contact_sentence:
+        sentences.append(contact_sentence)
+
+    cost = _normalize_event_content(fields.get("cost", ""), preserve_newlines=False)
+    if cost:
+        if cost.lower() == "free":
+            sentences.append("The listing says the event is free.")
+        else:
+            sentences.append(f"The listed cost is {cost.rstrip('.')}.")
+
+    missing = _missing_event_sentence(
+        has_time=bool(start_time or fields.get("time")),
+        has_body=bool(body),
+        has_location=bool(location or is_virtual),
+        has_contact=bool(contact_sentence),
+        has_url=bool(url),
+    )
+    if missing:
+        sentences.append(missing)
+
+    answer = " ".join(sentence.strip() for sentence in sentences if sentence.strip())
+    if url:
+        answer += f"\n\nMore information is available on the [event page]({url})."
+    return answer.strip()
 
 
 def format_event_detail_answer(question: str, result: Dict[str, Any]) -> str:
