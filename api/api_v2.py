@@ -118,7 +118,6 @@ from conversation_relationship import (  # noqa: E402
     detect_event_property,
 )
 from conversation_dimensions import (  # noqa: E402
-    CanonicalTopic,
     ConversationDimensions,
     DimensionContext,
     diagnostic_metrics as dimension_diagnostic_metrics,
@@ -1822,13 +1821,13 @@ def _merge_locked_thread_state(
     try:
         current = _load_thread_state_envelope(locked_thread.get("thread_state_json"))
         current_state = current.conversation_state
-        if current_state.state_version != transition.expected_state_version:
+        if current_state.revision != transition.expected_revision:
             print(
                 json_dumps({
                     "event": "conversation_state_version_conflict",
                     "thread_id": thread_id,
-                    "expected_version": transition.expected_state_version,
-                    "current_version": current_state.state_version,
+                    "expected_revision": transition.expected_revision,
+                    "current_revision": current_state.revision,
                     "transition": transition.action.value,
                 }),
                 file=sys.stderr,
@@ -1900,13 +1899,13 @@ def _persist_conversation_turn(
         conn.start_transaction()
         locked_thread = _lock_thread_for_persistence(conn, user_id, thread_id)
         current = _load_thread_state_envelope(locked_thread.get("thread_state_json"))
-        if current.conversation_state.state_version != transition.expected_state_version:
+        if current.conversation_state.revision != transition.expected_revision:
             print(
                 json_dumps({
                     "event": "conversation_state_version_conflict",
                     "thread_id": thread_id,
-                    "expected_version": transition.expected_state_version,
-                    "current_version": current.conversation_state.state_version,
+                    "expected_revision": transition.expected_revision,
+                    "current_revision": current.conversation_state.revision,
                     "transition": transition.action.value,
                 }),
                 file=sys.stderr,
@@ -2798,13 +2797,10 @@ def _classify_relationship_shadow(
 
 def _dimension_context_from_state(state: ConversationState) -> DimensionContext:
     active_event = state.active_entity is not None
-    active_topic = (
-        CanonicalTopic.EVENTS
-        if state.active_topic == "events" or active_event
-        else None
-    )
     return DimensionContext(
-        active_topic=active_topic,
+        active_topic=state.active_topic,
+        location=state.location,
+        time_range=state.time_range,
         authoritative_active_event=active_event,
     )
 

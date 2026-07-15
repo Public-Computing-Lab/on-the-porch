@@ -7,6 +7,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
 import sys
 import threading
@@ -28,7 +29,10 @@ from conversation_state import (  # noqa: E402
     ActiveEntity,
     ConversationState,
     ProposedTransition,
+    ThreadStateForm,
     ThreadStateEnvelope,
+    detect_thread_state_form,
+    load_thread_state,
     serialize_thread_state,
 )
 
@@ -40,6 +44,14 @@ EVENTS = {
         "2026-07-16",
     ),
 }
+
+
+def _nearest_rank(values, percentile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        raise AssertionError("cannot calculate a percentile without values")
+    index = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
+    return ordered[index]
 
 
 class _FakeConnection:
@@ -247,9 +259,10 @@ def _thread_snapshot(thread_id: str) -> Dict[str, Any]:
         )
         row = cursor.fetchone()
         assert row
-        envelope = json.loads(row["thread_state_json"])
+        raw_state = row["thread_state_json"]
+        envelope = load_thread_state(raw_state)
         cache_json = json.dumps(
-            envelope.get("retrieval_cache", {}),
+            envelope.retrieval_cache,
             sort_keys=True,
             separators=(",", ":"),
             default=str,
@@ -266,7 +279,8 @@ def _thread_snapshot(thread_id: str) -> Dict[str, Any]:
         )
         logs = cursor.fetchall()
         return {
-            "state": envelope.get("conversation_state", {}),
+            "stored_form": detect_thread_state_form(raw_state).value,
+            "state": envelope.conversation_state.to_dict(),
             "cache_hash": hashlib.sha256(cache_json).hexdigest(),
             "messages": messages,
             "logs": logs,
@@ -274,6 +288,44 @@ def _thread_snapshot(thread_id: str) -> Dict[str, Any]:
     finally:
         cursor.close()
         conn.close()
+
+
+def _seed_version_1_event_state(thread_id: str, *, revision: int = 5) -> None:
+    current = _thread_snapshot(thread_id)
+    conn = _db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT thread_state_json FROM conversation_threads WHERE id = %s LIMIT 1",
+            (thread_id,),
+        )
+        row = cursor.fetchone()
+        assert row is not None
+        cache = load_thread_state(row["thread_state_json"]).retrieval_cache
+        legacy = {
+            "version": 1,
+            "retrieval_cache": cache,
+            "conversation_state": {
+                "state_version": revision,
+                "active_topic": "events",
+                "active_entity": ActiveEntity.event("435").to_dict(),
+                "previous_route": "sql",
+                "last_substantive_message_id": "legacy-race-seed",
+            },
+        }
+        cursor.execute(
+            "UPDATE conversation_threads SET thread_state_json = %s WHERE id = %s",
+            (json.dumps(legacy, separators=(",", ":")), thread_id),
+        )
+        assert cursor.rowcount == 1
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+    seeded = _thread_snapshot(thread_id)
+    assert current["cache_hash"] == seeded["cache_hash"]
+    assert seeded["stored_form"] == ThreadStateForm.ENVELOPE_V1_STATE_V1.value
+    assert seeded["state"]["revision"] == revision
 
 
 class _GuestClient:
@@ -407,7 +459,8 @@ def _assert_one_winner(thread_id: str, before: Dict[str, Any], results, *, strea
         winner_id = winners[0]["event_id"]
 
     after = _thread_snapshot(thread_id)
-    assert after["state"]["state_version"] == 1, after
+    assert after["state"]["schema_version"] == 2, after
+    assert after["state"]["revision"] == before["state"]["revision"] + 1, after
     assert after["state"]["active_entity"]["id"] == winner_id, after
     assert after["cache_hash"] == before["cache_hash"], after
     assert [message["role"] for message in after["messages"]] == ["user", "assistant"], after
@@ -419,6 +472,22 @@ def _assert_one_winner(thread_id: str, before: Dict[str, Any], results, *, strea
 def run_live_tests(base_url: str, iterations: int) -> None:
     client = _GuestClient(base_url)
     client.bootstrap()
+
+    migration_thread = client.create_thread("Version-1 migration race")
+    _seed_version_1_event_state(migration_thread)
+    migration_before = _thread_snapshot(migration_thread)
+    migration_results = _locked_race(client, migration_thread, streaming=False)
+    migration_winner = _assert_one_winner(
+        migration_thread,
+        migration_before,
+        migration_results,
+        streaming=False,
+    )
+    migration_after = _thread_snapshot(migration_thread)
+    assert migration_after["stored_form"] == ThreadStateForm.ENVELOPE_V1_STATE_V2.value
+    assert migration_after["state"]["revision"] == 6
+    assert migration_after["cache_hash"] == migration_before["cache_hash"]
+    print(f"OK  version-1 migration race: one 201, one 409, winner={migration_winner}")
 
     failed_thread = client.create_thread("Rejected request")
     failed_before = _thread_snapshot(failed_thread)
@@ -461,7 +530,8 @@ def run_live_tests(base_url: str, iterations: int) -> None:
         )
     assert [response.status_code for response in followups] == [201, 201]
     follow_snapshot = _thread_snapshot(follow_thread)
-    assert follow_snapshot["state"]["state_version"] == 1
+    assert follow_snapshot["state"]["schema_version"] == 2
+    assert follow_snapshot["state"]["revision"] == 1
     assert len(follow_snapshot["messages"]) == 6
     print("OK  equivalent concurrent event follow-ups remain valid")
 
@@ -485,7 +555,11 @@ def run_live_tests(base_url: str, iterations: int) -> None:
     assert all(response.status_code == 201 for response in responses), [
         response.status_code for response in responses
     ]
-    assert all(_thread_snapshot(thread_id)["state"]["state_version"] == 1 for thread_id in threads)
+    assert all(
+        _thread_snapshot(thread_id)["state"]["schema_version"] == 2
+        and _thread_snapshot(thread_id)["state"]["revision"] == 1
+        for thread_id in threads
+    )
     print(f"OK  eight independent requests: 8/8 in {elapsed_ms}ms")
 
     # Separate users and threads remain isolated.
@@ -544,16 +618,18 @@ def run_live_tests(base_url: str, iterations: int) -> None:
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         followup_latencies = list(pool.map(send_timed_followup, range(20)))
-    sorted_latencies = sorted(followup_latencies)
-    p90_index = max(0, min(len(sorted_latencies) - 1, round(0.9 * len(sorted_latencies) + 0.5) - 1))
-    followup_p90_ms = round(sorted_latencies[p90_index], 2)
+    followup_p50_ms = round(_nearest_rank(followup_latencies, 0.50), 2)
+    followup_p90_ms = round(_nearest_rank(followup_latencies, 0.90), 2)
+    followup_p99_ms = round(_nearest_rank(followup_latencies, 0.99), 2)
     assert followup_p90_ms < 500, followup_latencies
     continuity_snapshot = _thread_snapshot(continuity_thread)
-    assert continuity_snapshot["state"]["state_version"] == 1
+    assert continuity_snapshot["state"]["schema_version"] == 2
+    assert continuity_snapshot["state"]["revision"] == 1
     assert continuity_snapshot["state"]["active_entity"]["id"] == "435"
     print(
         "OK  cross-worker continuity: 20/20 follow-ups, "
-        f"p90={followup_p90_ms}ms, thread={continuity_thread}"
+        f"p50={followup_p50_ms}ms, p90={followup_p90_ms}ms, "
+        f"p99={followup_p99_ms}ms, thread={continuity_thread}"
     )
 
 
