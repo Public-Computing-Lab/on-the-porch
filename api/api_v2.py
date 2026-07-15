@@ -117,6 +117,13 @@ from conversation_relationship import (  # noqa: E402
     conservative_fallback,
     detect_event_property,
 )
+from conversation_dimensions import (  # noqa: E402
+    CanonicalTopic,
+    ConversationDimensions,
+    DimensionContext,
+    diagnostic_metrics as dimension_diagnostic_metrics,
+    extract_conversation_dimensions,
+)
 from conversation_state import (  # noqa: E402
     ConversationState,
     ConversationStateError,
@@ -2733,6 +2740,22 @@ def _relationship_llm_classifier(prompt: str, timeout_seconds: float) -> str:
     return str(getattr(response, "text", "") or "")
 
 
+def _dimensions_llm_classifier(prompt: str, timeout_seconds: float) -> str:
+    """Optional bounded classifier; its calls do not affect answer model metrics."""
+    client = _get_llm_client()
+    model_name = os.getenv(
+        "GEMINI_FAST_MODEL",
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+    )
+    model = client.GenerativeModel(model_name)
+    response = model.generate_content(
+        prompt,
+        generation_config={"temperature": 0, "response_mime_type": "application/json"},
+        request_options={"timeout": max(0.25, float(timeout_seconds))},
+    )
+    return str(getattr(response, "text", "") or "")
+
+
 def _classify_relationship_shadow(
     message: str,
     history_rows: List[Dict[str, Any]],
@@ -2773,10 +2796,62 @@ def _classify_relationship_shadow(
     return decision
 
 
+def _dimension_context_from_state(state: ConversationState) -> DimensionContext:
+    active_event = state.active_entity is not None
+    active_topic = (
+        CanonicalTopic.EVENTS
+        if state.active_topic == "events" or active_event
+        else None
+    )
+    return DimensionContext(
+        active_topic=active_topic,
+        authoritative_active_event=active_event,
+    )
+
+
+def _extract_dimensions_shadow(
+    message: str,
+    *,
+    thread_id: str,
+    conversation_state: ConversationState,
+) -> Optional[ConversationDimensions]:
+    if not Config.CONVERSATION_DIMENSIONS_SHADOW_ENABLED:
+        return None
+    try:
+        result = extract_conversation_dimensions(
+            message,
+            enabled=True,
+            context=_dimension_context_from_state(conversation_state),
+            llm_fallback_enabled=Config.CONVERSATION_DIMENSIONS_LLM_FALLBACK_ENABLED,
+            llm_classifier=(
+                _dimensions_llm_classifier
+                if Config.CONVERSATION_DIMENSIONS_LLM_FALLBACK_ENABLED
+                else None
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_exception("Conversation dimension shadow extraction failed", exc)
+        return None
+    if result is None:
+        return None
+    log_payload = {
+        "event": "conversation_dimensions_shadow",
+        "thread_id": thread_id,
+        "worker_pid": os.getpid(),
+        **dimension_diagnostic_metrics(result),
+    }
+    request_id = get_request_id()
+    if request_id:
+        log_payload["request_id"] = request_id
+    print(json_dumps(log_payload), file=sys.stderr, flush=True)
+    return result
+
+
 def _user_message_metadata(
     *,
     event_context: Optional[ValidatedEventContext],
     relationship: Optional[RelationshipDecision],
+    dimensions: Optional[ConversationDimensions],
     active_event_behavior_applied: bool = False,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
@@ -2784,6 +2859,8 @@ def _user_message_metadata(
         metadata.update(event_context.user_message_metadata())
     if relationship is not None:
         metadata["conversation_relationship"] = relationship.to_dict()
+    if dimensions is not None:
+        metadata["conversation_dimensions_shadow"] = dimensions.to_dict()
     if active_event_behavior_applied:
         metadata["active_event_followup_applied"] = True
     return metadata or None
@@ -3347,6 +3424,11 @@ def post_conversation_message(thread_id: str):
             thread_id=thread_id,
             authoritative_active_event=conversation_state.active_entity is not None,
         )
+        dimensions = _extract_dimensions_shadow(
+            message,
+            thread_id=thread_id,
+            conversation_state=conversation_state,
+        )
         active_event_result = None
         stale_active_event = False
         if event_resolution is None:
@@ -3408,6 +3490,7 @@ def post_conversation_message(thread_id: str):
             user_meta=_user_message_metadata(
                 event_context=event_context,
                 relationship=relationship,
+                dimensions=dimensions,
                 active_event_behavior_applied=active_event_result is not None,
             ),
             assistant_content=answer,
@@ -3501,6 +3584,11 @@ def post_conversation_message_stream(thread_id: str):
             history_rows,
             thread_id=thread_id,
             authoritative_active_event=conversation_state.active_entity is not None,
+        )
+        dimensions = _extract_dimensions_shadow(
+            message,
+            thread_id=thread_id,
+            conversation_state=conversation_state,
         )
         active_event_result = None
         stale_active_event = False
@@ -3697,6 +3785,7 @@ def post_conversation_message_stream(thread_id: str):
                 user_meta=_user_message_metadata(
                     event_context=event_context,
                     relationship=relationship,
+                    dimensions=dimensions,
                     active_event_behavior_applied=active_event_request,
                 ),
                 assistant_content=full_answer,
