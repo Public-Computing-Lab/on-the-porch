@@ -9,6 +9,7 @@ and per-user conversation threads backed by MySQL.
 from __future__ import annotations
 
 import datetime
+import copy
 import os
 import queue
 import re
@@ -124,14 +125,21 @@ from conversation_dimensions import (  # noqa: E402
     extract_conversation_dimensions,
 )
 from conversation_state import (  # noqa: E402
+    ActiveEntity,
     ConversationState,
     ConversationStateError,
     ProposedTransition,
     ThreadStateEnvelope,
     load_thread_state,
     merge_for_commit,
-    response_allows_state_transition,
     serialize_thread_state,
+)
+from conversation_transitions import (  # noqa: E402
+    CacheAction,
+    CompletionStatus,
+    ConversationTransition,
+    classify_completion_status,
+    plan_conversation_transition,
 )
 from intent_router import detect_civic_topic  # noqa: E402
 from semantic_cache import (  # noqa: E402
@@ -1815,6 +1823,7 @@ def _merge_locked_thread_state(
     next_retrieval_cache: Dict[str, Any],
     transition: ProposedTransition,
     last_substantive_message_id: str,
+    invalidate_retrieval_cache: bool = False,
 ) -> Dict[str, Any]:
     """Merge cache/state after the caller has locked the parent thread row."""
     cursor = conn.cursor(dictionary=True)
@@ -1841,6 +1850,7 @@ def _merge_locked_thread_state(
             next_retrieval_cache=next_retrieval_cache,
             transition=transition,
             last_substantive_message_id=last_substantive_message_id,
+            force_cache_update=invalidate_retrieval_cache,
         )
         if not merged.cache_update_applied:
             print(
@@ -1880,6 +1890,7 @@ def _persist_conversation_turn(
     expected_envelope: ThreadStateEnvelope,
     next_retrieval_cache: Dict[str, Any],
     transition: ProposedTransition,
+    invalidate_retrieval_cache: bool = False,
     user_content: str,
     user_meta: Dict[str, Any],
     assistant_content: str,
@@ -1945,6 +1956,7 @@ def _persist_conversation_turn(
             next_retrieval_cache=next_retrieval_cache,
             transition=transition,
             last_substantive_message_id=assistant_message_row["id"],
+            invalidate_retrieval_cache=invalidate_retrieval_cache,
         )
         refreshed_thread = _fetch_thread(conn, user_id, thread_id)
         conn.commit()
@@ -2637,50 +2649,68 @@ def _typed_authoritative_event_id(agent_result: Dict[str, Any]) -> Optional[str]
     return str(event_id) if event_id > 0 else None
 
 
-def _propose_conversation_transition(
+def _authoritative_transition_entity(
+    *,
+    agent_result: Dict[str, Any],
+    selected_resolution: Optional[EventResolution],
+) -> Optional[ActiveEntity]:
+    if selected_resolution is not None and selected_resolution.event and selected_resolution.status in {
+        "exact_id", "fallback_title_date",
+    }:
+        return ActiveEntity.event(selected_resolution.event["id"])
+    typed_event_id = _typed_authoritative_event_id(agent_result)
+    return ActiveEntity.event(typed_event_id) if typed_event_id is not None else None
+
+
+def _plan_conversation_transition(
     *,
     state: ConversationState,
     relationship: Optional[RelationshipDecision],
+    dimensions: Optional[ConversationDimensions],
     message: str,
     mode: str,
     agent_result: Dict[str, Any],
     selected_resolution: Optional[EventResolution],
     stale_active_event: bool,
-) -> ProposedTransition:
-    if selected_resolution is not None and selected_resolution.event and selected_resolution.status in {
-        "exact_id", "fallback_title_date",
-    }:
-        return ProposedTransition.activate_event(
-            state,
-            selected_resolution.event["id"],
-            previous_route="sql",
-        )
-    if stale_active_event:
-        return ProposedTransition.clear_event(state, previous_route="sql")
-    if (
-        relationship is not None
-        and relationship.reason_code is ReasonCode.ACTIVE_EVENT_PROPERTY_QUESTION
-    ):
-        return ProposedTransition.preserve(state)
-    typed_event_id = _typed_authoritative_event_id(agent_result)
-    if typed_event_id is not None:
-        return ProposedTransition.activate_event(state, typed_event_id, previous_route="sql")
-    current_topic = detect_civic_topic(message)
-    should_clear = (
-        state.active_entity is not None
-        and current_topic not in (None, "events")
-        and relationship is not None
-        and (
-            relationship.relationship is ConversationRelationship.NEW_TOPIC
-            or (
-                relationship.relationship is ConversationRelationship.STANDALONE
-                and relationship.reason_code is ReasonCode.SELF_CONTAINED_CIVIC_QUESTION
+    partial: bool = False,
+) -> ConversationTransition:
+    completion = classify_completion_status(agent_result, partial=partial)
+    return plan_conversation_transition(
+        current=state,
+        relationship=relationship,
+        dimensions=dimensions,
+        authoritative_entity=_authoritative_transition_entity(
+            agent_result=agent_result,
+            selected_resolution=selected_resolution,
+        ),
+        detected_topic=detect_civic_topic(message),
+        completed_route=mode,
+        completion_status=completion,
+        stale_active_entity=stale_active_event,
+        reference_context_applied=not bool(
+            dimensions
+            and (
+                dimensions.references.location_reference is not None
+                or dimensions.references.time_reference is not None
             )
-        )
+        ),
     )
-    if should_clear:
-        return ProposedTransition.clear_event(state, previous_route=mode)
-    return ProposedTransition.preserve(state)
+
+
+def _cache_for_conversation_transition(
+    *,
+    current_cache: Dict[str, Any],
+    next_cache: Dict[str, Any],
+    transition: ConversationTransition,
+) -> tuple[Dict[str, Any], bool]:
+    if transition.commit_allowed and transition.cache_action is CacheAction.INVALIDATE:
+        return create_empty_cache(), True
+    if (
+        not transition.commit_allowed
+        or transition.completion_status is not CompletionStatus.ACCEPTABLE
+    ):
+        return copy.deepcopy(current_cache), False
+    return next_cache, False
 
 
 def _execute_agent_response_with_event_context(
@@ -2848,6 +2878,7 @@ def _user_message_metadata(
     event_context: Optional[ValidatedEventContext],
     relationship: Optional[RelationshipDecision],
     dimensions: Optional[ConversationDimensions],
+    transition: Optional[ConversationTransition] = None,
     active_event_behavior_applied: bool = False,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
@@ -2857,6 +2888,8 @@ def _user_message_metadata(
         metadata["conversation_relationship"] = relationship.to_dict()
     if dimensions is not None:
         metadata["conversation_dimensions_shadow"] = dimensions.to_dict()
+    if transition is not None:
+        metadata["conversation_transition"] = transition.to_diagnostic_dict()
     if active_event_behavior_applied:
         metadata["active_event_followup_applied"] = True
     return metadata or None
@@ -3461,18 +3494,21 @@ def post_conversation_message(thread_id: str):
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
         resolved_entity = agent_result.get("resolved_entity")
-        transition = (
-            _propose_conversation_transition(
-                state=conversation_state,
-                relationship=relationship,
-                message=message,
-                mode=mode,
-                agent_result=agent_result,
-                selected_resolution=event_resolution,
-                stale_active_event=stale_active_event,
-            )
-            if response_allows_state_transition(agent_result)
-            else ProposedTransition.preserve(conversation_state)
+        conversation_transition = _plan_conversation_transition(
+            state=conversation_state,
+            relationship=relationship,
+            dimensions=dimensions,
+            message=message,
+            mode=mode,
+            agent_result=agent_result,
+            selected_resolution=event_resolution,
+            stale_active_event=stale_active_event,
+        )
+        transition = conversation_transition.state_proposal(conversation_state)
+        persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
+            current_cache=retrieval_cache,
+            next_cache=next_cache,
+            transition=conversation_transition,
         )
 
         persisted = _persist_conversation_turn(
@@ -3480,13 +3516,15 @@ def post_conversation_message(thread_id: str):
             user_id=g.current_user_row["id"],
             session_id=g.session_row["session_id"],
             expected_envelope=state_envelope,
-            next_retrieval_cache=next_cache,
+            next_retrieval_cache=persisted_cache,
             transition=transition,
+            invalidate_retrieval_cache=invalidate_retrieval_cache,
             user_content=message,
             user_meta=_user_message_metadata(
                 event_context=event_context,
                 relationship=relationship,
                 dimensions=dimensions,
+                transition=conversation_transition,
                 active_event_behavior_applied=active_event_result is not None,
             ),
             assistant_content=answer,
@@ -3757,31 +3795,37 @@ def post_conversation_message_stream(thread_id: str):
                 "retrieval_cache": next_cache,
                 "execution_degraded": bool(execution_metadata.get("execution_degraded")),
             }
-            transition = (
-                ProposedTransition.preserve(conversation_state)
-                if generation_degraded or not response_allows_state_transition(transition_result)
-                else _propose_conversation_transition(
-                    state=conversation_state,
-                    relationship=relationship,
-                    message=message,
-                    mode=mode,
-                    agent_result=transition_result,
-                    selected_resolution=event_resolution,
-                    stale_active_event=stale_active_event,
-                )
+            conversation_transition = _plan_conversation_transition(
+                state=conversation_state,
+                relationship=relationship,
+                dimensions=dimensions,
+                message=message,
+                mode=mode,
+                agent_result=transition_result,
+                selected_resolution=event_resolution,
+                stale_active_event=stale_active_event,
+                partial=generation_degraded,
+            )
+            transition = conversation_transition.state_proposal(conversation_state)
+            persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
+                current_cache=retrieval_cache,
+                next_cache=next_cache,
+                transition=conversation_transition,
             )
             persisted = _persist_conversation_turn(
                 thread_id=thread_id,
                 user_id=user_id,
                 session_id=session_id,
                 expected_envelope=state_envelope,
-                next_retrieval_cache=next_cache,
+                next_retrieval_cache=persisted_cache,
                 transition=transition,
+                invalidate_retrieval_cache=invalidate_retrieval_cache,
                 user_content=message,
                 user_meta=_user_message_metadata(
                     event_context=event_context,
                     relationship=relationship,
                     dimensions=dimensions,
+                    transition=conversation_transition,
                     active_event_behavior_applied=active_event_request,
                 ),
                 assistant_content=full_answer,

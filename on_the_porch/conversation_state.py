@@ -115,6 +115,7 @@ class TransitionAction(str, Enum):
     PRESERVE = "preserve"
     ACTIVATE_EVENT = "activate_event"
     CLEAR_EVENT = "clear_event"
+    REPLACE_STATE = "replace_state"
 
 
 @dataclass(frozen=True)
@@ -284,6 +285,7 @@ class ProposedTransition:
     expected_revision: int
     event_id: Optional[str] = None
     previous_route: Optional[str] = None
+    next_state: Optional[ConversationState] = None
 
     @property
     def expected_state_version(self) -> int:
@@ -320,6 +322,23 @@ class ProposedTransition:
             TransitionAction.CLEAR_EVENT,
             state.revision,
             previous_route=_bounded_optional(previous_route, _ROUTE_PATTERN),
+        )
+
+    @classmethod
+    def replace_state(
+        cls,
+        state: ConversationState,
+        next_state: ConversationState,
+    ) -> "ProposedTransition":
+        """Replace canonical semantic fields after the final transaction rechecks revision."""
+        if not isinstance(next_state, ConversationState):
+            raise ConversationStateError("replacement state must be canonical")
+        if next_state.revision != state.revision:
+            raise ConversationStateError("replacement state must keep the expected revision")
+        return cls(
+            TransitionAction.REPLACE_STATE,
+            state.revision,
+            next_state=next_state,
         )
 
 
@@ -733,6 +752,22 @@ def apply_transition(
             previous_route=proposal.previous_route,
             last_substantive_message_id=message_id,
         )
+    if proposal.action is TransitionAction.REPLACE_STATE:
+        replacement = proposal.next_state
+        if replacement is None or replacement.revision != state.revision:
+            raise ConversationStateError("invalid canonical replacement state")
+        if replacement == state:
+            return state
+        return ConversationState(
+            revision=increment_revision(state),
+            active_topic=replacement.active_topic,
+            active_entity=replacement.active_entity,
+            location=replacement.location,
+            time_range=replacement.time_range,
+            filters=replacement.filters,
+            previous_route=replacement.previous_route,
+            last_substantive_message_id=message_id,
+        )
     raise ConversationStateError("unsupported conversation state transition")
 
 
@@ -801,6 +836,7 @@ def merge_for_commit(
     next_retrieval_cache: Mapping[str, Any],
     transition: ProposedTransition,
     last_substantive_message_id: str,
+    force_cache_update: bool = False,
 ) -> CommitMergeResult:
     """Merge one request result without overwriting newer state or cache data."""
     current_state = current.conversation_state
@@ -816,7 +852,7 @@ def merge_for_commit(
         == retrieval_cache_hash(expected.retrieval_cache)
     )
     envelope = current
-    if cache_matches:
+    if cache_matches or force_cache_update:
         envelope = with_retrieval_cache(envelope, next_retrieval_cache)
     next_state = apply_transition(
         current_state,
@@ -827,6 +863,6 @@ def merge_for_commit(
     return CommitMergeResult(
         envelope=envelope,
         transition_applied=transition.action is not TransitionAction.PRESERVE,
-        cache_update_applied=cache_matches,
+        cache_update_applied=cache_matches or force_cache_update,
         version_conflict=False,
     )

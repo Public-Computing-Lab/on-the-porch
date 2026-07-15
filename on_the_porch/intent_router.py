@@ -88,7 +88,6 @@ _RSS_SOURCE_ALIASES = (
     "dotnews",
     "dot news",
     "csndc",
-    "codman",
     "codman square neighborhood development corporation",
     "codman square library",
     "bpl codman square",
@@ -227,7 +226,16 @@ def _mentions_rss_source(q: str) -> bool:
         h in q for h in ("news", "updates", "from", "newsletter", "dotnews", "dorchester reporter")
     ):
         return False
-    return any(alias in q for alias in _RSS_SOURCE_ALIASES)
+    if any(alias in q for alias in _RSS_SOURCE_ALIASES):
+        return True
+    return bool(
+        re.search(r"\bfrom\s+(?:the\s+)?codman(?:\s+square)?\b", q)
+        or re.search(
+            r"\bcodman(?:\s+square)?\s+"
+            r"(?:newsletter|news|updates|publication|website|site)\b",
+            q,
+        )
+    )
 
 
 def _looks_like_rss_news(q: str) -> bool:
