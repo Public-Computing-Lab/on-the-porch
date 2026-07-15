@@ -43,6 +43,7 @@ EVENTS = {
         "Community Meeting (Hosted by Substance Recovery Services)",
         "2026-07-16",
     ),
+    "437": ("Virtual Baby Cafe", "2026-07-22"),
 }
 
 
@@ -398,7 +399,13 @@ class _GuestClient:
         return response, events
 
 
-def _locked_race(client: _GuestClient, thread_id: str, *, streaming: bool):
+def _locked_race(
+    client: _GuestClient,
+    thread_id: str,
+    *,
+    streaming: bool,
+    event_ids=("435", "436"),
+):
     lock_conn = _db_connection()
     lock_cursor = lock_conn.cursor()
     lock_conn.start_transaction()
@@ -422,7 +429,7 @@ def _locked_race(client: _GuestClient, thread_id: str, *, streaming: bool):
         }
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(send, event_id) for event_id in ("435", "436")]
+        futures = [pool.submit(send, event_id) for event_id in event_ids]
         barrier.wait()
         time.sleep(0.25)
         lock_conn.commit()
@@ -476,7 +483,14 @@ def run_live_tests(base_url: str, iterations: int) -> None:
     migration_thread = client.create_thread("Version-1 migration race")
     _seed_version_1_event_state(migration_thread)
     migration_before = _thread_snapshot(migration_thread)
-    migration_results = _locked_race(client, migration_thread, streaming=False)
+    # Both candidates must differ from the seeded event 435. Re-selecting 435 is
+    # intentionally a semantic no-op and therefore does not advance the revision.
+    migration_results = _locked_race(
+        client,
+        migration_thread,
+        streaming=False,
+        event_ids=("436", "437"),
+    )
     migration_winner = _assert_one_winner(
         migration_thread,
         migration_before,
