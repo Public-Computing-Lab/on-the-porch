@@ -1443,36 +1443,39 @@ async function sendChatMessage(event) {
 
       if (!streamResult.success) {
         if (await handleAuthFailure(streamResult)) return;
+        const conversationConflict = streamResult.data?.code === 'conversation_conflict';
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
         // Retry once via the JSON endpoint, which completes without a live stream.
-        const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
-        if (retryResult.success) {
-          const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
-          if (threadIndex >= 0) {
-            state.threads[threadIndex] = retryResult.data.thread;
+        if (!conversationConflict) {
+          const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
+          if (retryResult.success) {
+            const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
+            if (threadIndex >= 0) {
+              state.threads[threadIndex] = retryResult.data.thread;
+            }
+            if (!isStale()) {
+              state.messages = normalizeMessages([
+                ...state.messages.filter((item) => item.id !== optimisticMessageId),
+                retryResult.data.user_message,
+                {
+                  ...retryResult.data.assistant_message,
+                  sources: normalizeSources(
+                    (retryResult.data.assistant_message && retryResult.data.assistant_message.sources
+                      && retryResult.data.assistant_message.sources.length)
+                      ? retryResult.data.assistant_message.sources
+                      : retryResult.data.sources,
+                  ),
+                },
+              ]);
+            }
+            renderThreads();
+            updateThreadHeader();
+            renderMessages();
+            return;
           }
-          if (!isStale()) {
-            state.messages = normalizeMessages([
-              ...state.messages.filter((item) => item.id !== optimisticMessageId),
-              retryResult.data.user_message,
-              {
-                ...retryResult.data.assistant_message,
-                sources: normalizeSources(
-                  (retryResult.data.assistant_message && retryResult.data.assistant_message.sources
-                    && retryResult.data.assistant_message.sources.length)
-                    ? retryResult.data.assistant_message.sources
-                    : retryResult.data.sources,
-                ),
-              },
-            ]);
-          }
-          renderThreads();
-          updateThreadHeader();
-          renderMessages();
-          return;
         }
         // The streaming bubble lives only in the DOM; re-rendering from state
         // (which never held it) removes it cleanly.

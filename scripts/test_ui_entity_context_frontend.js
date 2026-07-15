@@ -104,6 +104,8 @@ function testAppWiringUsesOnePayloadAndClearsManualActions() {
   assert.match(source, /suggestions\.addEventListener\('click',[\s\S]*eventContextStore\.clear\(\)/);
   assert.match(source, /async function loadMessages\(threadId\) \{\s*eventContextStore\.clear\(\)/);
   assert.match(source, /function restoreFailedChatComposer[\s\S]*restoreOutboundPayload\(outboundPayload\)/);
+  assert.match(source, /streamResult\.data\?\.code === 'conversation_conflict'/);
+  assert.match(source, /if \(!conversationConflict\) \{[\s\S]*sendMessage\(threadId, outboundPayload\)/);
 }
 
 const tests = [

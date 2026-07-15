@@ -1773,9 +1773,36 @@ def _load_thread_state_envelope(raw: Any) -> ThreadStateEnvelope:
         return ThreadStateEnvelope(retrieval_cache=create_empty_cache())
 
 
-def _commit_thread_state(
+CONVERSATION_CONFLICT_MESSAGE = (
+    "This conversation changed while your message was being processed. Please try again."
+)
+
+
+class ConversationConflictError(RuntimeError):
+    """Raised when generated output is stale before persistence begins."""
+
+
+def _lock_thread_for_persistence(conn, user_id: str, thread_id: str) -> Dict[str, Any]:
+    """Lock one owned thread before inserting any child message rows."""
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT * FROM conversation_threads "
+            "WHERE id = %s AND user_id = %s AND deleted_at IS NULL FOR UPDATE",
+            (thread_id, user_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise LookupError("conversation thread no longer exists")
+        return row
+    finally:
+        cursor.close()
+
+
+def _merge_locked_thread_state(
     conn,
     *,
+    locked_thread: Dict[str, Any],
     thread_id: str,
     user_id: str,
     expected_envelope: ThreadStateEnvelope,
@@ -1783,19 +1810,10 @@ def _commit_thread_state(
     transition: ProposedTransition,
     last_substantive_message_id: str,
 ) -> Dict[str, Any]:
-    """Commit cache/state after message inserts without overwriting newer state."""
+    """Merge cache/state after the caller has locked the parent thread row."""
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute(
-            "SELECT thread_state_json FROM conversation_threads "
-            "WHERE id = %s AND user_id = %s AND deleted_at IS NULL FOR UPDATE",
-            (thread_id, user_id),
-        )
-        row = cursor.fetchone()
-        if not row:
-            raise LookupError("conversation thread no longer exists")
-
-        current = _load_thread_state_envelope(row.get("thread_state_json"))
+        current = _load_thread_state_envelope(locked_thread.get("thread_state_json"))
         current_state = current.conversation_state
         if current_state.state_version != transition.expected_state_version:
             print(
@@ -1809,17 +1827,7 @@ def _commit_thread_state(
                 file=sys.stderr,
                 flush=True,
             )
-            cursor.execute(
-                "UPDATE conversation_threads SET last_message_at = %s "
-                "WHERE id = %s AND user_id = %s",
-                (utcnow(), thread_id, user_id),
-            )
-            return {
-                "transition_applied": False,
-                "cache_update_applied": False,
-                "state": current_state,
-                "version_conflict": True,
-            }
+            raise ConversationConflictError(CONVERSATION_CONFLICT_MESSAGE)
 
         merged = merge_for_commit(
             current,
@@ -1856,6 +1864,139 @@ def _commit_thread_state(
         }
     finally:
         cursor.close()
+
+
+def _persist_conversation_turn(
+    *,
+    thread_id: str,
+    user_id: str,
+    session_id: str,
+    expected_envelope: ThreadStateEnvelope,
+    next_retrieval_cache: Dict[str, Any],
+    transition: ProposedTransition,
+    user_content: str,
+    user_meta: Dict[str, Any],
+    assistant_content: str,
+    assistant_mode: str,
+    assistant_sources: List[Dict[str, Any]],
+    assistant_model_name: Optional[str],
+    resolved_entity: Optional[Dict[str, str]],
+    set_initial_title: bool,
+) -> Dict[str, Any]:
+    """Persist one complete turn using a single lock-first transaction."""
+    conn = None
+    refreshed_thread = None
+    user_message_row = None
+    assistant_message_row = None
+    try:
+        conn = get_db_connection()
+        conn.start_transaction()
+        locked_thread = _lock_thread_for_persistence(conn, user_id, thread_id)
+        current = _load_thread_state_envelope(locked_thread.get("thread_state_json"))
+        if current.conversation_state.state_version != transition.expected_state_version:
+            print(
+                json_dumps({
+                    "event": "conversation_state_version_conflict",
+                    "thread_id": thread_id,
+                    "expected_version": transition.expected_state_version,
+                    "current_version": current.conversation_state.state_version,
+                    "transition": transition.action.value,
+                }),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise ConversationConflictError(CONVERSATION_CONFLICT_MESSAGE)
+
+        user_message_row = _insert_message(
+            conn,
+            thread_id=thread_id,
+            user_id=user_id,
+            role="user",
+            content=user_content,
+            message_meta=user_meta,
+        )
+        assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
+        assistant_message_row = _insert_message(
+            conn,
+            thread_id=thread_id,
+            user_id=user_id,
+            role="assistant",
+            content=assistant_content,
+            response_mode=assistant_mode,
+            sources=assistant_sources,
+            model_name=assistant_model_name,
+            message_meta=assistant_meta,
+        )
+        if set_initial_title and locked_thread.get("title") == "New conversation":
+            _update_thread(conn, thread_id, title=summarize_thread_title(user_content))
+
+        transition_result = _merge_locked_thread_state(
+            conn,
+            locked_thread=locked_thread,
+            thread_id=thread_id,
+            user_id=user_id,
+            expected_envelope=expected_envelope,
+            next_retrieval_cache=next_retrieval_cache,
+            transition=transition,
+            last_substantive_message_id=assistant_message_row["id"],
+        )
+        refreshed_thread = _fetch_thread(conn, user_id, thread_id)
+        conn.commit()
+    except Exception:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+    # Interaction logging is intentionally best-effort and starts only after the
+    # resident turn has committed and released its pooled connection.
+    log_conn = None
+    log_id = None
+    try:
+        log_conn = get_db_connection()
+        log_conn.start_transaction()
+        log_id = log_interaction(
+            session_id=session_id,
+            client_query=user_content,
+            app_response=assistant_content,
+            mode=assistant_mode,
+            user_id=user_id,
+            thread_id=thread_id,
+            message_id=assistant_message_row["id"],
+            conn=log_conn,
+        )
+        if log_id is None:
+            log_conn.rollback()
+        else:
+            assistant_meta = _assistant_message_metadata(
+                log_id=log_id,
+                resolved_entity=resolved_entity,
+            )
+            _update_message_meta(log_conn, assistant_message_row["id"], assistant_meta)
+            log_conn.commit()
+            assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
+    except Exception as exc:
+        if log_conn:
+            try:
+                log_conn.rollback()
+            except Exception:
+                pass
+        _log_exception("Failed to log persisted conversation turn", exc)
+    finally:
+        if log_conn:
+            log_conn.close()
+
+    return {
+        "thread": refreshed_thread,
+        "user_message": user_message_row,
+        "assistant_message": assistant_message_row,
+        "transition": transition_result,
+    }
 
 
 
@@ -2046,11 +2187,13 @@ def log_interaction(
     user_id: Optional[str] = None,
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
+    conn=None,
 ) -> Optional[int]:
-    conn = None
+    owns_connection = conn is None
     cursor = None
     try:
-        conn = get_db_connection()
+        if owns_connection:
+            conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         if log_id:
             cursor.execute(
@@ -2091,7 +2234,8 @@ def log_interaction(
                     f"UPDATE interaction_log SET {', '.join(update_fields)} WHERE id = %s",
                     tuple(values),
                 )
-            conn.commit()
+            if owns_connection:
+                conn.commit()
             return log_id
 
         cursor.execute(
@@ -2112,15 +2256,21 @@ def log_interaction(
                 message_id,
             ),
         )
-        conn.commit()
+        if owns_connection:
+            conn.commit()
         return cursor.lastrowid
     except Exception as exc:
+        if owns_connection and conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         _log_exception("Error logging interaction", exc)
         return None
     finally:
         if cursor:
             cursor.close()
-        if conn:
+        if owns_connection and conn:
             conn.close()
 
 
@@ -3247,79 +3397,44 @@ def post_conversation_message(thread_id: str):
             else ProposedTransition.preserve(conversation_state)
         )
 
-        conn = get_db_connection()
-        thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        if not thread:
-            return _json_error("Conversation not found.", 404, "conversation_not_found")
-
-        user_message_row = _insert_message(
-            conn,
+        persisted = _persist_conversation_turn(
             thread_id=thread_id,
             user_id=g.current_user_row["id"],
-            role="user",
-            content=message,
-            message_meta=_user_message_metadata(
+            session_id=g.session_row["session_id"],
+            expected_envelope=state_envelope,
+            next_retrieval_cache=next_cache,
+            transition=transition,
+            user_content=message,
+            user_meta=_user_message_metadata(
                 event_context=event_context,
                 relationship=relationship,
                 active_event_behavior_applied=active_event_result is not None,
             ),
-        )
-
-        assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
-        assistant_message_row = _insert_message(
-            conn,
-            thread_id=thread_id,
-            user_id=g.current_user_row["id"],
-            role="assistant",
-            content=answer,
-            response_mode=mode,
-            sources=sources,
-            model_name=resolve_execution_model_name(
+            assistant_content=answer,
+            assistant_mode=mode,
+            assistant_sources=sources,
+            assistant_model_name=resolve_execution_model_name(
                 agent_result,
                 configured_model=os.getenv("GEMINI_MODEL", ""),
             ),
-            message_meta=assistant_meta,
-        )
-
-        if thread["title"] == "New conversation" and len(history_rows) == 0:
-            _update_thread(conn, thread_id, title=summarize_thread_title(message))
-        _commit_thread_state(
-            conn,
-            thread_id=thread_id,
-            user_id=g.current_user_row["id"],
-            expected_envelope=state_envelope,
-            next_retrieval_cache=next_cache,
-            transition=transition,
-            last_substantive_message_id=assistant_message_row["id"],
-        )
-
-        log_id = log_interaction(
-            session_id=g.session_row["session_id"],
-            client_query=message,
-            app_response=answer,
-            mode=mode,
-            user_id=g.current_user_row["id"],
-            thread_id=thread_id,
-            message_id=assistant_message_row["id"],
-        )
-        assistant_meta = _assistant_message_metadata(
-            log_id=log_id,
             resolved_entity=resolved_entity,
+            set_initial_title=len(history_rows) == 0,
         )
-        _update_message_meta(conn, assistant_message_row["id"], assistant_meta)
-        conn.commit()
-
-        refreshed_thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
 
         response_payload = {
-            "thread": _serialize_thread(refreshed_thread),
-            "user_message": _serialize_message(user_message_row),
-            "assistant_message": _serialize_message(assistant_message_row),
+            "thread": _serialize_thread(persisted["thread"]),
+            "user_message": _serialize_message(persisted["user_message"]),
+            "assistant_message": _serialize_message(persisted["assistant_message"]),
         }
         if resolved_entity:
             response_payload["resolved_entity"] = resolved_entity
         return jsonify(response_payload), 201
+    except ConversationConflictError:
+        return _json_error(
+            CONVERSATION_CONFLICT_MESSAGE,
+            409,
+            "conversation_conflict",
+        )
     except Exception as exc:
         if conn:
             conn.rollback()
@@ -3541,7 +3656,6 @@ def post_conversation_message_stream(thread_id: str):
                     },
                 )
 
-        conn2 = None
         try:
             if deterministic_request:
                 sources = selected_sources
@@ -3551,40 +3665,6 @@ def post_conversation_message_stream(thread_id: str):
                     if cache_hit and cached_sources
                     else extract_sources(mode, result_payload)
                 )
-            conn2 = get_db_connection()
-            thread2 = _fetch_thread(conn2, user_id, thread_id)
-            if not thread2:
-                yield _sse({"type": "error", "error": "Conversation not found."})
-                return
-            user_message_row = _insert_message(
-                conn2, thread_id=thread_id, user_id=user_id, role="user", content=message,
-                message_meta=_user_message_metadata(
-                    event_context=event_context,
-                    relationship=relationship,
-                    active_event_behavior_applied=active_event_request,
-                ),
-            )
-            assistant_meta = _assistant_message_metadata(resolved_entity=resolved_entity)
-            assistant_message_row = _insert_message(
-                conn2, thread_id=thread_id, user_id=user_id, role="assistant",
-                content=full_answer, response_mode=mode, sources=sources,
-                model_name=resolve_execution_model_name(
-                    (
-                        deterministic_result
-                        if deterministic_request
-                        else execution_metadata
-                    ),
-                    configured_model=os.getenv("GEMINI_MODEL", ""),
-                    llm_calls=(
-                        0
-                        if deterministic_request or cache_hit
-                        else execution_metadata.get("llm_calls", get_llm_calls())
-                    ),
-                ),
-                message_meta=assistant_meta,
-            )
-            if existing_title == "New conversation" and is_first_message:
-                _update_thread(conn2, thread_id, title=summarize_thread_title(message))
             transition_result = deterministic_result or {
                 "answer": full_answer,
                 "mode": mode,
@@ -3606,36 +3686,46 @@ def post_conversation_message_stream(thread_id: str):
                     stale_active_event=stale_active_event,
                 )
             )
-            _commit_thread_state(
-                conn2,
+            persisted = _persist_conversation_turn(
                 thread_id=thread_id,
                 user_id=user_id,
+                session_id=session_id,
                 expected_envelope=state_envelope,
                 next_retrieval_cache=next_cache,
                 transition=transition,
-                last_substantive_message_id=assistant_message_row["id"],
-            )
-            log_id = log_interaction(
-                session_id=session_id, client_query=message, app_response=full_answer,
-                mode=mode, user_id=user_id, thread_id=thread_id,
-                message_id=assistant_message_row["id"],
-            )
-            assistant_meta = _assistant_message_metadata(
-                log_id=log_id,
+                user_content=message,
+                user_meta=_user_message_metadata(
+                    event_context=event_context,
+                    relationship=relationship,
+                    active_event_behavior_applied=active_event_request,
+                ),
+                assistant_content=full_answer,
+                assistant_mode=mode,
+                assistant_sources=sources,
+                assistant_model_name=resolve_execution_model_name(
+                    (
+                        deterministic_result
+                        if deterministic_request
+                        else execution_metadata
+                    ),
+                    configured_model=os.getenv("GEMINI_MODEL", ""),
+                    llm_calls=(
+                        0
+                        if deterministic_request or cache_hit
+                        else execution_metadata.get("llm_calls", get_llm_calls())
+                    ),
+                ),
                 resolved_entity=resolved_entity,
+                set_initial_title=existing_title == "New conversation" and is_first_message,
             )
-            _update_message_meta(conn2, assistant_message_row["id"], assistant_meta)
-            conn2.commit()
-            refreshed_thread = _fetch_thread(conn2, user_id, thread_id)
-            assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
             final_payload = {
                 "type": "final",
                 "answer": full_answer,
                 "mode": mode,
                 "sources": sources,
-                "thread": _serialize_thread(refreshed_thread),
-                "user_message": _serialize_message(user_message_row),
-                "assistant_message": _serialize_message(assistant_message_row),
+                "thread": _serialize_thread(persisted["thread"]),
+                "user_message": _serialize_message(persisted["user_message"]),
+                "assistant_message": _serialize_message(persisted["assistant_message"]),
             }
             if resolved_entity:
                 final_payload["resolved_entity"] = resolved_entity
@@ -3656,16 +3746,28 @@ def post_conversation_message_stream(thread_id: str):
                 )
                 if enriched != full_answer:
                     yield _sse({"type": "correction", "text": enriched})
+                    correction_conn = None
+                    cursor = None
                     try:
-                        cursor = conn2.cursor()
+                        correction_conn = get_db_connection()
+                        cursor = correction_conn.cursor()
                         cursor.execute(
                             "UPDATE conversation_messages SET content = %s WHERE id = %s",
-                            (enriched, assistant_message_row["id"]),
+                            (enriched, persisted["assistant_message"]["id"]),
                         )
-                        conn2.commit()
-                        cursor.close()
+                        correction_conn.commit()
                     except Exception as exc:  # noqa: BLE001
+                        if correction_conn:
+                            try:
+                                correction_conn.rollback()
+                            except Exception:
+                                pass
                         _log_exception("Failed to persist Boston.gov correction", exc)
+                    finally:
+                        if cursor:
+                            cursor.close()
+                        if correction_conn:
+                            correction_conn.close()
                     full_answer = enriched
             _log_agent_metrics(
                 mode=mode,
@@ -3678,17 +3780,15 @@ def post_conversation_message_stream(thread_id: str):
                         else ({"active_event_followup": True} if active_event_request else None)
                     ),
             )
+        except ConversationConflictError:
+            yield _sse({
+                "type": "error",
+                "error": CONVERSATION_CONFLICT_MESSAGE,
+                "code": "conversation_conflict",
+            })
         except Exception as exc:  # noqa: BLE001
-            if conn2:
-                try:
-                    conn2.rollback()
-                except Exception:
-                    pass
             _log_exception("Error persisting streamed message", exc)
             yield _sse({"type": "error", "error": "Failed to save message."})
-        finally:
-            if conn2:
-                conn2.close()
 
     return Response(
         stream_with_context(_generate()),
