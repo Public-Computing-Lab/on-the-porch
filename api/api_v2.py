@@ -181,6 +181,7 @@ from turn_idempotency import (  # noqa: E402
     build_request_fingerprint,
     complete_turn_on_connection,
     fail_turn,
+    maybe_fault,
     validate_client_turn_id,
     wait_for_completed_turn,
 )
@@ -887,6 +888,21 @@ def _json_error(message: str, status: int, code: Optional[str] = None):
     if code:
         payload["code"] = code
     return jsonify(payload), status
+
+
+def _turn_in_progress_response(retry_after: int = 1):
+    """Controlled retryable conflict while an identical turn is still completing."""
+    retry_after = max(1, min(5, int(retry_after)))
+    response = jsonify(
+        {
+            "error": "This turn is already being processed. Please wait and try again.",
+            "code": "turn_in_progress",
+            "retry_after": retry_after,
+        }
+    )
+    response.status_code = 409
+    response.headers["Retry-After"] = str(retry_after)
+    return response
 
 
 
@@ -1743,6 +1759,19 @@ def _load_replay_turn_payload(
     }
 
 
+def _is_retryable_db_contention(exc: BaseException) -> bool:
+    errno = getattr(exc, "errno", None)
+    name = exc.__class__.__name__
+    text = str(exc).lower()
+    return (
+        name == "PoolError"
+        or errno in {1213, 1205}
+        or "pool" in text
+        or "deadlock" in text
+        or "lock wait timeout" in text
+    )
+
+
 def _resolve_turn_reservation(
     *,
     payload: Mapping[str, Any],
@@ -1780,24 +1809,25 @@ def _resolve_turn_reservation(
     except TurnIdempotencyError as exc:
         return None, _json_error(str(exc), 400, "invalid_client_turn_id")
     except Exception as exc:
-        if exc.__class__.__name__ == "PoolError" or "pool" in str(exc).lower():
-            return None, _json_error(
-                "This turn is already being processed. Please wait and try again.",
-                409,
-                "turn_in_progress",
-            )
+        if _is_retryable_db_contention(exc):
+            return None, _turn_in_progress_response(1)
         raise
 
     if reservation.replay:
         return reservation, None
 
     if not reservation.owned:
-        waited = wait_for_completed_turn(
-            get_db_connection,
-            thread_id=thread_id,
-            client_turn_id=client_turn_id,
-            request_fingerprint=fingerprint,
-        )
+        try:
+            waited = wait_for_completed_turn(
+                get_db_connection,
+                thread_id=thread_id,
+                client_turn_id=client_turn_id,
+                request_fingerprint=fingerprint,
+            )
+        except Exception as exc:
+            if _is_retryable_db_contention(exc):
+                return None, _turn_in_progress_response(1)
+            raise
         if waited is not None and waited.replay:
             return waited, None
         try:
@@ -1815,21 +1845,13 @@ def _resolve_turn_reservation(
                 "idempotency_key_reused",
             )
         except Exception as exc:
-            if exc.__class__.__name__ == "PoolError" or "pool" in str(exc).lower():
-                return None, _json_error(
-                    "This turn is already being processed. Please wait and try again.",
-                    409,
-                    "turn_in_progress",
-                )
+            if _is_retryable_db_contention(exc):
+                return None, _turn_in_progress_response(1)
             raise
         if reservation.replay:
             return reservation, None
         if not reservation.owned:
-            return None, _json_error(
-                "This turn is already being processed. Please wait and try again.",
-                409,
-                "turn_in_progress",
-            )
+            return None, _turn_in_progress_response(1)
     return reservation, None
 
 
@@ -2076,15 +2098,18 @@ def _persist_conversation_turn(
         )
         refreshed_thread = _fetch_thread(conn, user_id, thread_id)
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
+            maybe_fault("before_persist_complete")
             completed = complete_turn_on_connection(
                 conn,
                 turn_row_id=turn_reservation.turn_row_id,
                 lease_owner=turn_reservation.lease_owner,
                 user_message_id=user_message_row["id"],
                 assistant_message_id=assistant_message_row["id"],
+                request_fingerprint=turn_reservation.request_fingerprint,
             )
             if not completed:
                 raise RuntimeError("Failed to mark conversation turn completed")
+        maybe_fault("before_persist_commit")
         conn.commit()
     except Exception:
         if conn:
@@ -2102,6 +2127,8 @@ def _persist_conversation_turn(
     finally:
         if conn:
             conn.close()
+
+    maybe_fault("after_persist_commit")
 
     if not interaction_log_enabled:
         return {
@@ -4045,6 +4072,7 @@ def post_conversation_message(thread_id: str):
 
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
+        maybe_fault("before_generation")
         if emergency_decision.is_active_emergency:
             agent_result = _emergency_agent_result(
                 emergency_decision,
@@ -4193,6 +4221,8 @@ def post_conversation_message(thread_id: str):
                 turn_row_id=turn_reservation.turn_row_id,
                 lease_owner=turn_reservation.lease_owner,
             )
+        if _is_retryable_db_contention(exc):
+            return _turn_in_progress_response(1)
         if emergency_decision is not None and emergency_decision.is_active_emergency:
             _log_emergency_metrics(
                 emergency_decision,
@@ -4379,6 +4409,8 @@ def post_conversation_message_stream(thread_id: str):
                 turn_row_id=turn_reservation.turn_row_id,
                 lease_owner=turn_reservation.lease_owner,
             )
+        if _is_retryable_db_contention(exc):
+            return _turn_in_progress_response(1)
         _log_exception("Error preparing streamed message", exc)
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
     finally:
@@ -4426,6 +4458,7 @@ def post_conversation_message_stream(thread_id: str):
 
         try:
             yield ": keepalive\n\n"
+            maybe_fault("before_generation")
             if emergency_request:
                 deterministic_result = _emergency_agent_result(
                     emergency_decision,
@@ -4678,6 +4711,7 @@ def post_conversation_message_stream(thread_id: str):
                     success=True,
                     detector_latency_ms=detector_latency_ms,
                 )
+            maybe_fault("before_sse_final")
             yield _sse(final_payload)
             if not emergency_request:
                 _log_agent_metrics(
@@ -4719,6 +4753,14 @@ def post_conversation_message_stream(thread_id: str):
                     turn_row_id=turn_reservation.turn_row_id,
                     lease_owner=turn_reservation.lease_owner,
                 )
+            if _is_retryable_db_contention(exc):
+                yield _sse({
+                    "type": "error",
+                    "error": "This turn is already being processed. Please wait and try again.",
+                    "code": "turn_in_progress",
+                    "retry_after": 1,
+                })
+                return
             if emergency_request:
                 _log_emergency_metrics(
                     emergency_decision,

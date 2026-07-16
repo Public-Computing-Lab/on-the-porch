@@ -1286,6 +1286,26 @@ function createClientTurnId() {
   return `ct-${Date.now().toString(36)}-${rand}`;
 }
 
+function sleepMs(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, delay);
+  });
+}
+
+async function sendJsonWithTurnRetry(threadId, outboundPayload, { maxAttempts = 3 } = {}) {
+  let lastResult = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    lastResult = await ApiClient.sendMessage(threadId, outboundPayload);
+    if (lastResult.success) return lastResult;
+    if (lastResult.data?.code !== 'turn_in_progress') return lastResult;
+    const retryAfterRaw = lastResult.data?.retry_after ?? lastResult.retryAfter ?? 1;
+    const retryAfterSec = Math.min(5, Math.max(0.2, Number(retryAfterRaw) || 1));
+    await sleepMs(retryAfterSec * 1000);
+  }
+  return lastResult;
+}
+
 async function sendChatMessage(event) {
   event.preventDefault();
   if (state.isSendingMessage) return;
@@ -1345,7 +1365,7 @@ async function sendChatMessage(event) {
 
   try {
     if (instant) {
-      const result = await ApiClient.sendMessage(threadId, outboundPayload);
+      const result = await sendJsonWithTurnRetry(threadId, outboundPayload);
       removeTypingIndicator();
 
       if (!result.success) {
@@ -1460,17 +1480,27 @@ async function sendChatMessage(event) {
       if (!streamResult.success) {
         if (await handleAuthFailure(streamResult)) return;
         const conversationConflict = streamResult.data?.code === 'conversation_conflict';
-        const idempotencyConflict = streamResult.data?.code === 'idempotency_key_reused'
-          || streamResult.data?.code === 'turn_in_progress';
+        const keyReuseConflict = streamResult.data?.code === 'idempotency_key_reused';
+        const turnInProgress = streamResult.data?.code === 'turn_in_progress';
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
         // Retry once via the JSON endpoint with the same client_turn_id so a
         // committed SSE turn is replayed instead of creating a duplicate.
-        if (!conversationConflict && !idempotencyConflict) {
-          const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
-          if (retryResult.success) {
+        // turn_in_progress is also retried with the same ID (bounded).
+        // idempotency_key_reused must not auto-retry with a changed payload.
+        if (!conversationConflict && !keyReuseConflict) {
+          let retryResult = null;
+          if (turnInProgress) {
+            retryResult = await sendJsonWithTurnRetry(threadId, outboundPayload);
+          } else {
+            retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
+            if (!retryResult.success && retryResult.data?.code === 'turn_in_progress') {
+              retryResult = await sendJsonWithTurnRetry(threadId, outboundPayload);
+            }
+          }
+          if (retryResult && retryResult.success) {
             const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
             if (threadIndex >= 0) {
               state.threads[threadIndex] = retryResult.data.thread;
@@ -1536,7 +1566,7 @@ async function sendChatMessage(event) {
       return;
     }
 
-    const result = await ApiClient.sendMessage(threadId, outboundPayload);
+    const result = await sendJsonWithTurnRetry(threadId, outboundPayload);
     removeTypingIndicator();
 
     if (!result.success) {

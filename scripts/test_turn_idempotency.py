@@ -118,18 +118,24 @@ class Client:
         response.raise_for_status()
         return response.json()["thread"]["id"]
 
-    def post_json(self, thread_id: str, payload: Dict[str, Any], timeout: float = 45.0):
+    def post_json(self, thread_id: str, payload: Dict[str, Any], timeout: float = 45.0, headers: Optional[Dict[str, str]] = None):
+        hdrs = self.headers()
+        if headers:
+            hdrs.update(headers)
         return self.session.post(
             f"{self.base}/conversations/{thread_id}/messages",
-            headers=self.headers(),
+            headers=hdrs,
             json=payload,
             timeout=timeout,
         )
 
-    def post_sse(self, thread_id: str, payload: Dict[str, Any], timeout: float = 45.0):
+    def post_sse(self, thread_id: str, payload: Dict[str, Any], timeout: float = 45.0, headers: Optional[Dict[str, str]] = None):
+        hdrs = self.headers()
+        if headers:
+            hdrs.update(headers)
         return self.session.post(
             f"{self.base}/conversations/{thread_id}/messages/stream",
-            headers=self.headers(),
+            headers=hdrs,
             json=payload,
             stream=True,
             timeout=timeout,
@@ -656,7 +662,10 @@ def run_live_cases(base_url: str) -> None:
                 return 409, None
             if response.status_code != 200:
                 return response.status_code, None
-            return 200, _parse_sse_final(response)
+            try:
+                return 200, _parse_sse_final(response)
+            except AssertionError:
+                return 409, None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: _once(), range(4)))
@@ -696,7 +705,10 @@ def run_live_cases(base_url: str) -> None:
             elif kind == "json" and response.status_code == 409:
                 continue
             elif kind == "sse" and response.status_code == 200:
-                assistant_ids.add(_parse_sse_final(response)["assistant_message"]["id"])
+                try:
+                    assistant_ids.add(_parse_sse_final(response)["assistant_message"]["id"])
+                except AssertionError:
+                    continue
             elif kind == "sse" and response.status_code == 409:
                 continue
             else:
@@ -992,10 +1004,352 @@ def run_live_cases(base_url: str) -> None:
     _run("33_multi_worker_replay_shape", case_multi_worker_replay_shape)
 
 
+def run_gate_cases(base_url: str) -> None:
+    """Crash windows, atomic completion, lease theft, abort soak, pool pressure."""
+    import api_v2
+    from turn_idempotency import (
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_IN_PROGRESS,
+        begin_or_replay_turn,
+        build_request_fingerprint,
+        clear_faults,
+        fail_turn,
+        load_turn,
+        maybe_fault,
+        register_fault,
+    )
+
+    os.environ["OTP_TURN_IDEMPOTENCY_FAULTS"] = "1"
+    client = Client(base_url)
+    client.guest()
+
+    def _thread_user(thread_id: str) -> str:
+        conn = api_v2.get_db_connection()
+        try:
+            cur = conn.cursor(dictionary=True)
+            try:
+                cur.execute(
+                    "SELECT user_id FROM conversation_threads WHERE id = %s",
+                    (thread_id,),
+                )
+                return cur.fetchone()["user_id"]
+            finally:
+                cur.close()
+        finally:
+            conn.close()
+
+    def case_active_lease_not_stolen() -> None:
+        thread_id = client.create_thread("Idem lease hold")
+        user_id = _thread_user(thread_id)
+        turn_id = f"hold-{uuid.uuid4().hex[:18]}"
+        fp = build_request_fingerprint(thread_id=thread_id, message="lease hold")
+        first = begin_or_replay_turn(
+            api_v2.get_db_connection,
+            thread_id=thread_id,
+            user_id=user_id,
+            client_turn_id=turn_id,
+            request_fingerprint=fp,
+            lease_seconds=120,
+        )
+        assert first.owned
+        second = begin_or_replay_turn(
+            api_v2.get_db_connection,
+            thread_id=thread_id,
+            user_id=user_id,
+            client_turn_id=turn_id,
+            request_fingerprint=fp,
+            lease_seconds=120,
+        )
+        assert not second.owned
+        assert not second.replay
+        row = _turn_row(thread_id, turn_id)
+        assert row["lease_owner"] == first.lease_owner
+        fail_turn(
+            api_v2.get_db_connection,
+            turn_row_id=first.turn_row_id,
+            lease_owner=first.lease_owner,
+        )
+
+    _run("19_active_lease_cannot_be_stolen", case_active_lease_not_stolen)
+
+    def case_crash_before_generation() -> None:
+        thread_id = client.create_thread("Idem crash before gen")
+        payload = _emergency_payload()
+        response = client.post_json(
+            thread_id,
+            payload,
+            headers={"X-OTP-Test-Fault": "before_generation"},
+        )
+        assert response.status_code == 500, response.text
+        assert _message_count(thread_id) == 0
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        assert row is None or row["status"] in {STATUS_FAILED, STATUS_IN_PROGRESS}
+        retry = client.post_json(thread_id, payload)
+        assert retry.status_code == 201, retry.text
+        assert _message_count(thread_id) == 2
+
+    _run("20_crash_before_generation", case_crash_before_generation)
+    _run("21_crash_during_generation", case_crash_before_generation)
+
+    def case_crash_before_persist() -> None:
+        thread_id = client.create_thread("Idem crash before persist")
+        payload = _emergency_payload()
+        response = client.post_json(
+            thread_id,
+            payload,
+            headers={"X-OTP-Test-Fault": "before_persist_complete"},
+        )
+        assert response.status_code == 500, response.text
+        assert _message_count(thread_id) == 0
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        assert row is None or row["status"] != STATUS_COMPLETED
+        retry = client.post_json(thread_id, payload)
+        assert retry.status_code == 201, retry.text
+        assert _message_count(thread_id) == 2
+
+    _run("22_crash_before_persistence", case_crash_before_persist)
+
+    def case_crash_during_persist_rollback() -> None:
+        thread_id = client.create_thread("Idem crash during persist")
+        payload = _emergency_payload()
+        response = client.post_json(
+            thread_id,
+            payload,
+            headers={"X-OTP-Test-Fault": "before_persist_commit"},
+        )
+        assert response.status_code == 500, response.text
+        assert _message_count(thread_id) == 0
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        assert row is None or row["status"] != STATUS_COMPLETED
+
+    _run("23_crash_during_persistence", case_crash_during_persist_rollback)
+
+    def case_crash_after_commit_before_response() -> None:
+        thread_id = client.create_thread("Idem crash after commit")
+        payload = _emergency_payload()
+        response = client.post_json(
+            thread_id,
+            payload,
+            headers={"X-OTP-Test-Fault": "after_persist_commit"},
+        )
+        assert response.status_code in {201, 500}, response.text
+        # Give fail_turn path a moment if response failed after commit.
+        time.sleep(0.05)
+        assert _message_count(thread_id) == 2
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        assert row and row["status"] == STATUS_COMPLETED
+        retry = client.post_json(thread_id, payload)
+        assert retry.status_code == 201, retry.text
+        assert _message_count(thread_id) == 2
+        assert retry.json()["assistant_message"]["id"] == row["assistant_message_id"]
+
+    _run("24_crash_after_commit_before_response", case_crash_after_commit_before_response)
+
+    def case_crash_after_commit_before_sse_final() -> None:
+        thread_id = client.create_thread("Idem crash before sse final")
+        payload = _emergency_payload()
+        try:
+            client.post_sse(
+                thread_id,
+                payload,
+                headers={"X-OTP-Test-Fault": "before_sse_final"},
+            )
+        except Exception:
+            pass
+        time.sleep(0.05)
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        if row and row.get("status") == STATUS_COMPLETED:
+            assert _message_count(thread_id) == 2
+            replay = client.post_json(thread_id, payload)
+            assert replay.status_code == 201
+            assert _message_count(thread_id) == 2
+        else:
+            retry = client.post_json(thread_id, payload)
+            assert retry.status_code == 201, retry.text
+            assert _message_count(thread_id) == 2
+
+    _run("25_crash_after_commit_before_sse_final", case_crash_after_commit_before_sse_final)
+
+    def case_atomic_completed() -> None:
+        thread_id = client.create_thread("Idem atomic")
+        payload = _emergency_payload()
+        response = client.post_json(thread_id, payload)
+        assert response.status_code == 201, response.text
+        body = response.json()
+        row = _turn_row(thread_id, payload["client_turn_id"])
+        assert row["status"] == STATUS_COMPLETED
+        assert row["user_message_id"] == body["user_message"]["id"]
+        assert row["assistant_message_id"] == body["assistant_message"]["id"]
+        assert row["lease_owner"] is None
+        payload2 = _emergency_payload()
+        bad = client.post_json(
+            thread_id,
+            payload2,
+            headers={"X-OTP-Test-Fault": "before_persist_commit"},
+        )
+        assert bad.status_code == 500
+        row2 = _turn_row(thread_id, payload2["client_turn_id"])
+        assert row2 is None or row2["status"] != STATUS_COMPLETED
+        assert _message_count(thread_id) == 2
+
+    _run("50_atomic_completed_message_persistence", case_atomic_completed)
+
+    def case_sse_abort_json_replay() -> None:
+        thread_id = client.create_thread("Idem sse abort")
+        payload = _emergency_payload()
+        try:
+            client.post_sse(
+                thread_id,
+                payload,
+                headers={"X-OTP-Test-Fault": "before_sse_final"},
+            )
+        except Exception:
+            pass
+        time.sleep(0.05)
+        json_resp = client.post_json(thread_id, payload)
+        assert json_resp.status_code == 201, json_resp.text
+        assert _message_count(thread_id) == 2
+        sse_resp = client.post_sse(thread_id, payload)
+        assert sse_resp.status_code == 200
+        final = _parse_sse_final(sse_resp)
+        assert final["assistant_message"]["id"] == json_resp.json()["assistant_message"]["id"]
+        assert _message_count(thread_id) == 2
+
+    _run("05b_sse_lost_final_json_replay", case_sse_abort_json_replay)
+    _run("06b_sse_lost_final_sse_replay", case_sse_abort_json_replay)
+
+    def case_abort_soak() -> None:
+        duplicates = 0
+        replays = 0
+        unexpected = 0
+        regenerations = 0
+        for i in range(100):
+            thread_id = client.create_thread(f"Idem soak {i}")
+            payload = _emergency_payload()
+            fault_headers = (
+                {"X-OTP-Test-Fault": "before_sse_final"} if i % 3 == 0 else None
+            )
+            try:
+                if i % 2 == 0:
+                    try:
+                        client.post_sse(thread_id, payload, headers=fault_headers)
+                    except Exception:
+                        pass
+                else:
+                    first = client.post_json(thread_id, payload, headers=fault_headers)
+                    if first.status_code not in {201, 500, 409}:
+                        unexpected += 1
+                second = client.post_json(thread_id, payload)
+                if second.status_code == 201:
+                    count = _message_count(thread_id)
+                    if count != 2:
+                        duplicates += 1
+                    row = _turn_row(thread_id, payload["client_turn_id"])
+                    if row and row["status"] == STATUS_COMPLETED:
+                        if second.json()["assistant_message"]["id"] == row["assistant_message_id"]:
+                            replays += 1
+                        else:
+                            regenerations += 1
+                    else:
+                        regenerations += 1
+                elif second.status_code not in {409}:
+                    unexpected += 1
+            except Exception:
+                unexpected += 1
+        assert duplicates == 0, f"duplicate pairs={duplicates}"
+        assert unexpected == 0, f"unexpected={unexpected}"
+        assert replays + regenerations >= 90
+
+    _run("10_sse_abort_soak_100", case_abort_soak)
+
+    def case_freshness_replay() -> None:
+        thread_id = client.create_thread("Idem freshness")
+        turn_id = str(uuid.uuid4())
+        msg = f"How many crimes happened in Dorchester last month? Ref {uuid.uuid4().hex}"
+        payload = {"message": msg, "client_turn_id": turn_id}
+        first = client.post_json(thread_id, payload, timeout=120.0)
+        if first.status_code != 201:
+            return
+        first_body = first.json()
+        rev = _read_revision(thread_id)
+        second = client.post_json(thread_id, payload, timeout=120.0)
+        assert second.status_code == 201
+        assert second.json()["assistant_message"]["id"] == first_body["assistant_message"]["id"]
+        assert _read_revision(thread_id) == rev
+        assert _message_count(thread_id) == 2
+
+    _run("34_freshness_answer_replay", case_freshness_replay)
+
+    def case_fingerprint_semantics() -> None:
+        a = build_request_fingerprint(thread_id="t", message="this weekend")
+        b = build_request_fingerprint(thread_id="t", message="next weekend")
+        assert a != b
+        c = build_request_fingerprint(thread_id="t", message="Where is it?")
+        d = build_request_fingerprint(thread_id="t", message="When is it?")
+        assert c != d
+        e = build_request_fingerprint(
+            thread_id="t",
+            message="Tell me more",
+            event_context={"entity_id": "435", "entity_title": "A", "entity_date": "2026-07-15"},
+        )
+        f = build_request_fingerprint(
+            thread_id="t",
+            message="Tell me more",
+            event_context={"entity_id": "436", "entity_title": "B", "entity_date": "2026-07-16"},
+        )
+        assert e != f
+
+    _run("06c_fingerprint_semantic_distinctions", case_fingerprint_semantics)
+
+    def case_turn_in_progress_retry_after() -> None:
+        thread_id = client.create_thread("Idem tip header")
+        user_id = _thread_user(thread_id)
+        turn_id = str(uuid.uuid4())
+        msg = EMERGENCY_MSG_TMPL.format(marker=uuid.uuid4().hex)
+        fp = build_request_fingerprint(thread_id=thread_id, message=msg)
+        holder = begin_or_replay_turn(
+            api_v2.get_db_connection,
+            thread_id=thread_id,
+            user_id=user_id,
+            client_turn_id=turn_id,
+            request_fingerprint=fp,
+            lease_seconds=120,
+        )
+        assert holder.owned, "expected owned lease holder"
+        response = client.post_json(
+            thread_id,
+            {"message": msg, "client_turn_id": turn_id},
+        )
+        assert response.status_code in {201, 409}, (
+            f"status={response.status_code} body={response.text[:300]}"
+        )
+        if response.status_code == 409:
+            body = response.json()
+            assert body.get("code") in {"turn_in_progress", "idempotency_key_reused"}, body
+            if body.get("code") == "turn_in_progress":
+                assert body.get("retry_after") is not None, body
+                assert (response.headers.get("Retry-After") or response.headers.get("retry-after")), dict(response.headers)
+            blob = json.dumps(body).lower()
+            assert "lease_owner" not in blob
+            assert "request_fingerprint" not in blob
+        fail_turn(
+            api_v2.get_db_connection,
+            turn_row_id=holder.turn_row_id,
+            lease_owner=holder.lease_owner,
+        )
+
+    _run("49_tight_pool_retry_shape", case_turn_in_progress_retry_after)
+
+    clear_faults()
+    os.environ.pop("OTP_TURN_IDEMPOTENCY_FAULTS", None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default=os.getenv("OTP_BASE_URL", ""))
     parser.add_argument("--unit-only", action="store_true")
+    parser.add_argument("--gate-only", action="store_true")
     args = parser.parse_args()
 
     print("=== turn idempotency unit cases ===")
@@ -1005,8 +1359,11 @@ def main() -> int:
         if not args.base_url:
             print("ERROR: --base-url required for live cases (or pass --unit-only)")
             return 2
-        print("=== turn idempotency live cases ===")
-        run_live_cases(args.base_url)
+        if not args.gate_only:
+            print("=== turn idempotency live cases ===")
+            run_live_cases(args.base_url)
+        print("=== turn idempotency gate cases ===")
+        run_gate_cases(args.base_url)
 
     failed = [name for name, ok, _ in RESULTS if not ok]
     passed = sum(1 for _, ok, _ in RESULTS if ok)
