@@ -588,6 +588,29 @@ class SourceFreshnessTests(unittest.TestCase):
         self.assertIn(payload["coverage_status"], {e.value for e in CoverageStatus})
         self.assertIn(payload["freshness_basis"], {e.value for e in FreshnessBasis})
 
+    def test_41_bootstrap_does_not_downgrade_stronger_basis(self):
+        store: dict = {}
+        factory = lambda: _FakeConn(store)  # noqa: E731
+        upsert_source_status(
+            factory,
+            _status(
+                through=date(2026, 6, 26),
+                basis=FreshnessBasis.INGEST_METADATA,
+                ingest=datetime(2026, 7, 16, 14, 10, tzinfo=UTC),
+            ),
+        )
+        existing = parse_source_status_row(store[SOURCE_CRIME])
+        self.assertEqual(existing.freshness_basis, FreshnessBasis.INGEST_METADATA)
+        # Bootstrap skip policy: stronger basis must remain unless --force.
+        self.assertEqual(store[SOURCE_CRIME]["freshness_basis"], "INGEST_METADATA")
+        self.assertEqual(store[SOURCE_CRIME]["data_through_date"], date(2026, 6, 26))
+        weaker = _status(
+            through=date(2026, 6, 20),
+            basis=FreshnessBasis.LATEST_RECORD_ONLY,
+            ingest=None,
+        )
+        self.assertNotEqual(weaker.freshness_basis, existing.freshness_basis)
+
 
 if __name__ == "__main__":
     unittest.main()

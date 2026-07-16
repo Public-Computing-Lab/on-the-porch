@@ -3,6 +3,9 @@
 
 Honest basis: LATEST_RECORD_ONLY when only MAX(record date) is available.
 Does not claim SOURCE_AS_OF. Safe for local demo only.
+
+By default, does not overwrite stronger SOURCE_AS_OF / INGEST_METADATA rows.
+Use --force to replace an existing status deliberately.
 """
 
 from __future__ import annotations
@@ -27,7 +30,15 @@ from source_freshness import (  # noqa: E402
     SOURCE_CRIME,
     FreshnessBasis,
     SourceStatusRecord,
+    load_source_status,
     upsert_source_status,
+)
+
+_STRONGER_BASIS = frozenset(
+    {
+        FreshnessBasis.SOURCE_AS_OF,
+        FreshnessBasis.INGEST_METADATA,
+    }
 )
 
 
@@ -61,10 +72,9 @@ def _count(conn, sql: str) -> int:
         cursor.close()
 
 
-def bootstrap(*, claim_ingest_metadata: bool) -> None:
+def bootstrap(*, claim_ingest_metadata: bool, force: bool = False) -> None:
     conn = _conn()
     try:
-        # Ensure migration table exists via API migrator when possible.
         try:
             from db_migrations import run_migrations
 
@@ -93,7 +103,21 @@ def bootstrap(*, claim_ingest_metadata: bool) -> None:
             (SOURCE_CRIME, crime_latest, crime_count),
             (SOURCE_311, s311_latest, s311_count),
         ):
-            # LATEST_RECORD_ONLY: data_through equals latest record but basis stays honest.
+            existing = load_source_status(_conn, key)
+            if (
+                existing is not None
+                and existing.freshness_basis in _STRONGER_BASIS
+                and not force
+                and not claim_ingest_metadata
+            ):
+                print(
+                    f"{key}: skip bootstrap — existing basis "
+                    f"{existing.freshness_basis.value} is stronger than "
+                    f"{basis.value} (pass --force to overwrite)"
+                )
+                continue
+            # LATEST_RECORD_ONLY: coverage mirrors latest record; basis stays honest.
+            # Do not invent last_successful_ingest_at unless explicitly claiming ingest.
             record = SourceStatusRecord(
                 source_key=key,
                 last_successful_ingest_at=now if claim_ingest_metadata else None,
@@ -115,8 +139,16 @@ def main() -> int:
         action="store_true",
         help="Mark basis as INGEST_METADATA (only when an ingest just succeeded).",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing SOURCE_AS_OF / INGEST_METADATA rows.",
+    )
     args = parser.parse_args()
-    bootstrap(claim_ingest_metadata=args.claim_ingest_metadata)
+    bootstrap(
+        claim_ingest_metadata=args.claim_ingest_metadata,
+        force=args.force,
+    )
     return 0
 
 
