@@ -4711,7 +4711,6 @@ def health():
         status["status"] = "degraded"
 
     status["shared_cache"] = _check_shared_cache_health()
-    status["redis"] = "not_supported"
     if Config.CACHE_BACKEND == "mysql" and status["shared_cache"] == "disconnected":
         status["status"] = "degraded"
     elif Config.PRODUCTION_MODE and Config.CACHE_BACKEND != "mysql":
