@@ -15,6 +15,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -138,8 +139,16 @@ from conversation_transitions import (  # noqa: E402
     CacheAction,
     CompletionStatus,
     ConversationTransition,
+    StateField,
+    TransitionAction,
+    TransitionReason,
     classify_completion_status,
     plan_conversation_transition,
+)
+from emergency_routing import (  # noqa: E402
+    EMERGENCY_RESPONSE,
+    EmergencyDecision,
+    detect_active_emergency,
 )
 from intent_router import detect_civic_topic  # noqa: E402
 from semantic_cache import (  # noqa: E402
@@ -1899,6 +1908,8 @@ def _persist_conversation_turn(
     assistant_model_name: Optional[str],
     resolved_entity: Optional[Dict[str, str]],
     set_initial_title: bool,
+    interaction_log_enabled: bool = True,
+    expected_last_message_at: Optional[datetime.datetime] = None,
 ) -> Dict[str, Any]:
     """Persist one complete turn using a single lock-first transaction."""
     conn = None
@@ -1909,6 +1920,11 @@ def _persist_conversation_turn(
         conn = get_db_connection()
         conn.start_transaction()
         locked_thread = _lock_thread_for_persistence(conn, user_id, thread_id)
+        if (
+            expected_last_message_at is not None
+            and locked_thread.get("last_message_at") != expected_last_message_at
+        ):
+            raise ConversationConflictError(CONVERSATION_CONFLICT_MESSAGE)
         current = _load_thread_state_envelope(locked_thread.get("thread_state_json"))
         if current.conversation_state.revision != transition.expected_revision:
             print(
@@ -1970,6 +1986,14 @@ def _persist_conversation_turn(
     finally:
         if conn:
             conn.close()
+
+    if not interaction_log_enabled:
+        return {
+            "thread": refreshed_thread,
+            "user_message": user_message_row,
+            "assistant_message": assistant_message_row,
+            "transition": transition_result,
+        }
 
     # Interaction logging is intentionally best-effort and starts only after the
     # resident turn has committed and released its pooled connection.
@@ -2313,6 +2337,13 @@ def _execute_agent_response(
 ) -> Dict[str, Any]:
     reset_request_metrics()
     cache = retrieval_cache or create_empty_cache()
+    emergency_decision, detector_latency_ms = _detect_emergency(message)
+    if emergency_decision.is_active_emergency:
+        return _emergency_agent_result(
+            emergency_decision,
+            cache,
+            detector_latency_ms=detector_latency_ms,
+        )
     has_history = bool(conversation_history)
     has_cache = bool(cache and cache.get("mode"))
 
@@ -2600,6 +2631,102 @@ def _missing_event_reference_agent_result(retrieval_cache: Dict[str, Any]) -> Di
     }
 
 
+def _detect_emergency(message: str) -> tuple[EmergencyDecision, float]:
+    started = time.perf_counter()
+    decision = detect_active_emergency(message)
+    elapsed = (time.perf_counter() - started) * 1000.0
+    return decision, elapsed
+
+
+def _emergency_agent_result(
+    decision: EmergencyDecision,
+    retrieval_cache: Optional[Dict[str, Any]],
+    *,
+    detector_latency_ms: float = 0.0,
+) -> Dict[str, Any]:
+    if not decision.is_active_emergency:
+        raise ValueError("emergency response requires an active emergency decision")
+    diagnostic = decision.to_dict()
+    return {
+        "answer": EMERGENCY_RESPONSE,
+        "mode": "emergency",
+        "sources": [],
+        "result": {
+            "answer": EMERGENCY_RESPONSE,
+            "emergency_decision": diagnostic,
+        },
+        "retrieval_cache": copy.deepcopy(retrieval_cache or create_empty_cache()),
+        "model_name": None,
+        "llm_calls": 0,
+        "embedding_calls": 0,
+        "sql_calls": 0,
+        "vector_calls": 0,
+        "detector_latency_ms": round(max(0.0, detector_latency_ms), 4),
+        "emergency_decision": diagnostic,
+    }
+
+
+def _emergency_conversation_transition(
+    state: ConversationState,
+) -> ConversationTransition:
+    retained = []
+    if state.active_topic is not None:
+        retained.append(StateField.ACTIVE_TOPIC)
+    if state.active_entity is not None:
+        retained.append(StateField.ACTIVE_ENTITY)
+    if state.location is not None:
+        retained.append(StateField.LOCATION)
+    if state.time_range is not None:
+        retained.append(StateField.TIME_RANGE)
+    if any(value != "ANY" for value in state.filters.to_dict().values()):
+        retained.append(StateField.FILTERS)
+    if state.previous_route is not None:
+        retained.append(StateField.PREVIOUS_ROUTE)
+    return ConversationTransition(
+        action=TransitionAction.NO_CHANGE,
+        relationship=ConversationRelationship.STANDALONE,
+        retained=tuple(retained),
+        replaced=(),
+        cleared=(),
+        next_state=state,
+        cache_action=CacheAction.PRESERVE,
+        reason_codes=(TransitionReason.EMERGENCY_CONTEXT_PRESERVED,),
+        commit_allowed=True,
+        requires_clarification=False,
+        completion_status=CompletionStatus.ACCEPTABLE,
+    )
+
+
+def _log_emergency_metrics(
+    decision: EmergencyDecision,
+    *,
+    thread_id: Optional[str],
+    streaming: bool,
+    success: bool,
+    detector_latency_ms: float,
+    failure_code: Optional[str] = None,
+) -> None:
+    extra = {
+        "emergency_category": decision.category.value,
+        "emergency_reason_code": decision.reason_code.value,
+        "decision_source": decision.decision_source.value,
+        "success": bool(success),
+        "detector_latency_ms": round(max(0.0, detector_latency_ms), 4),
+        "embedding_calls": 0,
+        "sql_calls": 0,
+        "vector_calls": 0,
+    }
+    if failure_code:
+        extra["failure_code"] = failure_code
+    _log_agent_metrics(
+        mode="emergency",
+        cache_hit=False,
+        thread_id=thread_id,
+        streaming=streaming,
+        extra=extra,
+    )
+
+
 def _resolve_active_event_request(
     conn,
     message: str,
@@ -2721,7 +2848,19 @@ def _execute_agent_response_with_event_context(
     event_resolution: Optional[EventResolution],
     thread_id: Optional[str] = None,
     streaming: bool = False,
+    emergency_decision: Optional[EmergencyDecision] = None,
 ) -> Dict[str, Any]:
+    decision = emergency_decision
+    detector_latency_ms = 0.0
+    if decision is None:
+        decision, detector_latency_ms = _detect_emergency(message)
+    if decision.is_active_emergency:
+        reset_request_metrics()
+        return _emergency_agent_result(
+            decision,
+            retrieval_cache,
+            detector_latency_ms=detector_latency_ms,
+        )
     if event_resolution is None:
         return _execute_agent_response(
             message,
@@ -2880,6 +3019,7 @@ def _user_message_metadata(
     dimensions: Optional[ConversationDimensions],
     transition: Optional[ConversationTransition] = None,
     active_event_behavior_applied: bool = False,
+    emergency_decision: Optional[EmergencyDecision] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
@@ -2892,6 +3032,8 @@ def _user_message_metadata(
         metadata["conversation_transition"] = transition.to_diagnostic_dict()
     if active_event_behavior_applied:
         metadata["active_event_followup_applied"] = True
+    if emergency_decision is not None and emergency_decision.is_active_emergency:
+        metadata["emergency_decision"] = emergency_decision.to_dict()
     return metadata or None
 
 
@@ -3427,53 +3569,70 @@ def post_conversation_message(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
-    try:
-        event_context = _validate_optional_event_context(payload)
-    except EventContextValidationError as exc:
-        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
-        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     conn = None
+    emergency_decision = None
+    detector_latency_ms = 0.0
     try:
         reset_request_metrics()
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
-        event_resolution = _resolve_validated_event_context(conn, event_context)
-
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
+        emergency_decision, detector_latency_ms = _detect_emergency(message)
+        event_context = None
+        event_resolution = None
+        history_rows: List[Dict[str, Any]] = []
+        conversation_history: List[Dict[str, str]] = []
         state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
         retrieval_cache = state_envelope.retrieval_cache
         conversation_state = state_envelope.conversation_state
-        relationship = _classify_relationship_shadow(
-            message,
-            history_rows,
-            thread_id=thread_id,
-            authoritative_active_event=conversation_state.active_entity is not None,
-        )
-        dimensions = _extract_dimensions_shadow(
-            message,
-            thread_id=thread_id,
-            conversation_state=conversation_state,
-        )
+        relationship = None
+        dimensions = None
         active_event_result = None
         stale_active_event = False
-        if event_resolution is None:
-            active_event_result, stale_active_event = _resolve_active_event_request(
-                conn,
+        # Emergency detection uses only the current message. Skip history load so
+        # prior turns cannot influence response wiring; title uses the thread row.
+        if not emergency_decision.is_active_emergency:
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
+            try:
+                event_context = _validate_optional_event_context(payload)
+            except EventContextValidationError as exc:
+                print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+                return _json_error("Invalid UI context.", 400, "invalid_ui_context")
+            event_resolution = _resolve_validated_event_context(conn, event_context)
+            relationship = _classify_relationship_shadow(
                 message,
-                state=conversation_state,
-                relationship=relationship,
-                retrieval_cache=retrieval_cache,
+                history_rows,
+                thread_id=thread_id,
+                authoritative_active_event=conversation_state.active_entity is not None,
             )
+            dimensions = _extract_dimensions_shadow(
+                message,
+                thread_id=thread_id,
+                conversation_state=conversation_state,
+            )
+            if event_resolution is None:
+                active_event_result, stale_active_event = _resolve_active_event_request(
+                    conn,
+                    message,
+                    state=conversation_state,
+                    relationship=relationship,
+                    retrieval_cache=retrieval_cache,
+                )
         conn.close()
         conn = None
 
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
-        if active_event_result is not None:
+        if emergency_decision.is_active_emergency:
+            agent_result = _emergency_agent_result(
+                emergency_decision,
+                retrieval_cache,
+                detector_latency_ms=detector_latency_ms,
+            )
+        elif active_event_result is not None:
             agent_result = active_event_result
             _log_agent_metrics(
                 mode=agent_result["mode"],
@@ -3488,21 +3647,26 @@ def post_conversation_message(thread_id: str):
                 retrieval_cache=retrieval_cache,
                 event_resolution=event_resolution,
                 thread_id=thread_id,
+                emergency_decision=emergency_decision,
             )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
         resolved_entity = agent_result.get("resolved_entity")
-        conversation_transition = _plan_conversation_transition(
-            state=conversation_state,
-            relationship=relationship,
-            dimensions=dimensions,
-            message=message,
-            mode=mode,
-            agent_result=agent_result,
-            selected_resolution=event_resolution,
-            stale_active_event=stale_active_event,
+        conversation_transition = (
+            _emergency_conversation_transition(conversation_state)
+            if emergency_decision.is_active_emergency
+            else _plan_conversation_transition(
+                state=conversation_state,
+                relationship=relationship,
+                dimensions=dimensions,
+                message=message,
+                mode=mode,
+                agent_result=agent_result,
+                selected_resolution=event_resolution,
+                stale_active_event=stale_active_event,
+            )
         )
         transition = conversation_transition.state_proposal(conversation_state)
         persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
@@ -3526,6 +3690,7 @@ def post_conversation_message(thread_id: str):
                 dimensions=dimensions,
                 transition=conversation_transition,
                 active_event_behavior_applied=active_event_result is not None,
+                emergency_decision=emergency_decision,
             ),
             assistant_content=answer,
             assistant_mode=mode,
@@ -3535,8 +3700,26 @@ def post_conversation_message(thread_id: str):
                 configured_model=os.getenv("GEMINI_MODEL", ""),
             ),
             resolved_entity=resolved_entity,
-            set_initial_title=len(history_rows) == 0,
+            set_initial_title=(
+                False
+                if emergency_decision.is_active_emergency
+                else len(history_rows) == 0
+            ),
+            interaction_log_enabled=not emergency_decision.is_active_emergency,
+            expected_last_message_at=(
+                thread.get("last_message_at")
+                if emergency_decision.is_active_emergency
+                else None
+            ),
         )
+        if emergency_decision.is_active_emergency:
+            _log_emergency_metrics(
+                emergency_decision,
+                thread_id=thread_id,
+                streaming=False,
+                success=True,
+                detector_latency_ms=detector_latency_ms,
+            )
 
         response_payload = {
             "thread": _serialize_thread(persisted["thread"]),
@@ -3547,6 +3730,15 @@ def post_conversation_message(thread_id: str):
             response_payload["resolved_entity"] = resolved_entity
         return jsonify(response_payload), 201
     except ConversationConflictError:
+        if emergency_decision is not None and emergency_decision.is_active_emergency:
+            _log_emergency_metrics(
+                emergency_decision,
+                thread_id=thread_id,
+                streaming=False,
+                success=False,
+                detector_latency_ms=detector_latency_ms,
+                failure_code="conversation_conflict",
+            )
         return _json_error(
             CONVERSATION_CONFLICT_MESSAGE,
             409,
@@ -3555,6 +3747,15 @@ def post_conversation_message(thread_id: str):
     except Exception as exc:
         if conn:
             conn.rollback()
+        if emergency_decision is not None and emergency_decision.is_active_emergency:
+            _log_emergency_metrics(
+                emergency_decision,
+                thread_id=thread_id,
+                streaming=False,
+                success=False,
+                detector_latency_ms=detector_latency_ms,
+                failure_code="persistence_failed",
+            )
         _log_exception("Error posting conversation message", exc)
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
     finally:
@@ -3593,47 +3794,59 @@ def post_conversation_message_stream(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
-    try:
-        event_context = _validate_optional_event_context(payload)
-    except EventContextValidationError as exc:
-        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
-        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     # Load context up front, then release the DB before the long LLM work.
     conn = None
+    emergency_decision = None
+    detector_latency_ms = 0.0
     try:
         reset_request_metrics()
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
-        event_resolution = _resolve_validated_event_context(conn, event_context)
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
+        emergency_decision, detector_latency_ms = _detect_emergency(message)
+        event_context = None
+        event_resolution = None
+        history_rows: List[Dict[str, Any]] = []
+        conversation_history: List[Dict[str, str]] = []
         state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
         retrieval_cache = state_envelope.retrieval_cache
         conversation_state = state_envelope.conversation_state
-        relationship = _classify_relationship_shadow(
-            message,
-            history_rows,
-            thread_id=thread_id,
-            authoritative_active_event=conversation_state.active_entity is not None,
-        )
-        dimensions = _extract_dimensions_shadow(
-            message,
-            thread_id=thread_id,
-            conversation_state=conversation_state,
-        )
+        relationship = None
+        dimensions = None
         active_event_result = None
         stale_active_event = False
-        if event_resolution is None:
-            active_event_result, stale_active_event = _resolve_active_event_request(
-                conn,
+        # Emergency detection uses only the current message. Skip history load so
+        # prior turns cannot influence response wiring; title uses the thread row.
+        if not emergency_decision.is_active_emergency:
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
+            try:
+                event_context = _validate_optional_event_context(payload)
+            except EventContextValidationError as exc:
+                print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+                return _json_error("Invalid UI context.", 400, "invalid_ui_context")
+            event_resolution = _resolve_validated_event_context(conn, event_context)
+            relationship = _classify_relationship_shadow(
                 message,
-                state=conversation_state,
-                relationship=relationship,
-                retrieval_cache=retrieval_cache,
+                history_rows,
+                thread_id=thread_id,
+                authoritative_active_event=conversation_state.active_entity is not None,
             )
+            dimensions = _extract_dimensions_shadow(
+                message,
+                thread_id=thread_id,
+                conversation_state=conversation_state,
+            )
+            if event_resolution is None:
+                active_event_result, stale_active_event = _resolve_active_event_request(
+                    conn,
+                    message,
+                    state=conversation_state,
+                    relationship=relationship,
+                    retrieval_cache=retrieval_cache,
+                )
     except Exception as exc:
         _log_exception("Error preparing streamed message", exc)
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
@@ -3647,6 +3860,7 @@ def post_conversation_message_stream(thread_id: str):
     session_id = g.session_row["session_id"]
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
+    emergency_request = emergency_decision.is_active_emergency
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
@@ -3659,7 +3873,7 @@ def post_conversation_message_stream(thread_id: str):
         next_cache = retrieval_cache
         selected_request = event_resolution is not None
         active_event_request = active_event_result is not None
-        deterministic_request = selected_request or active_event_request
+        deterministic_request = emergency_request or selected_request or active_event_request
         semantic_eligible = (
             False
             if deterministic_request
@@ -3675,7 +3889,13 @@ def post_conversation_message_stream(thread_id: str):
 
         try:
             yield ": keepalive\n\n"
-            if active_event_request:
+            if emergency_request:
+                deterministic_result = _emergency_agent_result(
+                    emergency_decision,
+                    retrieval_cache,
+                    detector_latency_ms=detector_latency_ms,
+                )
+            elif active_event_request:
                 deterministic_result = active_event_result
             elif selected_request:
                 deterministic_result = _selected_event_agent_result(
@@ -3795,16 +4015,20 @@ def post_conversation_message_stream(thread_id: str):
                 "retrieval_cache": next_cache,
                 "execution_degraded": bool(execution_metadata.get("execution_degraded")),
             }
-            conversation_transition = _plan_conversation_transition(
-                state=conversation_state,
-                relationship=relationship,
-                dimensions=dimensions,
-                message=message,
-                mode=mode,
-                agent_result=transition_result,
-                selected_resolution=event_resolution,
-                stale_active_event=stale_active_event,
-                partial=generation_degraded,
+            conversation_transition = (
+                _emergency_conversation_transition(conversation_state)
+                if emergency_request
+                else _plan_conversation_transition(
+                    state=conversation_state,
+                    relationship=relationship,
+                    dimensions=dimensions,
+                    message=message,
+                    mode=mode,
+                    agent_result=transition_result,
+                    selected_resolution=event_resolution,
+                    stale_active_event=stale_active_event,
+                    partial=generation_degraded,
+                )
             )
             transition = conversation_transition.state_proposal(conversation_state)
             persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
@@ -3827,6 +4051,7 @@ def post_conversation_message_stream(thread_id: str):
                     dimensions=dimensions,
                     transition=conversation_transition,
                     active_event_behavior_applied=active_event_request,
+                    emergency_decision=emergency_decision,
                 ),
                 assistant_content=full_answer,
                 assistant_mode=mode,
@@ -3845,7 +4070,17 @@ def post_conversation_message_stream(thread_id: str):
                     ),
                 ),
                 resolved_entity=resolved_entity,
-                set_initial_title=existing_title == "New conversation" and is_first_message,
+                set_initial_title=(
+                    False
+                    if emergency_request
+                    else (
+                        existing_title == "New conversation" and is_first_message
+                    )
+                ),
+                interaction_log_enabled=not emergency_request,
+                expected_last_message_at=(
+                    thread.get("last_message_at") if emergency_request else None
+                ),
             )
             final_payload = {
                 "type": "final",
@@ -3858,6 +4093,14 @@ def post_conversation_message_stream(thread_id: str):
             }
             if resolved_entity:
                 final_payload["resolved_entity"] = resolved_entity
+            if emergency_request:
+                _log_emergency_metrics(
+                    emergency_decision,
+                    thread_id=thread_id,
+                    streaming=True,
+                    success=True,
+                    detector_latency_ms=detector_latency_ms,
+                )
             yield _sse(final_payload)
 
             # Post-final Boston.gov correction (bounded wait; does not block first token).
@@ -3898,24 +4141,43 @@ def post_conversation_message_stream(thread_id: str):
                         if correction_conn:
                             correction_conn.close()
                     full_answer = enriched
-            _log_agent_metrics(
-                mode=mode,
-                cache_hit=cache_hit,
-                thread_id=thread_id,
-                streaming=True,
-                extra=(
-                        {"ui_event_resolution": event_resolution.status}
-                        if event_resolution is not None
-                        else ({"active_event_followup": True} if active_event_request else None)
-                    ),
-            )
+            if not emergency_request:
+                _log_agent_metrics(
+                    mode=mode,
+                    cache_hit=cache_hit,
+                    thread_id=thread_id,
+                    streaming=True,
+                    extra=(
+                            {"ui_event_resolution": event_resolution.status}
+                            if event_resolution is not None
+                            else ({"active_event_followup": True} if active_event_request else None)
+                        ),
+                )
         except ConversationConflictError:
+            if emergency_request:
+                _log_emergency_metrics(
+                    emergency_decision,
+                    thread_id=thread_id,
+                    streaming=True,
+                    success=False,
+                    detector_latency_ms=detector_latency_ms,
+                    failure_code="conversation_conflict",
+                )
             yield _sse({
                 "type": "error",
                 "error": CONVERSATION_CONFLICT_MESSAGE,
                 "code": "conversation_conflict",
             })
         except Exception as exc:  # noqa: BLE001
+            if emergency_request:
+                _log_emergency_metrics(
+                    emergency_decision,
+                    thread_id=thread_id,
+                    streaming=True,
+                    success=False,
+                    detector_latency_ms=detector_latency_ms,
+                    failure_code="persistence_failed",
+                )
             _log_exception("Error persisting streamed message", exc)
             yield _sse({"type": "error", "error": "Failed to save message."})
 
@@ -3945,11 +4207,8 @@ def chat():
     message_error = _validate_message(message)
     if message_error:
         return message_error
-    try:
-        event_context = _validate_optional_event_context(data)
-    except EventContextValidationError as exc:
-        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
-        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
+    reset_request_metrics()
+    emergency_decision, detector_latency_ms = _detect_emergency(message)
 
     session_id = g.get("session_id") or str(uuid.uuid4())
     if g.get("api_key_authenticated") and "session_id" not in session:
@@ -3957,6 +4216,35 @@ def chat():
         session["session_id"] = session_id
     elif g.get("api_key_authenticated"):
         session_id = session.get("session_id")
+
+    if emergency_decision.is_active_emergency:
+        agent_result = _emergency_agent_result(
+            emergency_decision,
+            create_empty_cache(),
+            detector_latency_ms=detector_latency_ms,
+        )
+        _log_emergency_metrics(
+            emergency_decision,
+            thread_id=None,
+            streaming=False,
+            success=True,
+            detector_latency_ms=detector_latency_ms,
+        )
+        return jsonify(
+            {
+                "session_id": session_id,
+                "response": agent_result["answer"],
+                "sources": [],
+                "mode": "emergency",
+                "log_id": None,
+            }
+        )
+
+    try:
+        event_context = _validate_optional_event_context(data)
+    except EventContextValidationError as exc:
+        print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
+        return _json_error("Invalid UI context.", 400, "invalid_ui_context")
 
     retrieval_cache = _session_cache.get(session_id)
 
@@ -3973,6 +4261,7 @@ def chat():
             conversation_history=conversation_history,
             retrieval_cache=retrieval_cache,
             event_resolution=event_resolution,
+            emergency_decision=emergency_decision,
         )
         _session_cache.set(session_id, agent_result["retrieval_cache"])
         log_id = log_interaction(
