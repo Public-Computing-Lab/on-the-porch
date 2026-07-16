@@ -69,6 +69,7 @@ class StateField(str, Enum):
 
 class TransitionReason(str, Enum):
     SMALL_TALK_PRESERVED = "small_talk_preserved"
+    EMERGENCY_CONTEXT_PRESERVED = "emergency_context_preserved"
     EQUIVALENT_CONTEXT = "equivalent_normalized_context"
     EXPLICIT_TOPIC = "explicit_topic"
     EXPLICIT_LOCATION = "explicit_location"
