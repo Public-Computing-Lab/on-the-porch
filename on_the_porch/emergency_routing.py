@@ -190,7 +190,8 @@ _RULES: Tuple[
         EmergencyReasonCode.ONGOING_SHOOTING,
         _patterns(
             r"\bthere(?:'s| is) (?:a )?shooting "
-            r"(?:happening|going on|outside|nearby).*\b(?:right now|now)\b",
+            r"(?:happening|going on|outside|nearby)"
+            r"(?:.*\b(?:right now|now)\b)?",
             r"\b(?:someone(?:'s| is)|somebody (?:is|'s)) shooting\b"
             r".*\b(?:outside|nearby|right now|now)\b",
         ),
@@ -212,6 +213,9 @@ _RULES: Tuple[
             r"(?:a )?(?:gun|firearm|weapon|knife)\b.*"
             r"\b(?:threatening|pointing (?:it )?at|trying to "
             r"(?:shoot|stab|hurt|kill))\b",
+            r"\bthere(?:'s| is) someone "
+            r"(?:outside |nearby )?(?:with|holding|carrying) "
+            r"(?:a )?(?:gun|firearm|weapon)\b",
         ),
     ),
     (
@@ -241,8 +245,8 @@ _RULES: Tuple[
             r"\b(?:my|our|the) (?:house|home|apartment|building) "
             r"(?:is|'s) on fire\b",
             r"\bthere(?:'s| is) (?:a )?fire (?:in|inside|at) "
-            r"(?:my |our |the )?(?:house|home|apartment|building).*"
-            r"\b(?:right now|now)\b",
+            r"(?:my |our |the )?(?:house|home|apartment|building)"
+            r"(?:.*\b(?:right now|now)\b)?",
         ),
     ),
     (
@@ -251,6 +255,9 @@ _RULES: Tuple[
         _patterns(
             r"\b(?:my|our|the) (?:apartment|house|home|building|room) "
             r"(?:is )?(?:filling|filled) with smoke\b",
+            r"\bthere(?:'s| is) smoke "
+            r"(?:filling|in) (?:my |our |the )?"
+            r"(?:apartment|house|home|building|room)\b",
         ),
     ),
     (
@@ -282,9 +289,20 @@ _RULES: Tuple[
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.BREATHING_EMERGENCY,
         _patterns(
-            # Require the complaint to end the clause so educational or
-            # figurative follow-ons ("when I laugh", "underwater") do not match.
+            # End-of-clause / present-severity cues avoid educational,
+            # historical, exertion, and figurative follow-ons.
             r"\bi (?:can't|cannot) breathe(?:[.!?]|$)",
+            r"\bi(?:'m| am) unable to breathe(?:[.!?]|$|"
+            r".*\b(?:right now|now)\b)",
+            r"\bi(?:'m| am) having (?:severe )?"
+            r"(?:trouble|difficulty) breathing"
+            r".*\b(?:right now|now)\b",
+            r"\b(?:someone|somebody|they|he|she) "
+            r"(?:has |have )?(?:just )?stopped breathing\b",
+            r"\b(?:someone|somebody|they|he|she).*"
+            r"\b(?:can't|cannot) breathe(?:[.!?]|$)",
+            r"\b(?:my|their) throat is closing and "
+            r"(?:i|they|he|she) (?:can't|cannot) breathe(?:[.!?]|$)",
         ),
     ),
     (

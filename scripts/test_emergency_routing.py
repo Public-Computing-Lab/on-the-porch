@@ -159,6 +159,56 @@ TRUE_CASES = (
         EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
         EmergencyReasonCode.IMMINENT_SELF_HARM,
     ),
+    (
+        "I'm having a heart attack.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.SUSPECTED_HEART_ATTACK,
+    ),
+    (
+        "I'm unable to breathe.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.BREATHING_EMERGENCY,
+    ),
+    (
+        "I'm having severe trouble breathing right now.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.BREATHING_EMERGENCY,
+    ),
+    (
+        "There's a shooting happening outside.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ONGOING_SHOOTING,
+    ),
+    (
+        "There's someone outside with a gun.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ARMED_THREAT,
+    ),
+    (
+        "There's smoke filling the apartment.",
+        EmergencyCategory.FIRE,
+        EmergencyReasonCode.SMOKE_IN_BUILDING,
+    ),
+    (
+        "There's a fire in the building.",
+        EmergencyCategory.FIRE,
+        EmergencyReasonCode.BUILDING_FIRE,
+    ),
+    (
+        "Someone stopped breathing.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.BREATHING_EMERGENCY,
+    ),
+    (
+        "They stopped breathing.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.BREATHING_EMERGENCY,
+    ),
+    (
+        "Someone is turning blue and can't breathe.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.BREATHING_EMERGENCY,
+    ),
 )
 
 FALSE_CASES = (
@@ -182,6 +232,15 @@ FALSE_CASES = (
     "I can't breathe when I laugh.",
     "I cannot breathe underwater in this game.",
     "Someone is shooting a movie downtown.",
+    "What are breathing exercises?",
+    "I get out of breath when I run.",
+    "I had trouble breathing last year.",
+    "What causes shortness of breath?",
+    "Are breathing problems common with allergies?",
+    "The meeting discussed air quality and breathing problems.",
+    "Tell me about asthma statistics.",
+    "I can't breathe in this song",
+    "I need services for chronic breathing problems.",
 )
 
 
