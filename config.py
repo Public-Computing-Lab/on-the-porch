@@ -172,24 +172,63 @@ GUEST_CLEANUP_BATCH_SIZE = _int("GUEST_CLEANUP_BATCH_SIZE", 500)
 GUEST_CLEANUP_MAX_BATCHES = _int("GUEST_CLEANUP_MAX_BATCHES", 20)
 
 # ============================================================================
-# Cache / Redis
+# Shared cache (MySQL-only). Redis is not supported.
 # ============================================================================
-CACHE_BACKEND = _env("CACHE_BACKEND", "memory").strip().lower()
-REDIS_URL = _env("REDIS_URL", "redis://127.0.0.1:6379/0")
+# mysql  — authoritative shared cache across gunicorn workers (required for multi-worker)
+# memory — process-local only; bounded non-authoritative optimization for single-process dev
+SUPPORTED_CACHE_BACKENDS = frozenset({"mysql", "memory"})
+SUPPORTED_SEMANTIC_CACHE_BACKENDS = frozenset({"mysql", "memory"})
+
+CACHE_BACKEND = _env("CACHE_BACKEND", "mysql").strip().lower()
+# REDIS_URL is obsolete and ignored. Kept only so old .env files do not break parsing.
+REDIS_URL = _env("REDIS_URL", "")
 CACHE_TTL_MINUTES = _int("CACHE_TTL_MINUTES", 60)
 CACHE_MAX_SESSIONS = _int("CACHE_MAX_SESSIONS", 100)
 CACHE_KEY_PREFIX = _env("CACHE_KEY_PREFIX", "rethinkai:chatcache:")
 
 SEMANTIC_CACHE_ENABLED = _truthy("SEMANTIC_CACHE_ENABLED", "false")
-_semantic_default_backend = {
-    "redis": "redis",
-    "mysql": "mysql",
-}.get(CACHE_BACKEND, "memory")
-SEMANTIC_CACHE_BACKEND = _env("SEMANTIC_CACHE_BACKEND", _semantic_default_backend).strip().lower()
+_semantic_default_backend = "mysql" if CACHE_BACKEND == "mysql" else "memory"
+SEMANTIC_CACHE_BACKEND = _env(
+    "SEMANTIC_CACHE_BACKEND", _semantic_default_backend
+).strip().lower()
 SEMANTIC_CACHE_KEY = _env("SEMANTIC_CACHE_KEY", "rethinkai:semantic_cache:entries")
 SEMANTIC_CACHE_THRESHOLD = _float("SEMANTIC_CACHE_THRESHOLD", 0.95)
 SEMANTIC_CACHE_TTL_SECONDS = _int("SEMANTIC_CACHE_TTL_SECONDS", 900)
 SEMANTIC_CACHE_MAX = _int("SEMANTIC_CACHE_MAX", 200)
+
+
+def validate_cache_backend_contract() -> list[str]:
+    """Reject Redis and other unsupported shared-state backends."""
+    errors: list[str] = []
+    if CACHE_BACKEND == "redis":
+        errors.append(
+            "CACHE_BACKEND=redis is not supported. "
+            "Use CACHE_BACKEND=mysql for shared cross-worker state "
+            "(or memory for single-process local optimization only)."
+        )
+    elif CACHE_BACKEND not in SUPPORTED_CACHE_BACKENDS:
+        errors.append(
+            f"CACHE_BACKEND={CACHE_BACKEND!r} is not supported. "
+            "Use 'mysql' or 'memory'."
+        )
+    if SEMANTIC_CACHE_BACKEND == "redis":
+        errors.append(
+            "SEMANTIC_CACHE_BACKEND=redis is not supported. "
+            "Use SEMANTIC_CACHE_BACKEND=mysql "
+            "(or memory for single-process local optimization only)."
+        )
+    elif SEMANTIC_CACHE_BACKEND not in SUPPORTED_SEMANTIC_CACHE_BACKENDS:
+        errors.append(
+            f"SEMANTIC_CACHE_BACKEND={SEMANTIC_CACHE_BACKEND!r} is not supported. "
+            "Use 'mysql' or 'memory'."
+        )
+    return errors
+
+
+def assert_cache_backend_contract() -> None:
+    errors = validate_cache_backend_contract()
+    if errors:
+        raise RuntimeError("; ".join(errors))
 
 # ============================================================================
 # Civic chatbot / execution pipeline
@@ -376,6 +415,8 @@ def mysql_config(*, charset: str = "utf8mb4") -> dict:
 def validate_config(test_connections: bool = False) -> list[str]:
     errors: list[str] = []
     warnings: list[str] = []
+
+    errors.extend(validate_cache_backend_contract())
 
     if not GEMINI_API_KEY:
         errors.append("GEMINI_API_KEY is not set")

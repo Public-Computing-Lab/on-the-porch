@@ -55,10 +55,10 @@
 ## Deployment Notes
 - Dev: `python api/api_v2.py` (debug=True). Frontend: `cd public && python -m http.server 8000`.
 - Production: run Flask via WSGI (e.g., gunicorn), set `FLASK_SESSION_COOKIE_SECURE=True`, restrict CORS origins, store secrets via env vars, add HTTPS terminator/reverse proxy. Configure DB backups/monitoring.
-- Scaling: in-memory session cache is per-process; use shared cache (Redis) or disable caching for multi-instance deployments. Ensure vector DB path accessible to all workers.
+- Scaling: in-memory session cache is per-process only; use `CACHE_BACKEND=mysql` for multi-worker shared cache. Redis is not supported. Ensure vector DB path accessible to all workers.
 
 ## Improvement Opportunities
-- Externalize session cache to Redis and add TTL metrics; evict by LRU.
+- Shared session/semantic cache and rate limits use MySQL (`CACHE_BACKEND=mysql`). Redis is not supported.
 - Add rate limiting per API key/session and structured audit logging.
 - Strengthen `/events` query with pagination and date filters by end_date/timezones.
 - Add unit/integration tests for routing decisions and cache reuse; stub LLM.

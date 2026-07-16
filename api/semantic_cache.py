@@ -5,9 +5,10 @@ near-duplicate question can be answered instantly without re-running the whole
 routing/retrieval/generation pipeline.
 
 Backends:
-- In-memory (default): per-process, suitable for single-worker dev.
-- Redis: shared across gunicorn workers when CACHE_BACKEND=redis.
-- MySQL: shared across workers when CACHE_BACKEND=mysql (no Redis required).
+- In-memory: per-process, suitable for single-worker local optimization only.
+- MySQL: shared across gunicorn workers (only supported shared backend).
+
+Redis is not supported.
 
 Conservative by design (SEMANTIC_CACHE_ENABLED=false by default):
 - Only first-turn questions are cached/served (follow-ups depend on conversation
@@ -63,36 +64,18 @@ class _InMemorySemanticBackend:
 
 
 class _RedisSemanticBackend:
-    """Store cache entries as a JSON blob in Redis (shared across workers)."""
+    """Unreachable Redis semantic-cache stub. Redis is not supported."""
 
-    def __init__(self, client, key: str) -> None:
-        self._client = client
-        self._key = key
-        self._lock = threading.Lock()
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        raise RuntimeError(
+            "Redis semantic cache is not supported. Use SEMANTIC_CACHE_BACKEND=mysql."
+        )
 
     def list_entries(self, now: float) -> List[Dict[str, Any]]:
-        try:
-            raw = self._client.get(self._key)
-            if not raw:
-                return []
-            entries = json.loads(raw)
-            if not isinstance(entries, list):
-                return []
-            alive = [e for e in entries if e.get("expires_at", 0) > now]
-            if len(alive) != len(entries):
-                self.save_entries(alive)
-            return alive
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Semantic cache redis read failed: {exc}")
-            return []
+        raise RuntimeError("Redis semantic cache is not supported.")
 
     def save_entries(self, entries: List[Dict[str, Any]]) -> None:
-        try:
-            payload = json.dumps(entries, ensure_ascii=False)
-            # TTL is enforced per-entry; Redis key TTL is a safety net (24h).
-            self._client.set(self._key, payload, ex=86400)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Semantic cache redis write failed: {exc}")
+        raise RuntimeError("Redis semantic cache is not supported.")
 
 
 class _MySQLSemanticBackend:
@@ -211,8 +194,10 @@ def build_semantic_cache_backend(
     redis_key: str,
     mysql_store=None,
 ) -> SemanticCacheBackend:
-    if backend_name == "redis" and redis_client is not None:
-        return _RedisSemanticBackend(redis_client, redis_key)
+    if backend_name == "redis":
+        raise RuntimeError(
+            "SEMANTIC_CACHE_BACKEND=redis is not supported. Use mysql or memory."
+        )
     if backend_name == "mysql" and mysql_store is not None:
         return _MySQLSemanticBackend(mysql_store, redis_key)
     return _InMemorySemanticBackend()

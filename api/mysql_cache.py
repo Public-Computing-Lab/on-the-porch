@@ -1,7 +1,9 @@
-"""MySQL-backed shared cache for production hosts without Redis.
+"""MySQL-backed shared cache.
 
 Used when CACHE_BACKEND=mysql. Stores opaque string values with TTL in
 api_cache_entries (see migrations/009_api_cache_entries.sql).
+
+This is the only supported shared cache backend. Redis is not supported.
 """
 
 from __future__ import annotations

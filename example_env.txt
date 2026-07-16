@@ -5,7 +5,7 @@
 #   cp example_env.txt .env
 #
 # Production overrides (see README § Deployment):
-#   PRODUCTION_MODE=true, CACHE_BACKEND=mysql (or redis), SEMANTIC_CACHE_ENABLED=true,
+#   PRODUCTION_MODE=true, CACHE_BACKEND=mysql, SEMANTIC_CACHE_ENABLED=true,
 #   GUEST_CLEANUP_ENABLED=true, FLASK_SESSION_COOKIE_SECURE=true,
 #   ALLOWED_ORIGINS=https://your-frontend-domain
 
@@ -59,7 +59,7 @@ GOOGLE_OAUTH_REDIRECT_URI=http://127.0.0.1:8888/auth/google/callback
 GUEST_SESSION_HOURS=24
 SESSION_TOUCH_DEBOUNCE_SECONDS=300
 
-# Request rate limits (uses Redis when CACHE_BACKEND=redis)
+# Request rate limits (shared via MySQL when CACHE_BACKEND=mysql)
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_KEY_PREFIX=rethinkai:ratelimit:
 RATE_LIMIT_GUEST_CREATE_PER_IP=30
@@ -107,19 +107,19 @@ GUNICORN_WORKER_CLASS=gthread
 # ============================================================================
 # Shared cache (required for multi-worker gunicorn deployments)
 # ============================================================================
-# Local dev: memory is fine for a single Flask/gunicorn worker.
-# Production without Redis (e.g. DreamHost): CACHE_BACKEND=mysql
-# Production with Redis: CACHE_BACKEND=redis
-CACHE_BACKEND=memory
-REDIS_URL=redis://127.0.0.1:6379/0
+# MySQL is the only supported shared backend.
+# memory is allowed only as single-process local optimization.
+# Redis is not supported (CACHE_BACKEND=redis will refuse to start).
+CACHE_BACKEND=mysql
+# REDIS_URL is obsolete and ignored if present.
 CACHE_TTL_MINUTES=60
 CACHE_MAX_SESSIONS=100
 CACHE_KEY_PREFIX=rethinkai:chatcache:
 
 # Semantic response cache (near-duplicate first-turn questions)
 SEMANTIC_CACHE_ENABLED=false
-# Defaults to match CACHE_BACKEND (memory / redis / mysql) when unset.
-# SEMANTIC_CACHE_BACKEND=mysql
+# Defaults to mysql when CACHE_BACKEND=mysql; memory for single-process local only.
+SEMANTIC_CACHE_BACKEND=mysql
 SEMANTIC_CACHE_KEY=rethinkai:semantic_cache:entries
 SEMANTIC_CACHE_THRESHOLD=0.95
 SEMANTIC_CACHE_TTL_SECONDS=900
@@ -188,6 +188,7 @@ MATERIALIZED_VIEWS_ENABLED=true
 EVENTS_MATERIALIZED_DAYS=90
 INGEST_QUEUE_ENABLED=true
 BOSTON_311_STALE_HOURS=2
+# Obsolete Redis-era names retained for env compatibility; unused at runtime.
 INGEST_QUEUE_KEY=rethinkai:ingest:jobs
 INGEST_STATUS_PREFIX=rethinkai:ingest:status:
 INGEST_STATUS_TTL_SECONDS=604800

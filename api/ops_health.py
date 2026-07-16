@@ -155,10 +155,10 @@ def validate_production_config(
                 f"{env_key} is still the default value; set a strong secret in production"
             )
 
-    if cache_backend not in {"redis", "mysql"}:
+    if cache_backend != "mysql":
         issues.append(
-            "CACHE_BACKEND must be 'redis' or 'mysql' when PRODUCTION_MODE=true "
-            "(use mysql when Redis is unavailable)"
+            "CACHE_BACKEND must be 'mysql' when PRODUCTION_MODE=true "
+            "(Redis is not supported; MySQL is the only shared cache)"
         )
 
     if not semantic_cache_enabled:
