@@ -134,6 +134,31 @@ TRUE_CASES = (
         EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
         EmergencyReasonCode.IMMINENT_HARM_TO_OTHERS,
     ),
+    (
+        "There's a shooting happening outside right now.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ONGOING_SHOOTING,
+    ),
+    (
+        "Someone is shooting outside.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ONGOING_SHOOTING,
+    ),
+    (
+        "There's a fire in the building right now.",
+        EmergencyCategory.FIRE,
+        EmergencyReasonCode.BUILDING_FIRE,
+    ),
+    (
+        "I'm about to hurt myself.",
+        EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
+        EmergencyReasonCode.IMMINENT_SELF_HARM,
+    ),
+    (
+        "I'm going to kill myself.",
+        EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
+        EmergencyReasonCode.IMMINENT_SELF_HARM,
+    ),
 )
 
 FALSE_CASES = (
@@ -154,6 +179,9 @@ FALSE_CASES = (
     "Are there many break-ins in this neighborhood?",
     "Tell me about an event called Fire Safety Day.",
     "What are the public-health effects of smoke?",
+    "I can't breathe when I laugh.",
+    "I cannot breathe underwater in this game.",
+    "Someone is shooting a movie downtown.",
 )
 
 

@@ -189,9 +189,10 @@ _RULES: Tuple[
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ONGOING_SHOOTING,
         _patterns(
-            r"\bthere (?:is|'s) (?:a )?shooting "
+            r"\bthere(?:'s| is) (?:a )?shooting "
             r"(?:happening|going on|outside|nearby).*\b(?:right now|now)\b",
-            r"\bsomeone (?:is|'s) shooting\b",
+            r"\b(?:someone(?:'s| is)|somebody (?:is|'s)) shooting\b"
+            r".*\b(?:outside|nearby|right now|now)\b",
         ),
     ),
     (
@@ -206,7 +207,7 @@ _RULES: Tuple[
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ARMED_THREAT,
         _patterns(
-            r"\b(?:someone|a person|they) "
+            r"\b(?:someone|somebody|a person|they) "
             r"(?:has|have|is holding|are holding|is pointing|are pointing) "
             r"(?:a )?(?:gun|firearm|weapon|knife)\b.*"
             r"\b(?:threatening|pointing (?:it )?at|trying to "
@@ -217,10 +218,10 @@ _RULES: Tuple[
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ARMED_BREAK_IN,
         _patterns(
-            r"\b(?:someone|a person) (?:is )?"
+            r"\b(?:someone|somebody|a person) (?:is )?"
             r"(?:trying to break|breaking) in\b.*"
             r"\b(?:has|with|holding|carrying) (?:a )?(?:weapon|gun|knife)\b",
-            r"\b(?:someone|a person).*\b(?:weapon|gun|knife)\b.*"
+            r"\b(?:someone|somebody|a person).*\b(?:weapon|gun|knife)\b.*"
             r"\b(?:trying to break|breaking) in\b",
         ),
     ),
@@ -228,7 +229,7 @@ _RULES: Tuple[
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ACTIVE_ATTACK,
         _patterns(
-            r"\b(?:someone|a person) (?:is )?"
+            r"\b(?:someone|somebody|a person) (?:is )?"
             r"(?:attacking|stabbing|beating|assaulting) "
             r"(?:someone|a person|people|me|him|her|them)\b",
         ),
@@ -239,7 +240,7 @@ _RULES: Tuple[
         _patterns(
             r"\b(?:my|our|the) (?:house|home|apartment|building) "
             r"(?:is|'s) on fire\b",
-            r"\bthere (?:is|'s) (?:a )?fire (?:in|inside|at) "
+            r"\bthere(?:'s| is) (?:a )?fire (?:in|inside|at) "
             r"(?:my |our |the )?(?:house|home|apartment|building).*"
             r"\b(?:right now|now)\b",
         ),
@@ -280,7 +281,11 @@ _RULES: Tuple[
     (
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.BREATHING_EMERGENCY,
-        _patterns(r"\bi (?:can't|cannot) breathe\b"),
+        _patterns(
+            # Require the complaint to end the clause so educational or
+            # figurative follow-ons ("when I laugh", "underwater") do not match.
+            r"\bi (?:can't|cannot) breathe(?:[.!?]|$)",
+        ),
     ),
     (
         EmergencyCategory.MEDICAL_EMERGENCY,
@@ -297,7 +302,7 @@ _RULES: Tuple[
             r"\b(?:someone|he|she|they) (?:says? )?(?:they |he |she )?"
             r"(?:are|is) going to (?:kill|hurt) "
             r"(?:themselves|himself|herself).*\b(?:right now|now)\b",
-            r"\bi (?:am|'m) (?:about to|going to) (?:hurt|kill) myself\b",
+            r"\bi(?:'m| am) (?:about to|going to) (?:hurt|kill) myself\b",
         ),
     ),
     (
