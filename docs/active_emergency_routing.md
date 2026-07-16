@@ -21,7 +21,12 @@ substantive civic message.
 
 Same-thread emergency races use the thread's loaded `last_message_at` as an additional
 one-winner check because emergency turns intentionally do not increment the semantic
-revision.
+revision. That timestamp is captured before generation and rechecked under the existing
+parent-thread `FOR UPDATE` lock. `last_message_at` is `DATETIME(6)` in the current schema.
+
+Emergency turns skip recent-history loading. Detection and response use only the current
+validated message. First-message title generation is not applied to emergency turns so
+sensitive emergency text is not copied into the conversation list title.
 
 ## Privacy and telemetry
 

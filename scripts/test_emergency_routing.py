@@ -401,6 +401,30 @@ def test_selected_event_is_lower_precedence_than_emergency() -> None:
     assert result["mode"] == "emergency"
 
 
+def test_emergency_json_path_skips_history_load() -> None:
+    """Modern emergency turns must not load conversation history."""
+    source = (ROOT / "api" / "api_v2.py").read_text(encoding="utf-8")
+    json_fn = source.split("def post_conversation_message(thread_id: str):", 1)[1]
+    json_fn = json_fn.split("def post_conversation_message_stream", 1)[0]
+    stream_fn = source.split(
+        "def post_conversation_message_stream(thread_id: str):", 1
+    )[1]
+    stream_fn = stream_fn.split("def chat():", 1)[0]
+    for label, body in (("json", json_fn), ("sse", stream_fn)):
+        assert "if not emergency_decision.is_active_emergency:" in body, label
+        assert "_fetch_recent_history" in body, label
+        before, after = body.split(
+            "if not emergency_decision.is_active_emergency:", 1
+        )
+        assert "_fetch_recent_history" not in before, label
+        assert "_fetch_recent_history" in after, label
+        assert "set_initial_title=(" in body or "set_initial_title=" in body
+        assert "if emergency" in body.replace("_decision", "").replace(
+            "_request", ""
+        ) or "emergency_decision.is_active_emergency" in body
+        assert "False" in body and "set_initial_title" in body
+
+
 def test_state_cache_revision_and_active_event_are_preserved() -> None:
     api = _import_api()
     state = _state()
@@ -602,6 +626,7 @@ def main() -> int:
         test_no_raw_message_in_diagnostics,
         test_shared_agent_result_and_heavy_path_bypass,
         test_selected_event_is_lower_precedence_than_emergency,
+        test_emergency_json_path_skips_history_load,
         test_state_cache_revision_and_active_event_are_preserved,
         test_emergency_metadata_is_bounded_and_hidden,
         test_persistence_skips_interaction_log_and_nested_connection,

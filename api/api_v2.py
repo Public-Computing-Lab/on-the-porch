@@ -3582,8 +3582,8 @@ def post_conversation_message(thread_id: str):
         emergency_decision, detector_latency_ms = _detect_emergency(message)
         event_context = None
         event_resolution = None
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
+        history_rows: List[Dict[str, Any]] = []
+        conversation_history: List[Dict[str, str]] = []
         state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
         retrieval_cache = state_envelope.retrieval_cache
         conversation_state = state_envelope.conversation_state
@@ -3591,7 +3591,11 @@ def post_conversation_message(thread_id: str):
         dimensions = None
         active_event_result = None
         stale_active_event = False
+        # Emergency detection uses only the current message. Skip history load so
+        # prior turns cannot influence response wiring; title uses the thread row.
         if not emergency_decision.is_active_emergency:
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
             try:
                 event_context = _validate_optional_event_context(payload)
             except EventContextValidationError as exc:
@@ -3696,7 +3700,11 @@ def post_conversation_message(thread_id: str):
                 configured_model=os.getenv("GEMINI_MODEL", ""),
             ),
             resolved_entity=resolved_entity,
-            set_initial_title=len(history_rows) == 0,
+            set_initial_title=(
+                False
+                if emergency_decision.is_active_emergency
+                else len(history_rows) == 0
+            ),
             interaction_log_enabled=not emergency_decision.is_active_emergency,
             expected_last_message_at=(
                 thread.get("last_message_at")
@@ -3800,8 +3808,8 @@ def post_conversation_message_stream(thread_id: str):
         emergency_decision, detector_latency_ms = _detect_emergency(message)
         event_context = None
         event_resolution = None
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
+        history_rows: List[Dict[str, Any]] = []
+        conversation_history: List[Dict[str, str]] = []
         state_envelope = _load_thread_state_envelope(thread.get("thread_state_json"))
         retrieval_cache = state_envelope.retrieval_cache
         conversation_state = state_envelope.conversation_state
@@ -3809,7 +3817,11 @@ def post_conversation_message_stream(thread_id: str):
         dimensions = None
         active_event_result = None
         stale_active_event = False
+        # Emergency detection uses only the current message. Skip history load so
+        # prior turns cannot influence response wiring; title uses the thread row.
         if not emergency_decision.is_active_emergency:
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
             try:
                 event_context = _validate_optional_event_context(payload)
             except EventContextValidationError as exc:
@@ -3848,6 +3860,7 @@ def post_conversation_message_stream(thread_id: str):
     session_id = g.session_row["session_id"]
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
+    emergency_request = emergency_decision.is_active_emergency
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
@@ -3858,7 +3871,6 @@ def post_conversation_message_stream(thread_id: str):
         mode = "hybrid"
         result_payload: Dict[str, Any] = {}
         next_cache = retrieval_cache
-        emergency_request = emergency_decision.is_active_emergency
         selected_request = event_resolution is not None
         active_event_request = active_event_result is not None
         deterministic_request = emergency_request or selected_request or active_event_request
@@ -4058,7 +4070,13 @@ def post_conversation_message_stream(thread_id: str):
                     ),
                 ),
                 resolved_entity=resolved_entity,
-                set_initial_title=existing_title == "New conversation" and is_first_message,
+                set_initial_title=(
+                    False
+                    if emergency_request
+                    else (
+                        existing_title == "New conversation" and is_first_message
+                    )
+                ),
                 interaction_log_enabled=not emergency_request,
                 expected_last_message_at=(
                     thread.get("last_message_at") if emergency_request else None
