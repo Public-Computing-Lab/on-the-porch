@@ -286,7 +286,7 @@ The repo also includes demo and DreamHost deployment scripts, which makes the sy
 
 ## Recommended Future Improvements
 
-- move cache storage to Redis
+- use MySQL shared cache (`CACHE_BACKEND=mysql`); Redis is not supported
 - use a centralized or managed vector database for scale
 - add stronger monitoring and data-freshness alerts
 - harden production security with stricter CORS, HTTPS-only cookies, and rate limiting

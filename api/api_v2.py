@@ -62,7 +62,9 @@ _API_DIR = _THIS_FILE.parent
 _ROOT_DIR = _API_DIR.parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
-from config import Config  # noqa: E402
+from config import Config, assert_cache_backend_contract  # noqa: E402
+
+assert_cache_backend_contract()
 
 _ON_THE_PORCH_DIR = _ROOT_DIR / "on_the_porch"
 
@@ -245,7 +247,7 @@ def _remove_from_chroma(entry_id: int) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 # The legacy /chat session cache is provided by a pluggable backend defined
-# after Config (see `_session_cache`). Set CACHE_BACKEND=redis to share it
+# after Config (see `_session_cache`). Set CACHE_BACKEND=mysql to share it
 # across gunicorn workers; it defaults to a thread-safe in-process cache.
 
 
@@ -518,9 +520,8 @@ class _MemorySessionCache(_BaseSessionCache):
     """In-process cache. Thread-safe and bounded by TTL + LRU.
 
     NOTE: this is per-process and is NOT shared across gunicorn workers. It is
-    correct for single-process or sticky-session deployments; use the redis
-    backend for multi-worker sharing. The lock fixes the previous race where
-    concurrent /chat requests mutated a bare module dict.
+    only a bounded, non-authoritative optimization for single-process local use.
+    Multi-worker deployments must use CACHE_BACKEND=mysql.
     """
 
     def __init__(self, ttl_minutes: int, max_sessions: int) -> None:
@@ -563,39 +564,25 @@ class _MemorySessionCache(_BaseSessionCache):
                 self._data.pop(sid, None)
 
 
+# OBSOLETE / QUARANTINED: Redis session cache. Unreachable under the MySQL-only
+# runtime contract. Kept as a named stub so accidental imports fail loudly.
 class _RedisSessionCache(_BaseSessionCache):
-    """Cross-worker cache backed by Redis, with per-key TTL.
+    """Unreachable Redis session cache stub. Redis is not supported."""
 
-    A Redis outage must never break chat: get/set failures are logged and
-    degrade to "no cache" (a fresh retrieval) rather than raising.
-    """
-
-    def __init__(self, client, ttl_minutes: int, key_prefix: str) -> None:
-        self._client = client
-        self._ttl_seconds = max(60, ttl_minutes * 60)
-        self._key_prefix = key_prefix
-
-    def _key(self, session_id: str) -> str:
-        return f"{self._key_prefix}{session_id}"
+    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+        raise RuntimeError(
+            "Redis session cache is not supported. Use CACHE_BACKEND=mysql."
+        )
 
     def get(self, session_id: str) -> Dict[str, Any]:
-        try:
-            raw = self._client.get(self._key(session_id))
-            if raw:
-                return json_loads(raw, create_empty_cache())
-        except Exception as exc:  # noqa: BLE001
-            _log_exception("Redis cache get failed", exc)
-        return create_empty_cache()
+        raise RuntimeError("Redis session cache is not supported.")
 
     def set(self, session_id: str, cache: Dict[str, Any]) -> None:
-        try:
-            self._client.set(self._key(session_id), json_dumps(cache), ex=self._ttl_seconds)
-        except Exception as exc:  # noqa: BLE001
-            _log_exception("Redis cache set failed", exc)
+        raise RuntimeError("Redis session cache is not supported.")
 
 
 class _MySQLSessionCache(_BaseSessionCache):
-    """Cross-worker cache backed by MySQL (DreamHost / no-Redis production)."""
+    """Cross-worker cache backed by MySQL (only supported shared backend)."""
 
     def __init__(self, store: MySQLCacheStore, ttl_minutes: int, key_prefix: str) -> None:
         self._store = store
@@ -623,6 +610,10 @@ class _MySQLSessionCache(_BaseSessionCache):
 
 def _build_session_cache() -> _BaseSessionCache:
     """Construct the configured cache backend, falling back to memory on error."""
+    if Config.CACHE_BACKEND == "redis":
+        raise RuntimeError(
+            "CACHE_BACKEND=redis is not supported. Use CACHE_BACKEND=mysql."
+        )
     if Config.CACHE_BACKEND == "mysql":
         try:
             store = _get_mysql_cache_store()
@@ -637,24 +628,6 @@ def _build_session_cache() -> _BaseSessionCache:
                 "falling back to in-memory cache.",
                 file=sys.stderr,
             )
-    if Config.CACHE_BACKEND == "redis":
-        try:
-            import redis  # type: ignore
-
-            client = redis.Redis.from_url(
-                Config.REDIS_URL,
-                socket_timeout=2,
-                socket_connect_timeout=2,
-            )
-            client.ping()
-            print(f"Session cache backend: redis ({Config.REDIS_URL})")
-            return _RedisSessionCache(client, Config.CACHE_TTL_MINUTES, Config.CACHE_KEY_PREFIX)
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"WARNING: redis cache backend unavailable ({exc.__class__.__name__}); "
-                "falling back to in-memory cache.",
-                file=sys.stderr,
-            )
     return _MemorySessionCache(Config.CACHE_TTL_MINUTES, Config.CACHE_MAX_SESSIONS)
 
 
@@ -662,31 +635,24 @@ _session_cache = _build_session_cache()
 
 
 def _build_rate_limiter() -> RateLimiter:
-    redis_client = None
     mysql_store = None
+    if Config.CACHE_BACKEND == "redis":
+        raise RuntimeError(
+            "CACHE_BACKEND=redis is not supported. Use CACHE_BACKEND=mysql."
+        )
     if Config.CACHE_BACKEND == "mysql":
         try:
             store = _get_mysql_cache_store()
             if store.ping():
                 mysql_store = store
             else:
-                _log_exception("Rate limiter mysql unavailable; using in-memory fallback", RuntimeError("ping failed"))
+                _log_exception(
+                    "Rate limiter mysql unavailable; using in-memory fallback",
+                    RuntimeError("ping failed"),
+                )
         except Exception as exc:  # noqa: BLE001
             _log_exception("Rate limiter mysql unavailable; using in-memory fallback", exc)
-    elif Config.CACHE_BACKEND == "redis":
-        try:
-            import redis  # type: ignore
-
-            redis_client = redis.Redis.from_url(
-                Config.REDIS_URL,
-                socket_timeout=2,
-                socket_connect_timeout=2,
-            )
-            redis_client.ping()
-        except Exception as exc:  # noqa: BLE001
-            _log_exception("Rate limiter redis unavailable; using in-memory fallback", exc)
     return RateLimiter(
-        redis_client,
         mysql_store=mysql_store,
         key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
     )
@@ -704,8 +670,12 @@ def _semantic_embed(text: str):
 
 def _build_semantic_cache() -> SemanticResponseCache:
     backend_name = Config.SEMANTIC_CACHE_BACKEND
-    redis_client = None
     mysql_store = None
+    if backend_name == "redis":
+        raise RuntimeError(
+            "SEMANTIC_CACHE_BACKEND=redis is not supported. "
+            "Use SEMANTIC_CACHE_BACKEND=mysql."
+        )
     if backend_name == "mysql":
         try:
             store = _get_mysql_cache_store()
@@ -719,26 +689,9 @@ def _build_semantic_cache() -> SemanticResponseCache:
             backend_name = "memory"
         else:
             mysql_store = store
-    elif backend_name == "redis":
-        try:
-            import redis  # type: ignore
-
-            redis_client = redis.Redis.from_url(
-                Config.REDIS_URL,
-                socket_timeout=2,
-                socket_connect_timeout=2,
-            )
-            redis_client.ping()
-        except Exception as exc:  # noqa: BLE001
-            _log_exception(
-                "Semantic cache redis unavailable; using in-memory backend",
-                exc,
-            )
-            backend_name = "memory"
 
     backend = build_semantic_cache_backend(
         backend_name=backend_name,
-        redis_client=redis_client,
         redis_key=Config.SEMANTIC_CACHE_KEY,
         mysql_store=mysql_store,
     )
@@ -797,6 +750,7 @@ def _run_startup_checks() -> None:
         )
 
 
+# Fail fast if Redis (or another unsupported backend) is configured.
 if Config.PRODUCTION_MODE:
     _run_startup_checks()
     print("Production mode: enabled", file=sys.stderr)
@@ -1484,28 +1438,15 @@ def _verify_log_ownership(
         cursor.close()
 
 
-def _check_redis_health() -> str:
-    if Config.CACHE_BACKEND != "redis":
-        return "not_configured"
-    try:
-        import redis  # type: ignore
-
-        client = redis.Redis.from_url(Config.REDIS_URL, socket_connect_timeout=2)
-        client.ping()
-        return "connected"
-    except Exception:
-        return "disconnected"
-
-
 def _check_shared_cache_health() -> str:
     if Config.CACHE_BACKEND == "mysql":
         try:
             return "connected" if _get_mysql_cache_store().ping() else "disconnected"
         except Exception:
             return "disconnected"
-    if Config.CACHE_BACKEND == "redis":
-        return _check_redis_health()
-    return "in_process"
+    if Config.CACHE_BACKEND == "memory":
+        return "in_process"
+    return "unsupported"
 
 
 def _check_chroma_health() -> str:
@@ -4769,13 +4710,11 @@ def health():
         status["database"] = "disconnected"
         status["status"] = "degraded"
 
-    status["redis"] = _check_redis_health()
     status["shared_cache"] = _check_shared_cache_health()
-    if Config.CACHE_BACKEND == "redis" and status["redis"] == "disconnected":
+    status["redis"] = "not_supported"
+    if Config.CACHE_BACKEND == "mysql" and status["shared_cache"] == "disconnected":
         status["status"] = "degraded"
-    elif Config.CACHE_BACKEND == "mysql" and status["shared_cache"] == "disconnected":
-        status["status"] = "degraded"
-    elif Config.PRODUCTION_MODE and Config.CACHE_BACKEND == "memory":
+    elif Config.PRODUCTION_MODE and Config.CACHE_BACKEND != "mysql":
         status["status"] = "degraded"
 
     status["chroma"] = _check_chroma_health()
@@ -4805,7 +4744,9 @@ def health():
     try:
         from ingest_queue import check_311_freshness, get_ingest_job_status
 
-        status["ingest_jobs"] = get_ingest_job_status()
+        status["ingest_jobs"] = get_ingest_job_status(
+            connection_factory=get_db_connection
+        )
         status["boston_311_freshness"] = check_311_freshness(
             get_db_connection,
             stale_hours=Config.BOSTON_311_STALE_HOURS,

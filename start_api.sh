@@ -26,23 +26,17 @@ else
   set +a
 fi
 
+if [ "${CACHE_BACKEND:-}" = "redis" ] || [ "${SEMANTIC_CACHE_BACKEND:-}" = "redis" ]; then
+  echo "ERROR: Redis is not supported. Set CACHE_BACKEND=mysql and SEMANTIC_CACHE_BACKEND=mysql." >&2
+  exit 1
+fi
+
 if [ "${PRODUCTION_MODE:-false}" = "true" ] || [ "${PRODUCTION_MODE:-false}" = "1" ]; then
-  CACHE_BACKEND="${CACHE_BACKEND:-memory}"
-  if [ "$CACHE_BACKEND" = "redis" ]; then
-    REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
-    if command -v redis-cli >/dev/null 2>&1; then
-      if ! redis-cli -u "$REDIS_URL" ping >/dev/null 2>&1; then
-        echo "ERROR: Redis is not reachable at $REDIS_URL. Start it with ./start_redis.sh" >&2
-        exit 1
-      fi
-    else
-      echo "WARNING: redis-cli not found; skipping Redis reachability check." >&2
-    fi
-    echo "Production mode: CACHE_BACKEND=redis, starting gunicorn..."
-  elif [ "$CACHE_BACKEND" = "mysql" ]; then
+  CACHE_BACKEND="${CACHE_BACKEND:-mysql}"
+  if [ "$CACHE_BACKEND" = "mysql" ]; then
     echo "Production mode: CACHE_BACKEND=mysql (shared cache via MySQL), starting gunicorn..."
   else
-    echo "ERROR: PRODUCTION_MODE=true requires CACHE_BACKEND=redis or CACHE_BACKEND=mysql in .env" >&2
+    echo "ERROR: PRODUCTION_MODE=true requires CACHE_BACKEND=mysql in .env" >&2
     exit 1
   fi
 fi

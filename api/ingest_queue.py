@@ -1,16 +1,29 @@
-"""Ingestion job tracking via Redis + MySQL (Iteration 5)."""
+"""Ingestion job tracking via MySQL (Iteration 5).
+
+Redis is not supported. Job start/finish and /health status use the
+`ingest_job_runs` table when present.
+"""
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from datetime import date, datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 INGEST_QUEUE_KEY = os.getenv("INGEST_QUEUE_KEY", "rethinkai:ingest:jobs")
 INGEST_STATUS_PREFIX = os.getenv("INGEST_STATUS_PREFIX", "rethinkai:ingest:status:")
 INGEST_STATUS_TTL_SECONDS = int(os.getenv("INGEST_STATUS_TTL_SECONDS", "604800"))
+
+KNOWN_INGEST_JOBS = (
+    "boston_sync",
+    "dotnews",
+    "tribe_events",
+    "rss",
+    "google_drive",
+    "guest_cleanup",
+    "materialized_refresh",
+)
 
 
 def is_ingest_queue_enabled() -> bool:
@@ -24,10 +37,11 @@ def _utcnow() -> datetime:
 
 
 def _redis_client():
-    import redis
-
-    url = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
-    return redis.Redis.from_url(url, decode_responses=True)
+    """Obsolete. Redis is not supported for ingest tracking."""
+    raise RuntimeError(
+        "Redis ingest tracking is not supported. "
+        "Use MySQL ingest_job_runs (pass mysql_conn)."
+    )
 
 
 def record_job_start(
@@ -37,6 +51,9 @@ def record_job_start(
     mysql_conn=None,
 ) -> Dict[str, Any]:
     """Mark a job as running. Returns run_id and optional mysql row id."""
+    if redis_client is not None:
+        # Explicitly ignore legacy callers that still pass a Redis client.
+        redis_client = None
     run_id = f"{job_name}:{int(time.time() * 1000)}"
     payload = {
         "job_name": job_name,
@@ -47,10 +64,6 @@ def record_job_start(
         "error": None,
         "run_id": run_id,
     }
-    if is_ingest_queue_enabled() and redis_client is not None:
-        key = f"{INGEST_STATUS_PREFIX}{job_name}"
-        redis_client.setex(key, INGEST_STATUS_TTL_SECONDS, json.dumps(payload))
-        redis_client.lpush(INGEST_QUEUE_KEY, json.dumps({"run_id": run_id, **payload}))
     if mysql_conn is not None and _ingest_runs_table_exists(mysql_conn):
         cursor = mysql_conn.cursor()
         try:
@@ -80,6 +93,8 @@ def record_job_finish(
     mysql_conn=None,
     mysql_row_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if redis_client is not None:
+        redis_client = None
     finished = _utcnow()
     duration = None
     if started_at is not None:
@@ -91,12 +106,6 @@ def record_job_finish(
         "duration_seconds": duration,
         "error": (error or "")[:2000] or None,
     }
-    if is_ingest_queue_enabled() and redis_client is not None:
-        key = f"{INGEST_STATUS_PREFIX}{job_name}"
-        existing_raw = redis_client.get(key)
-        merged = json.loads(existing_raw) if existing_raw else {"job_name": job_name}
-        merged.update(payload)
-        redis_client.setex(key, INGEST_STATUS_TTL_SECONDS, json.dumps(merged))
     if mysql_conn is not None and mysql_row_id and _ingest_runs_table_exists(mysql_conn):
         cursor = mysql_conn.cursor()
         try:
@@ -134,34 +143,80 @@ def _ingest_runs_table_exists(conn) -> bool:
         cursor.close()
 
 
-def get_ingest_job_status(redis_client=None) -> Dict[str, Any]:
-    """Return latest status per known ingest job (for /health)."""
-    jobs = [
-        "boston_sync",
-        "dotnews",
-        "tribe_events",
-        "rss",
-        "google_drive",
-        "guest_cleanup",
-        "materialized_refresh",
-    ]
+def get_ingest_job_status(
+    redis_client=None,
+    *,
+    connection_factory: Optional[Callable[[], Any]] = None,
+) -> Dict[str, Any]:
+    """Return latest status per known ingest job (for /health) from MySQL."""
     out: Dict[str, Any] = {"enabled": is_ingest_queue_enabled(), "jobs": {}}
     if not is_ingest_queue_enabled():
         return out
-    client = redis_client
-    if client is None:
+    if connection_factory is None:
         try:
-            client = _redis_client()
+            import mysql.connector
+
+            def connection_factory() -> Any:
+                return mysql.connector.connect(
+                    host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+                    port=int(os.getenv("MYSQL_PORT", "3306")),
+                    user=os.getenv("MYSQL_USER", "root"),
+                    password=os.getenv("MYSQL_PASSWORD", ""),
+                    database=os.getenv("MYSQL_DB", "sentiment_demo"),
+                )
         except Exception as exc:
             out["error"] = str(exc)
             return out
-    for job in jobs:
-        raw = client.get(f"{INGEST_STATUS_PREFIX}{job}")
-        if raw:
+    conn = None
+    try:
+        conn = connection_factory()
+        if not _ingest_runs_table_exists(conn):
+            out["error"] = "ingest_job_runs_missing"
+            return out
+        cursor = conn.cursor(dictionary=True)
+        try:
+            for job in KNOWN_INGEST_JOBS:
+                cursor.execute(
+                    """
+                    SELECT job_name, status, started_at, finished_at,
+                           duration_seconds, error_message
+                    FROM ingest_job_runs
+                    WHERE job_name = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (job,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    continue
+                out["jobs"][job] = {
+                    "job_name": row["job_name"],
+                    "status": row["status"],
+                    "started_at": (
+                        row["started_at"].isoformat()
+                        if hasattr(row["started_at"], "isoformat")
+                        else row["started_at"]
+                    ),
+                    "finished_at": (
+                        row["finished_at"].isoformat()
+                        if row["finished_at"] is not None
+                        and hasattr(row["finished_at"], "isoformat")
+                        else row["finished_at"]
+                    ),
+                    "duration_seconds": row["duration_seconds"],
+                    "error": row["error_message"],
+                }
+        finally:
+            cursor.close()
+    except Exception as exc:
+        out["error"] = exc.__class__.__name__
+    finally:
+        if conn is not None:
             try:
-                out["jobs"][job] = json.loads(raw)
-            except json.JSONDecodeError:
-                out["jobs"][job] = {"status": "unknown"}
+                conn.close()
+            except Exception:
+                pass
     return out
 
 

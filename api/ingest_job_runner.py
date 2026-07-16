@@ -39,34 +39,29 @@ def _save_state(state: dict) -> None:
     _STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _mysql_conn():
+    import mysql.connector
+
+    return mysql.connector.connect(
+        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
+        port=int(os.getenv("MYSQL_PORT", "3306")),
+        user=os.getenv("MYSQL_USER", "root"),
+        password=os.getenv("MYSQL_PASSWORD", ""),
+        database=os.getenv("MYSQL_DB", "sentiment_demo"),
+    )
+
+
 def cmd_start(job_name: str) -> int:
     from ingest_queue import is_ingest_queue_enabled, record_job_start
 
     started_wall = time.time()
-    redis_client = None
     mysql_conn = None
     if is_ingest_queue_enabled():
         try:
-            from ingest_queue import _redis_client
-
-            redis_client = _redis_client()
-        except Exception:
-            pass
-        try:
-            import mysql.connector
-
-            mysql_conn = mysql.connector.connect(
-                host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-                port=int(os.getenv("MYSQL_PORT", "3306")),
-                user=os.getenv("MYSQL_USER", "root"),
-                password=os.getenv("MYSQL_PASSWORD", ""),
-                database=os.getenv("MYSQL_DB", "sentiment_demo"),
-            )
+            mysql_conn = _mysql_conn()
         except Exception:
             mysql_conn = None
-    started = record_job_start(
-        job_name, redis_client=redis_client, mysql_conn=mysql_conn,
-    )
+    started = record_job_start(job_name, mysql_conn=mysql_conn)
     state = _load_state()
     state[job_name] = {
         "run_id": started.get("run_id"),
@@ -86,25 +81,10 @@ def cmd_finish(job_name: str, status: str, error: str = "") -> int:
     state = _load_state()
     entry = state.get(job_name, {})
     started_at = entry.get("started_at")
-    redis_client = None
     mysql_conn = None
     if is_ingest_queue_enabled():
         try:
-            from ingest_queue import _redis_client
-
-            redis_client = _redis_client()
-        except Exception:
-            pass
-        try:
-            import mysql.connector
-
-            mysql_conn = mysql.connector.connect(
-                host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-                port=int(os.getenv("MYSQL_PORT", "3306")),
-                user=os.getenv("MYSQL_USER", "root"),
-                password=os.getenv("MYSQL_PASSWORD", ""),
-                database=os.getenv("MYSQL_DB", "sentiment_demo"),
-            )
+            mysql_conn = _mysql_conn()
         except Exception:
             mysql_conn = None
     record_job_finish(
@@ -112,7 +92,6 @@ def cmd_finish(job_name: str, status: str, error: str = "") -> int:
         status=status,
         error=error or None,
         started_at=started_at,
-        redis_client=redis_client,
         mysql_conn=mysql_conn,
         mysql_row_id=entry.get("mysql_id"),
     )
