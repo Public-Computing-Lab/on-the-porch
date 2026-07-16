@@ -675,6 +675,15 @@ class BostonDataSyncer:
             print(f"      Fetched: {stats['records_fetched']}")
             print(f"      Inserted: {stats['records_inserted']}")
             print(f"      Updated: {stats['records_updated']}")
+
+            if not stats.get("errors"):
+                self._update_civic_source_status(
+                    table_name=table_name,
+                    dataset_name=name,
+                    date_field=date_field,
+                    records_changed=int(stats.get("records_inserted") or 0)
+                    + int(stats.get("records_updated") or 0),
+                )
         
         except Exception as e:
             error_msg = f"Error syncing dataset {name}: {e}"
@@ -682,6 +691,72 @@ class BostonDataSyncer:
             stats['errors'].append(error_msg)
         
         return stats
+
+    def _update_civic_source_status(
+        self,
+        *,
+        table_name: str,
+        dataset_name: str,
+        date_field: Optional[str],
+        records_changed: int,
+    ) -> None:
+        """Persist MySQL-backed freshness after a successful dataset sync."""
+        source_key = None
+        if table_name == "crime_incident_reports" or dataset_name == "crime_incident_reports":
+            source_key = "crime_incident_reports"
+            date_col = "occurred_on_date"
+        elif table_name == "service_requests_311" or "311" in (dataset_name or ""):
+            source_key = "service_requests_311"
+            date_col = "open_date"
+        else:
+            return
+        try:
+            import sys
+            from pathlib import Path
+
+            root = Path(__file__).resolve().parents[3]
+            if str(root / "on_the_porch") not in sys.path:
+                sys.path.insert(0, str(root / "on_the_porch"))
+            from source_freshness import (  # noqa: WPS433
+                mysql_connection_factory,
+                record_successful_ingest,
+            )
+
+            conn = self._get_mysql_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    f"SELECT DATE(MAX(`{date_col}`)), COUNT(*) FROM `{table_name}`"
+                )
+                row = cursor.fetchone()
+                latest = None
+                count = 0
+                if row:
+                    latest = row[0] if not isinstance(row, dict) else row.get(f"DATE(MAX(`{date_col}`))") or list(row.values())[0]
+                    count = int(
+                        (row[1] if not isinstance(row, dict) else list(row.values())[1])
+                        or 0
+                    )
+            finally:
+                cursor.close()
+                conn.close()
+
+            ok = record_successful_ingest(
+                mysql_connection_factory(),
+                source_key=source_key,
+                latest_record_date=latest,
+                record_count=count,
+                advance_data_through=records_changed > 0,
+            )
+            if ok:
+                print(
+                    f"   📌 civic_source_status updated for {source_key} "
+                    f"(latest={latest}, count={count}, advanced={records_changed > 0})"
+                )
+            else:
+                print(f"   ⚠️  civic_source_status update failed for {source_key}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"   ⚠️  civic_source_status update skipped: {exc.__class__.__name__}")
     
     def _get_column_char_limits(self, cursor, table_name: str) -> Dict[str, int]:
         """Return {column_name: max_chars} for VARCHAR columns."""

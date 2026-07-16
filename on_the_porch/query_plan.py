@@ -7,8 +7,9 @@ and prepared SQL catalog. No LLM calls.
 from __future__ import annotations
 
 import calendar
+import re
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional
 
 
@@ -31,6 +32,93 @@ class PeriodWindow:
     days: int
     label: str
     calendar_ym: Optional[str] = None  # YYYY-MM for calendar-month questions
+    # Half-open [start_date, end_date_exclusive) when an explicit range is parsed.
+    start_date: Optional[date] = None
+    end_date_exclusive: Optional[date] = None
+
+
+_MONTH_NAMES = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+def _parse_explicit_range(question: str, *, today: Optional[date] = None) -> Optional[PeriodWindow]:
+    """Parse 'from June 1 through June 20' into a half-open PeriodWindow."""
+    q = (question or "").lower()
+    local_today = today or date.today()
+    pattern = re.compile(
+        r"from\s+([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?"
+        r"\s+(?:through|to|until|-)\s+"
+        r"([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?",
+        re.I,
+    )
+    match = pattern.search(q)
+    if not match:
+        return None
+    m1, d1, y1, m2, d2, y2 = match.groups()
+    month1 = _MONTH_NAMES.get(m1.lower())
+    month2 = _MONTH_NAMES.get(m2.lower())
+    if not month1 or not month2:
+        return None
+    year2 = int(y2) if y2 else local_today.year
+    year1 = int(y1) if y1 else year2
+    try:
+        start = date(year1, month1, int(d1))
+        end_inclusive = date(year2, month2, int(d2))
+    except ValueError:
+        return None
+    end_exclusive = end_inclusive + timedelta(days=1)
+    days = max(1, (end_exclusive - start).days)
+    label = (
+        f"{start.strftime('%B')} {start.day} through "
+        f"{end_inclusive.strftime('%B')} {end_inclusive.day}, {end_inclusive.year}"
+    )
+    return PeriodWindow(
+        days=days,
+        label=label,
+        start_date=start,
+        end_date_exclusive=end_exclusive,
+    )
+
+
+def _named_month_window(question: str, *, today: Optional[date] = None) -> Optional[PeriodWindow]:
+    """Parse bare 'in June' / 'during June 2026' as a full calendar month."""
+    q = (question or "").lower()
+    local_today = today or date.today()
+    # Avoid stealing "from June 1 through ..." (handled by explicit range).
+    if re.search(r"from\s+[a-z]+\s+\d{1,2}", q):
+        return None
+    match = re.search(
+        r"\b(?:in|during|for)\s+(january|february|march|april|may|june|july|"
+        r"august|september|october|november|december)(?:\s+(\d{4}))?\b",
+        q,
+    )
+    if not match:
+        return None
+    month = _MONTH_NAMES[match.group(1)]
+    year = int(match.group(2)) if match.group(2) else local_today.year
+    ym = f"{year:04d}-{month:02d}"
+    days_in_month = calendar.monthrange(year, month)[1]
+    return PeriodWindow(
+        days=days_in_month,
+        label=f"{calendar.month_name[month]} {year}",
+        calendar_ym=ym,
+        start_date=date(year, month, 1),
+        end_date_exclusive=(
+            date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        ),
+    )
 
 
 def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -63,19 +151,37 @@ def _calendar_month_window(offset: int, *, month_to_date: bool = False) -> Perio
 def resolve_period(question: str, default: int = 7) -> PeriodWindow:
     """Map natural-language time phrases to SQL + user-facing period labels."""
     q = (question or "").lower()
+    explicit = _parse_explicit_range(question)
+    if explicit is not None:
+        return explicit
+    named_month = _named_month_window(question)
+    if named_month is not None:
+        return named_month
     if "last month" in q:
         window = _calendar_month_window(-1)
+        year, month = int(window.calendar_ym[:4]), int(window.calendar_ym[5:7])
+        start = date(year, month, 1)
+        end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
         return PeriodWindow(
             days=window.days,
             label=f"last month ({window.label})",
             calendar_ym=window.calendar_ym,
+            start_date=start,
+            end_date_exclusive=end,
         )
     if "this month" in q:
         window = _calendar_month_window(0, month_to_date=True)
+        year, month = int(window.calendar_ym[:4]), int(window.calendar_ym[5:7])
+        today = date.today()
+        start = date(year, month, 1)
+        # Month-to-date: half-open through tomorrow so today is included.
+        end = today + timedelta(days=1)
         return PeriodWindow(
             days=window.days,
             label=f"this month ({window.label})",
             calendar_ym=window.calendar_ym,
+            start_date=start,
+            end_date_exclusive=end,
         )
     if "this year" in q:
         return PeriodWindow(days=365, label="this year (calendar year to date)")

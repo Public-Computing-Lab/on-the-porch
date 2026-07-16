@@ -225,18 +225,48 @@ def _build_hybrid_plan(question: str, routing: Dict[str, Any]) -> Optional[Execu
         elif prepared_sql.is_factual_db_question(question):
             return None
 
-    plan_parts.append(PlanPart(
-        path="rag",
-        intent=str(routing.get("intent") or "hybrid_rag"),
-        sub_question=question,
-        rag_hints=_rag_hints_from_routing(routing),
-    ))
+    # Current-condition questions with non-fresh civic data should stay deterministic
+    # and skip RAG (stale safety answers must not wait on vector retrieval).
+    skip_rag = False
+    try:
+        from source_freshness import (  # noqa: WPS433
+            FreshnessStatus,
+            assess_for_question,
+            is_current_condition_question,
+            mysql_connection_factory,
+            SOURCE_CRIME,
+        )
+
+        if is_current_condition_question(question) and any(
+            p.topic == "crime" or (p.intent or "").startswith("crime") for p in plan_parts
+        ):
+            assessment = assess_for_question(
+                mysql_connection_factory(),
+                source_key=SOURCE_CRIME,
+                question=question,
+            )
+            if assessment.freshness_status in {
+                FreshnessStatus.STALE,
+                FreshnessStatus.UNKNOWN,
+                FreshnessStatus.DELAYED,
+            }:
+                skip_rag = True
+    except Exception:
+        skip_rag = False
+
+    if not skip_rag:
+        plan_parts.append(PlanPart(
+            path="rag",
+            intent=str(routing.get("intent") or "hybrid_rag"),
+            sub_question=question,
+            rag_hints=_rag_hints_from_routing(routing),
+        ))
     return ExecutionPlan(
         question=question,
         parts=plan_parts,
         tier="A",
         routing_intent=routing.get("intent"),
-        routing_mode="hybrid",
+        routing_mode="sql" if skip_rag and len(plan_parts) == 1 else "hybrid",
         synthesis=SynthesisConfig(),
     )
 

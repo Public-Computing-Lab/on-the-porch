@@ -75,6 +75,7 @@ def _execute_sql_part(
             hit,
             execute_sql,
             supplemental_sql=supplemental_sql,
+            freshness_question=question,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ SQL part failed ({part.intent}): {exc}")
@@ -106,6 +107,8 @@ def _execute_sql_part(
         supplemental_result=supp,
         issue_type_breakdown=issue_breakdown,
         row_analysis=facts.get("row_analysis"),
+        source_freshness=facts.get("source_freshness"),
+        freshness_flags=facts.get("freshness_flags"),
     )
 
 

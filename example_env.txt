@@ -188,6 +188,11 @@ MATERIALIZED_VIEWS_ENABLED=true
 EVENTS_MATERIALIZED_DAYS=90
 INGEST_QUEUE_ENABLED=true
 BOSTON_311_STALE_HOURS=2
+# Structured civic source freshness (calendar days, America/New_York). Beta display thresholds.
+SOURCE_FRESHNESS_311_FRESH_DAYS=3
+SOURCE_FRESHNESS_311_DELAYED_DAYS=7
+SOURCE_FRESHNESS_CRIME_FRESH_DAYS=3
+SOURCE_FRESHNESS_CRIME_DELAYED_DAYS=7
 # Obsolete Redis-era names retained for env compatibility; unused at runtime.
 INGEST_QUEUE_KEY=rethinkai:ingest:jobs
 INGEST_STATUS_PREFIX=rethinkai:ingest:status:

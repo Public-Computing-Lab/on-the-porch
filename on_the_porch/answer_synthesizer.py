@@ -164,6 +164,22 @@ def synthesize_answer(
         and bundle.parts[0].canonical_facts.strip()
     ):
         return bundle.parts[0].canonical_facts.strip()
+
+    # Keep coverage / freshness caveats deterministic — do not let the LLM soften them.
+    for part in bundle.parts:
+        flags = part.freshness_flags or {}
+        meta = part.source_freshness or {}
+        coverage = str(meta.get("coverage_status") or "")
+        if (
+            part.canonical_facts.strip()
+            and (
+                flags.get("freshness_completion") in {"PARTIAL", "DEGRADED"}
+                or flags.get("freshness_blocks_current_condition")
+                or coverage in {"PARTIAL", "OUTSIDE", "UNKNOWN"}
+            )
+        ):
+            return part.canonical_facts.strip()
+
     if not is_answer_synthesis_enabled():
         return _fallback_answer(bundle)
 
