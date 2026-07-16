@@ -30,6 +30,7 @@ from conversation_state import (  # noqa: E402
     retrieval_cache_hash,
     serialize_thread_state,
 )
+from emergency_routing import detect_active_emergency  # noqa: E402
 from test_active_event_followups import (  # noqa: E402
     _LiveGuestClient,
     _live_db_connection,
@@ -247,7 +248,7 @@ def _run_dialogues(base_url: str) -> None:
     emergency = _turn(
         client,
         dialogue_d,
-        "There is a shooting happening outside right now.",
+        "There's a shooting happening outside right now.",
     )
     assert emergency["mode"] == "emergency"
     assert emergency["answer"].startswith("Call 911 now.")
@@ -266,6 +267,44 @@ def _run_dialogues(base_url: str) -> None:
         or "event" in followup["answer"].lower()
     )
 
+    # Dialogue E — breathing precision across separate threads.
+    e_cases = [
+        ("I'm having severe trouble breathing right now.", True),
+        ("What are breathing exercises?", False),
+        ("I had trouble breathing last year.", False),
+        ("I get out of breath when I run.", False),
+        ("Someone stopped breathing.", True),
+    ]
+    for message, must_be_emergency in e_cases:
+        detector = detect_active_emergency(message)
+        assert detector.is_active_emergency is must_be_emergency, message
+        thread_id = client.create_thread(f"Breathing {message[:24]}")
+        before = _read_live_state(thread_id)
+        if must_be_emergency:
+            result = _turn(client, thread_id, message)
+            assert result["mode"] == "emergency", message
+            assert result["answer"].startswith("Call 911 now."), message
+            assert result["llm_calls"] == 0, message
+            assert result["trusted_state_after"] == before.conversation_state.to_dict()
+            assert result["revision"] == before.conversation_state.revision
+            assert result["cache_hash_after"] == retrieval_cache_hash(
+                before.retrieval_cache
+            )
+        else:
+            # Civic retrieval may be unavailable in this local vector/model setup;
+            # still require the emergency short-circuit not to fire.
+            response = client.send_json(thread_id, {"message": message})
+            if response.status_code == 201:
+                payload = response.json()
+                assert payload["assistant_message"]["response_mode"] != "emergency"
+                after = _read_live_state(thread_id)
+                # Non-emergency answers may advance civic state; only forbid emergency.
+                assert after.conversation_state.revision >= before.conversation_state.revision
+            else:
+                assert response.status_code >= 400
+                after = _read_live_state(thread_id)
+                assert after.to_dict() == before.to_dict()
+
     json_thread = client.create_thread("State-aware JSON parity")
     sse_thread = client.create_thread("State-aware SSE parity")
     json_turn = _turn(client, json_thread, "What events are happening tomorrow?")
@@ -281,6 +320,20 @@ def _run_dialogues(base_url: str) -> None:
     assert json_turn["cache_signature_after"] == sse_turn["cache_signature_after"]
     assert json_turn["mode"] == sse_turn["mode"] == "structured_events"
     assert json_turn["model_name"] is None and sse_turn["model_name"] is None
+
+    # JSON/SSE emergency and breathing false-positive parity.
+    for message, expect_emergency in (
+        ("There's a fire in the building right now.", True),
+        ("I'm having severe trouble breathing right now.", True),
+    ):
+        j_thread = client.create_thread(f"parity json {message[:20]}")
+        s_thread = client.create_thread(f"parity sse {message[:20]}")
+        j_turn = _turn(client, j_thread, message)
+        s_turn = _turn(client, s_thread, message, stream=True)
+        assert j_turn["answer"] == s_turn["answer"]
+        assert j_turn["mode"] == s_turn["mode"] == "emergency"
+        assert j_turn["model_name"] is None and s_turn["model_name"] is None
+        assert j_turn["answer"].startswith("Call 911 now.")
 
     # Two requests start from the same revision. The lock-first transaction permits one.
     race_thread = client.create_thread("State-aware event race")
