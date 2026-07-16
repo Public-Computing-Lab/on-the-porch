@@ -1535,12 +1535,22 @@ def run_execution_pipeline(
         if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
             result["answer"] = answer
 
+        freshness_flags: Dict[str, Any] = {}
+        for part in facts.parts:
+            if part.freshness_flags:
+                freshness_flags.update(part.freshness_flags)
+        if isinstance(result, dict) and result.get("freshness_flags"):
+            freshness_flags.update(result.get("freshness_flags") or {})
+
+        degraded = any(part.error for part in facts.parts) or bool(
+            freshness_flags.get("execution_degraded")
+        )
         metrics: Dict[str, Any] = {
             "pipeline_tier": plan.tier,
             "plan_ms": plan_ms,
             "execute_ms": facts.execute_ms,
             "synthesize_ms": synth_ms,
-            "execution_degraded": any(part.error for part in facts.parts),
+            "execution_degraded": degraded,
             "prepared_intent": facts.prepared_intent,
             "intent": routing.get("intent"),
             "router": routing.get("router"),
@@ -1548,6 +1558,10 @@ def run_execution_pipeline(
             "period_label": (routing.get("query_plan") or {}).get("period_label"),
             "metric": (routing.get("query_plan") or {}).get("metric"),
         }
+        if freshness_flags:
+            metrics.update(freshness_flags)
+        if isinstance(result, dict) and result.get("source_freshness"):
+            metrics["source_freshness"] = result["source_freshness"]
         return mode, result, metrics
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Execution pipeline failed: {exc.__class__.__name__}: {exc}")

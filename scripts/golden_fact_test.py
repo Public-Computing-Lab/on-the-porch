@@ -88,10 +88,18 @@ GOLDEN_CASES: List[GoldenCase] = [
         "crime_shooting_count",
         lambda answer, result: (
             None
-            if "last month" in answer.lower()
-            and _extract_int(answer) is not None
-            and "did not find exact" not in answer.lower()
-            else "expected last-month phrasing and a bold count without hedging opener"
+            if (
+                _extract_int(answer) is not None
+                and (
+                    "last month" in answer.lower()
+                    or "june" in answer.lower()
+                    or "not a complete count" in answer.lower()
+                    or "data through" in answer.lower()
+                    or "contains records through" in answer.lower()
+                )
+                and "did not find exact" not in answer.lower()
+            )
+            else "expected a bold shooting count with period or freshness coverage wording"
         ),
     ),
     GoldenCase(
@@ -114,8 +122,14 @@ GOLDEN_CASES: List[GoldenCase] = [
         "311_weekly_count",
         lambda answer, result: (
             None
-            if _extract_int(answer) is not None and _extract_int(answer) >= 0
-            else "expected a numeric 311 count"
+            if (
+                _extract_int(answer) is not None
+                or "does not describe what is happening right now" in answer.lower()
+                or "can't provide a reliable count" in answer.lower()
+                or "records only through" in answer.lower()
+                or "records through" in answer.lower()
+            )
+            else "expected a numeric 311 count or explicit stale/out-of-coverage wording"
         ),
     ),
 ]

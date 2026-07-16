@@ -2150,7 +2150,19 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
             if sql_query:
                 match = re.search(r"FROM\s+`?(\w+)`?", sql_query, re.IGNORECASE)
                 if match:
-                    sources.append({"type": "sql", "table": match.group(1)})
+                    entry: Dict[str, str] = {"type": "sql", "table": match.group(1)}
+                    freshness = result.get("source_freshness")
+                    if isinstance(freshness, dict) and freshness.get("data_through_date"):
+                        try:
+                            from datetime import date as _date
+
+                            through = _date.fromisoformat(str(freshness["data_through_date"])[:10])
+                            entry["label"] = (
+                                f"Data through {through.strftime('%B')} {through.day}, {through.year}"
+                            )
+                        except Exception:
+                            pass
+                    sources.append(entry)
 
     elif mode == "rag":
         metadata = result.get("metadata", [])
@@ -2437,6 +2449,23 @@ def _execute_agent_response(
             "result": result,
             "retrieval_cache": next_cache,
             "execution_degraded": bool(pipeline_metrics.get("execution_degraded")),
+            "freshness_completion": pipeline_metrics.get("freshness_completion"),
+            "freshness_blocks_current_condition": pipeline_metrics.get(
+                "freshness_blocks_current_condition"
+            ),
+            "freshness_flags": {
+                k: v
+                for k, v in pipeline_metrics.items()
+                if k
+                in {
+                    "freshness_completion",
+                    "freshness_blocks_current_condition",
+                    "execution_degraded",
+                }
+            }
+            or result.get("freshness_flags"),
+            "source_freshness": result.get("source_freshness")
+            or pipeline_metrics.get("source_freshness"),
         }
 
     if mode == "sql":

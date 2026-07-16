@@ -326,6 +326,29 @@ def classify_completion_status(
     answer = agent_result.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         return CompletionStatus.FAILED
+    freshness_completion = str(agent_result.get("freshness_completion") or "").upper()
+    if agent_result.get("freshness_blocks_current_condition") is True:
+        return CompletionStatus.DEGRADED
+    if freshness_completion == "DEGRADED":
+        return CompletionStatus.DEGRADED
+    if freshness_completion == "PARTIAL":
+        return CompletionStatus.PARTIAL
+    flags = agent_result.get("freshness_flags")
+    if isinstance(flags, Mapping):
+        if flags.get("freshness_blocks_current_condition") is True:
+            return CompletionStatus.DEGRADED
+        fc = str(flags.get("freshness_completion") or "").upper()
+        if fc == "DEGRADED":
+            return CompletionStatus.DEGRADED
+        if fc == "PARTIAL":
+            return CompletionStatus.PARTIAL
+    meta = agent_result.get("source_freshness")
+    if isinstance(meta, Mapping):
+        coverage = str(meta.get("coverage_status") or "").upper()
+        if coverage in {"PARTIAL", "OUTSIDE", "UNKNOWN"}:
+            return CompletionStatus.PARTIAL
+        if str(meta.get("freshness_status") or "").upper() == "UNKNOWN":
+            return CompletionStatus.PARTIAL
     if agent_result.get("mode") == "budget_timeout" or agent_result.get("execution_degraded") is True:
         return CompletionStatus.DEGRADED
     result = agent_result.get("result")
@@ -335,6 +358,20 @@ def classify_completion_status(
         return CompletionStatus.FAILED
     if result.get("error") or result.get("timed_out") is True:
         return CompletionStatus.DEGRADED
+    nested_flags = result.get("freshness_flags")
+    if isinstance(nested_flags, Mapping):
+        if nested_flags.get("freshness_blocks_current_condition") is True:
+            return CompletionStatus.DEGRADED
+        fc = str(nested_flags.get("freshness_completion") or "").upper()
+        if fc == "DEGRADED":
+            return CompletionStatus.DEGRADED
+        if fc == "PARTIAL":
+            return CompletionStatus.PARTIAL
+    nested_meta = result.get("source_freshness")
+    if isinstance(nested_meta, Mapping):
+        coverage = str(nested_meta.get("coverage_status") or "").upper()
+        if coverage in {"PARTIAL", "OUTSIDE", "UNKNOWN"}:
+            return CompletionStatus.PARTIAL
     parts = result.get("parts")
     if isinstance(parts, list) and any(
         isinstance(part, Mapping) and (part.get("error") or part.get("timed_out") is True)

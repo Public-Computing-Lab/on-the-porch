@@ -126,6 +126,8 @@ class FactPart:
     rag_metadata: Optional[List[Dict[str, Any]]] = None
     row_analysis: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    source_freshness: Optional[Dict[str, Any]] = None
+    freshness_flags: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -146,6 +148,8 @@ class FactPart:
             out["rag_chunk_count"] = len(self.rag_chunks)
         if self.error:
             out["error"] = self.error
+        if self.source_freshness:
+            out["source_freshness"] = self.source_freshness
         return out
 
 
@@ -171,9 +175,17 @@ class FactBundle:
         sql_parts = [p for p in self.parts if p.path in ("sql", "guardrail")]
         rag_parts = [p for p in self.parts if p.path == "rag"]
 
+        freshness = None
+        freshness_flags: Dict[str, Any] = {}
+        for part in sql_parts:
+            if part.source_freshness and freshness is None:
+                freshness = part.source_freshness
+            if part.freshness_flags:
+                freshness_flags.update(part.freshness_flags)
+
         if not rag_parts:
             primary_sql = sql_parts[0] if sql_parts else None
-            return {
+            out = {
                 "answer": answer,
                 "sql": "\n---\n".join(p.sql for p in sql_parts if p.sql),
                 "result": (primary_sql.result if primary_sql else None) or {
@@ -182,6 +194,11 @@ class FactBundle:
                 "prepared_intent": self.prepared_intent,
                 "db_backed": any(p.path == "sql" for p in sql_parts),
             }
+            if freshness:
+                out["source_freshness"] = freshness
+            if freshness_flags:
+                out["freshness_flags"] = freshness_flags
+            return out
 
         rag_part = rag_parts[0]
         rag_out = {
@@ -202,12 +219,19 @@ class FactBundle:
             "prepared_intent": self.prepared_intent,
             "db_backed": any(p.path == "sql" for p in sql_parts),
         }
-        return {
+        if freshness:
+            sql_out["source_freshness"] = freshness
+        out = {
             "answer": answer,
             "sql": sql_out,
             "rag": rag_out,
             "prepared_intent": self.prepared_intent,
         }
+        if freshness:
+            out["source_freshness"] = freshness
+        if freshness_flags:
+            out["freshness_flags"] = freshness_flags
+        return out
 
 
 def pipeline_logging_enabled() -> bool:

@@ -109,6 +109,12 @@ def _period_preposition(period: str) -> str:
 
 
 def _date_column_filter(column: str, window: PeriodWindow) -> str:
+    if window.start_date is not None and window.end_date_exclusive is not None:
+        start = window.start_date.isoformat()
+        end = window.end_date_exclusive.isoformat()
+        return (
+            f"`{column}` >= '{start}' AND `{column}` < '{end}'"
+        )
     if window.calendar_ym:
         return f"DATE_FORMAT(`{column}`, '%Y-%m') = '{window.calendar_ym}'"
     days = max(1, min(window.days, 365))
@@ -1844,6 +1850,127 @@ COUNT_CIVIC_INTENTS = frozenset({
 })
 
 
+def _subject_phrase_for_intent(intent: str, question: str) -> str:
+    q = (question or "").lower()
+    if intent == "crime_shooting_count" or "shooting" in q:
+        return "reported shooting incidents"
+    if intent == "crime_homicide_count" or "homicide" in q:
+        return "homicide reports"
+    if intent.startswith("crime"):
+        return "BPD incident reports"
+    terms = _issue_search_terms(question)
+    if terms:
+        return f"{terms[0].replace('_', ' ')}-related 311 service requests"
+    if intent.startswith("311"):
+        return "311 service requests"
+    return "matching records"
+
+
+def _geography_phrase_for_intent(intent: str) -> str:
+    # Crime SQL scopes to district C11; do not silently claim all of Dorchester.
+    if intent.startswith("crime"):
+        return "in BPD district C11"
+    return "in Dorchester"
+
+
+def _apply_source_freshness_to_canonical(
+    *,
+    question: str,
+    intent: str,
+    result: Dict[str, Any],
+    window: PeriodWindow,
+    canonical: str,
+) -> tuple[str, Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Rewrite civic count answers using MySQL-backed freshness when applicable."""
+    try:
+        from source_freshness import (  # noqa: WPS433
+            CoverageStatus,
+            FreshnessStatus,
+            assess_for_question,
+            completion_flags_from_assessment,
+            current_condition_safety_answer,
+            format_structured_count_answer,
+            is_current_condition_question,
+            mysql_connection_factory,
+            slim_freshness_metadata,
+            source_key_for_intent,
+        )
+    except Exception:
+        return canonical, None, {}
+
+    source_key = source_key_for_intent(intent)
+    if not source_key:
+        return canonical, None, {}
+
+    current = is_current_condition_question(question)
+    subjective_now = current and (
+        "safe" in (question or "").lower() or is_subjective_safety_question(question)
+    )
+
+    try:
+        assessment = assess_for_question(
+            mysql_connection_factory(),
+            source_key=source_key,
+            question=question,
+            calendar_ym=window.calendar_ym,
+            days=window.days,
+            start_date=window.start_date,
+            end_date_exclusive=window.end_date_exclusive,
+        )
+    except Exception:
+        return canonical, None, {}
+
+    flags = completion_flags_from_assessment(assessment, current_condition=current)
+    meta = slim_freshness_metadata(assessment)
+    count = _first_count_from_result(result)
+    if count is None:
+        count = 0
+
+    is_311 = source_key.endswith("311") or intent.startswith("311")
+    if subjective_now or (
+        current
+        and assessment.freshness_status
+        in {FreshnessStatus.STALE, FreshnessStatus.UNKNOWN, FreshnessStatus.DELAYED}
+    ):
+        if source_key.endswith("crime") or intent.startswith("crime") or "safe" in (question or "").lower():
+            rewritten = current_condition_safety_answer(assessment)
+        else:
+            rewritten = format_structured_count_answer(
+                assessment=assessment,
+                count=count,
+                subject_phrase=_subject_phrase_for_intent(intent, question),
+                geography_phrase=_geography_phrase_for_intent(intent),
+                is_311=is_311,
+                current_condition=True,
+            )
+        return rewritten, meta, flags
+
+    # Always qualify count intents with coverage-aware wording.
+    if intent in COUNT_CIVIC_INTENTS or intent.startswith("crime") or intent.startswith("311"):
+        # OUTSIDE: do not run a misleading complete-period claim from SQL month filters.
+        if assessment.coverage_status is CoverageStatus.OUTSIDE:
+            rewritten = format_structured_count_answer(
+                assessment=assessment,
+                count=count,
+                subject_phrase=_subject_phrase_for_intent(intent, question),
+                geography_phrase=_geography_phrase_for_intent(intent),
+                is_311=is_311,
+                current_condition=False,
+            )
+            return rewritten, meta, flags
+        rewritten = format_structured_count_answer(
+            assessment=assessment,
+            count=count,
+            subject_phrase=_subject_phrase_for_intent(intent, question),
+            geography_phrase=_geography_phrase_for_intent(intent),
+            is_311=is_311,
+            current_condition=False,
+        )
+        return rewritten, meta, flags
+
+    return canonical, meta, flags
+
+
 def format_issue_type_summary(
     rows: List[Dict[str, Any]],
     *,
@@ -2531,6 +2658,7 @@ def execute_prepared_facts(
     execute_sql: Callable[[str], Dict[str, Any]],
     *,
     supplemental_sql: Optional[str] = None,
+    freshness_question: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run prepared SQL and return canonical facts only (no LLM synthesis)."""
     print(f"\n[Prepared SQL — {hit.intent}]\n{hit.sql}\n")
@@ -2573,6 +2701,19 @@ def execute_prepared_facts(
         )
     else:
         canonical = hit.answer_fn(question, result)
+
+    freshness_meta = None
+    freshness_flags: Dict[str, Any] = {}
+    freshness_q = freshness_question or question
+    if hit.intent in COUNT_CIVIC_INTENTS or hit.intent.startswith(("crime", "311")):
+        canonical, freshness_meta, freshness_flags = _apply_source_freshness_to_canonical(
+            question=freshness_q,
+            intent=hit.intent,
+            result=result,
+            window=window,
+            canonical=canonical,
+        )
+
     sql_text = hit.sql
     extra_sql = supplemental_sql or hit.supplemental_sql
     if extra_sql:
@@ -2582,7 +2723,7 @@ def execute_prepared_facts(
     if hit.intent in DETAIL_CIVIC_INTENTS:
         row_analysis = analyze_311_report_rows(result.get("rows") or [])
 
-    return {
+    out: Dict[str, Any] = {
         "intent": hit.intent,
         "canonical_facts": canonical,
         "result": result,
@@ -2591,6 +2732,11 @@ def execute_prepared_facts(
         "issue_label": issue_label,
         "row_analysis": row_analysis,
     }
+    if freshness_meta:
+        out["source_freshness"] = freshness_meta
+    if freshness_flags:
+        out["freshness_flags"] = freshness_flags
+    return out
 
 
 def _llm_render_compound_answer(
@@ -2850,6 +2996,18 @@ def run_prepared_sql(
         else:
             answer = hit.answer_fn(question, result)
 
+    window = _resolve_period_for_intent(question, hit.intent)
+    freshness_meta = None
+    freshness_flags: Dict[str, Any] = {}
+    if hit.intent in COUNT_CIVIC_INTENTS or hit.intent.startswith(("crime", "311")):
+        answer, freshness_meta, freshness_flags = _apply_source_freshness_to_canonical(
+            question=question,
+            intent=hit.intent,
+            result=result,
+            window=window,
+            canonical=answer or "",
+        )
+
     answer = validate_prepared_answer(
         (answer or "").strip(),
         result,
@@ -2858,12 +3016,15 @@ def run_prepared_sql(
     )
     from answer_voice import polish_conversational_answer  # noqa: WPS433
 
-    answer = polish_conversational_answer(
-        answer,
-        conversation_history,
-        prepared_intent=hit.intent,
-        question=question,
-    )
+    if not freshness_flags.get("freshness_blocks_current_condition") and freshness_flags.get(
+        "freshness_completion"
+    ) not in {"PARTIAL", "DEGRADED"}:
+        answer = polish_conversational_answer(
+            answer,
+            conversation_history,
+            prepared_intent=hit.intent,
+            question=question,
+        )
 
     out: Dict[str, Any] = {
         "answer": answer,
@@ -2872,6 +3033,10 @@ def run_prepared_sql(
         "prepared_intent": hit.intent,
         "db_backed": True,
     }
+    if freshness_meta:
+        out["source_freshness"] = freshness_meta
+    if freshness_flags:
+        out["freshness_flags"] = freshness_flags
     if hit.intent == "event_by_name":
         out["event_sources"] = build_event_sources(result.get("rows") or [], question)
     return out
