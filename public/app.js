@@ -1274,12 +1274,28 @@ function restoreFailedChatComposer(message, outboundPayload) {
   eventContextStore.restoreOutboundPayload(outboundPayload);
 }
 
+function createClientTurnId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch (_err) {
+    // Fall through to bounded opaque fallback.
+  }
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `ct-${Date.now().toString(36)}-${rand}`;
+}
+
 async function sendChatMessage(event) {
   event.preventDefault();
   if (state.isSendingMessage) return;
   const message = elements.chatInput.value.trim();
   if (!message) return;
-  const outboundPayload = eventContextStore.createOutboundPayload(message);
+  const clientTurnId = createClientTurnId();
+  const outboundPayload = Object.freeze({
+    ...eventContextStore.createOutboundPayload(message),
+    client_turn_id: clientTurnId,
+  });
 
   if (!state.activeThreadId) {
     const ready = await ensureActiveThread();
@@ -1444,12 +1460,15 @@ async function sendChatMessage(event) {
       if (!streamResult.success) {
         if (await handleAuthFailure(streamResult)) return;
         const conversationConflict = streamResult.data?.code === 'conversation_conflict';
+        const idempotencyConflict = streamResult.data?.code === 'idempotency_key_reused'
+          || streamResult.data?.code === 'turn_in_progress';
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
-        // Retry once via the JSON endpoint, which completes without a live stream.
-        if (!conversationConflict) {
+        // Retry once via the JSON endpoint with the same client_turn_id so a
+        // committed SSE turn is replayed instead of creating a duplicate.
+        if (!conversationConflict && !idempotencyConflict) {
           const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
           if (retryResult.success) {
             const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);

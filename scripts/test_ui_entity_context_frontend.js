@@ -95,7 +95,11 @@ function testCapturedPayloadSurvivesFallbackAndRestoresExactly() {
 
 function testAppWiringUsesOnePayloadAndClearsManualActions() {
   const source = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
-  assert.match(source, /const outboundPayload = eventContextStore\.createOutboundPayload\(message\)/);
+  assert.match(source, /function createClientTurnId\(/);
+  assert.match(
+    source,
+    /const outboundPayload = Object\.freeze\(\{\s*\.\.\.eventContextStore\.createOutboundPayload\(message\),\s*client_turn_id: clientTurnId,\s*\}\)/,
+  );
   assert.equal(
     (source.match(/sendMessage(?:Stream)?\(threadId, outboundPayload/g) || []).length,
     4,
@@ -105,7 +109,11 @@ function testAppWiringUsesOnePayloadAndClearsManualActions() {
   assert.match(source, /async function loadMessages\(threadId\) \{\s*eventContextStore\.clear\(\)/);
   assert.match(source, /function restoreFailedChatComposer[\s\S]*restoreOutboundPayload\(outboundPayload\)/);
   assert.match(source, /streamResult\.data\?\.code === 'conversation_conflict'/);
-  assert.match(source, /if \(!conversationConflict\) \{[\s\S]*sendMessage\(threadId, outboundPayload\)/);
+  assert.match(source, /idempotency_key_reused/);
+  assert.match(
+    source,
+    /if \(!conversationConflict && !idempotencyConflict\) \{[\s\S]*sendMessage\(threadId, outboundPayload\)/,
+  );
 }
 
 const tests = [
