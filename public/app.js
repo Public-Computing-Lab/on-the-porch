@@ -1274,12 +1274,48 @@ function restoreFailedChatComposer(message, outboundPayload) {
   eventContextStore.restoreOutboundPayload(outboundPayload);
 }
 
+function createClientTurnId() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch (_err) {
+    // Fall through to bounded opaque fallback.
+  }
+  const rand = Math.random().toString(36).slice(2, 12);
+  return `ct-${Date.now().toString(36)}-${rand}`;
+}
+
+function sleepMs(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, delay);
+  });
+}
+
+async function sendJsonWithTurnRetry(threadId, outboundPayload, { maxAttempts = 3 } = {}) {
+  let lastResult = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    lastResult = await ApiClient.sendMessage(threadId, outboundPayload);
+    if (lastResult.success) return lastResult;
+    if (lastResult.data?.code !== 'turn_in_progress') return lastResult;
+    const retryAfterRaw = lastResult.data?.retry_after ?? lastResult.retryAfter ?? 1;
+    const retryAfterSec = Math.min(5, Math.max(0.2, Number(retryAfterRaw) || 1));
+    await sleepMs(retryAfterSec * 1000);
+  }
+  return lastResult;
+}
+
 async function sendChatMessage(event) {
   event.preventDefault();
   if (state.isSendingMessage) return;
   const message = elements.chatInput.value.trim();
   if (!message) return;
-  const outboundPayload = eventContextStore.createOutboundPayload(message);
+  const clientTurnId = createClientTurnId();
+  const outboundPayload = Object.freeze({
+    ...eventContextStore.createOutboundPayload(message),
+    client_turn_id: clientTurnId,
+  });
 
   if (!state.activeThreadId) {
     const ready = await ensureActiveThread();
@@ -1329,7 +1365,7 @@ async function sendChatMessage(event) {
 
   try {
     if (instant) {
-      const result = await ApiClient.sendMessage(threadId, outboundPayload);
+      const result = await sendJsonWithTurnRetry(threadId, outboundPayload);
       removeTypingIndicator();
 
       if (!result.success) {
@@ -1444,14 +1480,27 @@ async function sendChatMessage(event) {
       if (!streamResult.success) {
         if (await handleAuthFailure(streamResult)) return;
         const conversationConflict = streamResult.data?.code === 'conversation_conflict';
+        const keyReuseConflict = streamResult.data?.code === 'idempotency_key_reused';
+        const turnInProgress = streamResult.data?.code === 'turn_in_progress';
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
-        // Retry once via the JSON endpoint, which completes without a live stream.
-        if (!conversationConflict) {
-          const retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
-          if (retryResult.success) {
+        // Retry once via the JSON endpoint with the same client_turn_id so a
+        // committed SSE turn is replayed instead of creating a duplicate.
+        // turn_in_progress is also retried with the same ID (bounded).
+        // idempotency_key_reused must not auto-retry with a changed payload.
+        if (!conversationConflict && !keyReuseConflict) {
+          let retryResult = null;
+          if (turnInProgress) {
+            retryResult = await sendJsonWithTurnRetry(threadId, outboundPayload);
+          } else {
+            retryResult = await ApiClient.sendMessage(threadId, outboundPayload);
+            if (!retryResult.success && retryResult.data?.code === 'turn_in_progress') {
+              retryResult = await sendJsonWithTurnRetry(threadId, outboundPayload);
+            }
+          }
+          if (retryResult && retryResult.success) {
             const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
             if (threadIndex >= 0) {
               state.threads[threadIndex] = retryResult.data.thread;
@@ -1517,7 +1566,7 @@ async function sendChatMessage(event) {
       return;
     }
 
-    const result = await ApiClient.sendMessage(threadId, outboundPayload);
+    const result = await sendJsonWithTurnRetry(threadId, outboundPayload);
     removeTypingIndicator();
 
     if (!result.success) {

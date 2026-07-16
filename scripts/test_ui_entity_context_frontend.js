@@ -95,17 +95,38 @@ function testCapturedPayloadSurvivesFallbackAndRestoresExactly() {
 
 function testAppWiringUsesOnePayloadAndClearsManualActions() {
   const source = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
-  assert.match(source, /const outboundPayload = eventContextStore\.createOutboundPayload\(message\)/);
-  assert.equal(
-    (source.match(/sendMessage(?:Stream)?\(threadId, outboundPayload/g) || []).length,
-    4,
+  assert.match(source, /function createClientTurnId\(/);
+  assert.match(source, /async function sendJsonWithTurnRetry\(/);
+  assert.match(
+    source,
+    /const outboundPayload = Object\.freeze\(\{\s*\.\.\.eventContextStore\.createOutboundPayload\(message\),\s*client_turn_id: clientTurnId,\s*\}\)/,
   );
+  assert.match(source, /sendMessageStream\(threadId, outboundPayload/);
+  assert.match(source, /sendJsonWithTurnRetry\(threadId, outboundPayload/);
   assert.match(source, /chatInput\.addEventListener\('input',[\s\S]*eventContextStore\.clear\(\)/);
   assert.match(source, /suggestions\.addEventListener\('click',[\s\S]*eventContextStore\.clear\(\)/);
   assert.match(source, /async function loadMessages\(threadId\) \{\s*eventContextStore\.clear\(\)/);
   assert.match(source, /function restoreFailedChatComposer[\s\S]*restoreOutboundPayload\(outboundPayload\)/);
   assert.match(source, /streamResult\.data\?\.code === 'conversation_conflict'/);
-  assert.match(source, /if \(!conversationConflict\) \{[\s\S]*sendMessage\(threadId, outboundPayload\)/);
+  assert.match(source, /idempotency_key_reused/);
+  assert.match(source, /turn_in_progress/);
+  assert.match(source, /keyReuseConflict/);
+  assert.match(
+    source,
+    /if \(!conversationConflict && !keyReuseConflict\) \{[\s\S]*outboundPayload/,
+  );
+}
+
+function testFrontendSseAbortReplayReconcilesOneBubble() {
+  const source = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
+  // Lost-final path retries JSON with the same outboundPayload/client_turn_id.
+  assert.match(source, /committed SSE turn is replayed/);
+  assert.match(
+    source,
+    /state\.messages = normalizeMessages\(\[\s*\.\.\.state\.messages\.filter\(\(item\) => item\.id !== optimisticMessageId\),\s*retryResult\.data\.user_message/,
+  );
+  assert.match(source, /retryResult\.data\.assistant_message/);
+  assert.equal(source.includes('client_turn_id: crypto.randomUUID()'), false);
 }
 
 const tests = [
@@ -115,6 +136,7 @@ const tests = [
   testPendingContextLifecycle,
   testCapturedPayloadSurvivesFallbackAndRestoresExactly,
   testAppWiringUsesOnePayloadAndClearsManualActions,
+  testFrontendSseAbortReplayReconcilesOneBubble,
 ];
 
 let failed = 0;
