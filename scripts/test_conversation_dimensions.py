@@ -243,10 +243,21 @@ def test_calendar_month_week_and_explicit_dates() -> None:
     explicit_range = _extract("Events July 21, 2026 to July 23, 2026")
     assert explicit_range.time_range and explicit_range.time_range.label_code is TimeLabelCode.EXPLICIT_RANGE
     assert explicit_range.time_range.end_date_exclusive == "2026-07-24"
-    ambiguous = _extract("Tell me about the July 15 event")
-    assert ambiguous.time_range is None
-    assert ReasonCode.AMBIGUOUS_EXPLICIT_DATE in ambiguous.reason_codes
-    assert ambiguous.requires_clarification is True
+    yearless = _extract("Tell me about the July 15 event")
+    assert yearless.time_range is None
+    assert ReasonCode.AMBIGUOUS_EXPLICIT_DATE in yearless.reason_codes
+    assert yearless.requires_clarification is True
+    event_list_yearless = _extract(
+        "What events are happening July 20?",
+        resolve_yearless_named_dates=True,
+    )
+    assert event_list_yearless.time_range
+    assert event_list_yearless.time_range.label_code is TimeLabelCode.EXPLICIT_DATE
+    assert event_list_yearless.time_range.start_date == "2026-07-20"
+    numeric_ambiguous = _extract("Tell me about the 7/15 event")
+    assert numeric_ambiguous.time_range is None
+    assert ReasonCode.AMBIGUOUS_EXPLICIT_DATE in numeric_ambiguous.reason_codes
+    assert numeric_ambiguous.requires_clarification is True
 
 
 def test_explicit_current_message_wins_over_trusted_context() -> None:

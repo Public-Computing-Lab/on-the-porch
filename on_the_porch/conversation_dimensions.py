@@ -674,7 +674,19 @@ def _parse_month_date(month: str, day_value: str, year_value: str) -> date:
     return date(int(year_value), _MONTHS[month.lower()], int(day_value))
 
 
-def _extract_explicit_time(original: str) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
+def _next_named_date(month: str, day_value: str, today: date) -> date:
+    resolved = date(today.year, _MONTHS[month.lower()], int(day_value))
+    if resolved < today:
+        resolved = date(today.year + 1, resolved.month, resolved.day)
+    return resolved
+
+
+def _extract_explicit_time(
+    original: str,
+    today: date,
+    *,
+    resolve_yearless_named_dates: bool,
+) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
     iso_range = re.search(
         r"\b(\d{4}-\d{2}-\d{2})\s+(?:to|through)\s+(\d{4}-\d{2}-\d{2})\b",
         original,
@@ -722,8 +734,39 @@ def _extract_explicit_time(original: str) -> Tuple[Optional[CanonicalTimeRange],
         except ValueError:
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
 
+    yearless_month_range = re.search(
+        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:to|through)\s+"
+        rf"({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if yearless_month_range:
+        if not resolve_yearless_named_dates:
+            return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
+        try:
+            start = _next_named_date(*yearless_month_range.group(1, 2), today)
+            end = date(start.year, _MONTHS[yearless_month_range.group(3).lower()], int(yearless_month_range.group(4)))
+            if end < start:
+                end = date(start.year + 1, end.month, end.day)
+            return _range(TimeLabelCode.EXPLICIT_RANGE, start, end + timedelta(days=1), TimeGranularity.RANGE), ReasonCode.EXPLICIT_RANGE, False
+        except ValueError:
+            return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
+
+    yearless_month_date = re.search(
+        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?\b(?!\s*,?\s*\d{{4}})",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if yearless_month_date:
+        if not resolve_yearless_named_dates:
+            return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
+        try:
+            resolved = _next_named_date(*yearless_month_date.group(1, 2), today)
+            return _day_range(TimeLabelCode.EXPLICIT_DATE, resolved, TimeGranularity.DAY), ReasonCode.EXPLICIT_DATE, False
+        except ValueError:
+            return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
+
     ambiguous = re.search(
-        rf"\b(?:{_MONTH_PATTERN})\s+\d{{1,2}}(?:st|nd|rd|th)?\b(?!\s*,?\s*\d{{4}})|"
         r"\b\d{1,2}/\d{1,2}\b(?!/\d{2,4})",
         original,
         flags=re.IGNORECASE,
@@ -737,6 +780,8 @@ def _extract_time(
     original: str,
     normalized: str,
     now: datetime,
+    *,
+    resolve_yearless_named_dates: bool,
 ) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
     today = now.date()
     if _contains_phrase(normalized, "right now"):
@@ -771,7 +816,11 @@ def _extract_time(
         return _day_range(TimeLabelCode.TOMORROW, today + timedelta(days=1), TimeGranularity.DAY), ReasonCode.EXPLICIT_TOMORROW, False
     if _contains_phrase(normalized, "today") or _contains_phrase(normalized, "tonight"):
         return _day_range(TimeLabelCode.TODAY, today, TimeGranularity.DAY), ReasonCode.EXPLICIT_TODAY, False
-    return _extract_explicit_time(original)
+    return _extract_explicit_time(
+        original,
+        today,
+        resolve_yearless_named_dates=resolve_yearless_named_dates,
+    )
 
 
 def _current_or_upcoming_weekend(today: date) -> date:
@@ -882,7 +931,7 @@ def _extract_filters(normalized: str) -> Tuple[CanonicalFilters, Tuple[ReasonCod
     elif event_filter_scope and re.search(r"\b(?:registration unknown|sign up unknown)\b", normalized):
         registration = RegistrationFilter.UNKNOWN
         reasons.append(ReasonCode.EXPLICIT_REGISTRATION_UNKNOWN_FILTER)
-    elif event_filter_scope and re.search(r"\b(?:registration required|must register|need to register|sign up)\b", normalized):
+    elif event_filter_scope and re.search(r"\b(?:registration (?:is )?required|must register|need to register|sign up)\b", normalized):
         registration = RegistrationFilter.REQUIRED
         reasons.append(ReasonCode.EXPLICIT_REGISTRATION_REQUIRED_FILTER)
 
@@ -960,6 +1009,7 @@ def extract_with_rules(
     *,
     context: Optional[DimensionContext] = None,
     now: Optional[datetime] = None,
+    resolve_yearless_named_dates: bool = False,
 ) -> ConversationDimensions:
     trusted = context or DimensionContext()
     original = str(message or "")[:MAX_MESSAGE_CHARS]
@@ -974,6 +1024,7 @@ def extract_with_rules(
         original,
         normalized,
         _local_now(now),
+        resolve_yearless_named_dates=resolve_yearless_named_dates,
     )
     topic, topic_reason = _extract_topic(
         normalized,
@@ -1100,13 +1151,19 @@ def extract_conversation_dimensions(
     now: Optional[datetime] = None,
     llm_fallback_enabled: bool = False,
     llm_classifier: Optional[Callable[[str, float], str]] = None,
+    resolve_yearless_named_dates: bool = False,
 ) -> Optional[ConversationDimensions]:
     """Return diagnostic dimensions without mutating any behavioral input."""
     if not enabled:
         return None
     trusted = context or DimensionContext()
     try:
-        rules = extract_with_rules(message, context=trusted, now=now)
+        rules = extract_with_rules(
+            message,
+            context=trusted,
+            now=now,
+            resolve_yearless_named_dates=resolve_yearless_named_dates,
+        )
         if _result_has_rule_signal(rules):
             rules.to_dict()
             return rules

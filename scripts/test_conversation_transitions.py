@@ -612,7 +612,8 @@ def test_diagnostics_are_bounded_and_exclude_states_or_prose() -> None:
     assert set(diagnostic) == {
         "action", "relationship", "cache_action", "retained", "replaced", "cleared",
         "reason_codes", "commit_allowed", "committed", "requires_clarification",
-        "completion_status",
+        "completion_status", "requested_dimensions", "applied_dimensions",
+        "unapplied_dimensions", "retrieval_matched",
     }
     serialized = str(diagnostic)
     for forbidden in ("next_state", "answer", "rag_chunks", "sql_result", "message"):

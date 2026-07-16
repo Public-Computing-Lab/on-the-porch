@@ -8,7 +8,7 @@ changes. The transition is applied later by the lock-first persistence transacti
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, Mapping, Optional, Tuple
@@ -167,7 +167,7 @@ _TOPIC_BY_ROUTER_VALUE = {
     "policy": CanonicalTopic.NEIGHBORHOOD_INFORMATION,
 }
 _ROUTE_COMPATIBILITY = {
-    CanonicalTopic.EVENTS: frozenset({"sql", "rag", "hybrid"}),
+    CanonicalTopic.EVENTS: frozenset({"sql", "rag", "hybrid", "structured_events"}),
     CanonicalTopic.CITY_SERVICES: frozenset({"sql", "rag", "hybrid"}),
     CanonicalTopic.CRIME_FACTS: frozenset({"sql", "hybrid"}),
     CanonicalTopic.PUBLIC_SAFETY: frozenset({"hybrid"}),
@@ -192,6 +192,10 @@ class ConversationTransition:
     commit_allowed: bool
     requires_clarification: bool
     completion_status: CompletionStatus
+    requested_dimensions: Tuple[StateField, ...] = ()
+    applied_dimensions: Tuple[StateField, ...] = ()
+    unapplied_dimensions: Tuple[StateField, ...] = ()
+    retrieval_matched: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if len(self.reason_codes) == 0 or len(self.reason_codes) > 12:
@@ -202,6 +206,13 @@ class ConversationTransition:
             raise ValueError("transition fields cannot overlap")
         if set(self.replaced) & set(self.cleared):
             raise ValueError("transition fields cannot overlap")
+        for values in (
+            self.requested_dimensions,
+            self.applied_dimensions,
+            self.unapplied_dimensions,
+        ):
+            if len(values) > len(StateField) or len(set(values)) != len(values):
+                raise ValueError("transition diagnostic dimensions must be bounded")
 
     @property
     def state_changed(self) -> bool:
@@ -231,6 +242,10 @@ class ConversationTransition:
             "committed": self.will_commit if committed is None else bool(committed),
             "requires_clarification": self.requires_clarification,
             "completion_status": self.completion_status.value,
+            "requested_dimensions": [item.value for item in self.requested_dimensions],
+            "applied_dimensions": [item.value for item in self.applied_dimensions],
+            "unapplied_dimensions": [item.value for item in self.unapplied_dimensions],
+            "retrieval_matched": self.retrieval_matched,
         }
         encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > MAX_DIAGNOSTIC_BYTES:
@@ -238,9 +253,27 @@ class ConversationTransition:
         return value
 
 
+def with_transition_diagnostics(
+    transition: ConversationTransition,
+    *,
+    requested_dimensions: Tuple[StateField, ...] = (),
+    applied_dimensions: Tuple[StateField, ...] = (),
+    unapplied_dimensions: Tuple[StateField, ...] = (),
+    retrieval_matched: Optional[bool] = None,
+) -> ConversationTransition:
+    """Attach bounded execution diagnostics without changing transition behavior."""
+    return replace(
+        transition,
+        requested_dimensions=tuple(dict.fromkeys(requested_dimensions)),
+        applied_dimensions=tuple(dict.fromkeys(applied_dimensions)),
+        unapplied_dimensions=tuple(dict.fromkeys(unapplied_dimensions)),
+        retrieval_matched=retrieval_matched,
+    )
+
+
 def route_family(route: Optional[str]) -> Optional[str]:
     value = str(route or "").strip().lower()
-    if value in {"sql", "structured", "event_detail"}:
+    if value in {"sql", "structured", "event_detail", "structured_events"}:
         return "structured"
     if value in {"rag", "document"}:
         return "document"

@@ -120,6 +120,7 @@ from conversation_relationship import (  # noqa: E402
     detect_event_property,
 )
 from conversation_dimensions import (  # noqa: E402
+    CanonicalTopic,
     ConversationDimensions,
     DimensionContext,
     diagnostic_metrics as dimension_diagnostic_metrics,
@@ -144,12 +145,28 @@ from conversation_transitions import (  # noqa: E402
     TransitionReason,
     classify_completion_status,
     plan_conversation_transition,
+    with_transition_diagnostics,
 )
 from emergency_routing import (  # noqa: E402
     EMERGENCY_RESPONSE,
     EmergencyDecision,
     detect_active_emergency,
 )
+from event_query_context import (  # noqa: E402
+    EventPlanReason,
+    EventPlanStatus,
+    EventQueryDimension,
+    EventQueryPlan,
+    build_event_cache,
+    build_event_sources as build_structured_event_sources,
+    cached_event_result,
+    compose_event_answer,
+    event_cache_matches,
+    is_direct_event_list_request,
+    plan_event_query,
+    retrieve_events,
+)
+from sql_chat.app4 import is_generic_events_list_question  # noqa: E402
 from intent_router import detect_civic_topic  # noqa: E402
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
@@ -2799,10 +2816,12 @@ def _plan_conversation_transition(
     agent_result: Dict[str, Any],
     selected_resolution: Optional[EventResolution],
     stale_active_event: bool,
+    event_query_plan: Optional[EventQueryPlan] = None,
+    event_retrieval_matched: Optional[bool] = None,
     partial: bool = False,
 ) -> ConversationTransition:
     completion = classify_completion_status(agent_result, partial=partial)
-    return plan_conversation_transition(
+    transition = plan_conversation_transition(
         current=state,
         relationship=relationship,
         dimensions=dimensions,
@@ -2814,13 +2833,54 @@ def _plan_conversation_transition(
         completed_route=mode,
         completion_status=completion,
         stale_active_entity=stale_active_event,
-        reference_context_applied=not bool(
-            dimensions
+        reference_context_applied=(
+            event_query_plan is not None
+            and event_query_plan.status is EventPlanStatus.READY
+            if dimensions
             and (
                 dimensions.references.location_reference is not None
                 or dimensions.references.time_reference is not None
             )
+            else True
         ),
+    )
+    if event_query_plan is None:
+        return transition
+    field_by_dimension = {
+        EventQueryDimension.TOPIC: StateField.ACTIVE_TOPIC,
+        EventQueryDimension.TIME_RANGE: StateField.TIME_RANGE,
+        EventQueryDimension.LOCATION: StateField.LOCATION,
+        EventQueryDimension.FILTERS: StateField.FILTERS,
+    }
+    event_reasons = set(event_query_plan.reason_codes)
+    requested_event_dimensions = [EventQueryDimension.TOPIC]
+    if event_reasons & {
+        EventPlanReason.EXPLICIT_TIME,
+        EventPlanReason.TRUSTED_TIME_REFERENCE,
+        EventPlanReason.MISSING_TIME_REFERENCE,
+        EventPlanReason.AMBIGUOUS_TIME,
+    }:
+        requested_event_dimensions.append(EventQueryDimension.TIME_RANGE)
+    if event_reasons & {
+        EventPlanReason.EXPLICIT_LOCATION,
+        EventPlanReason.TRUSTED_LOCATION_REFERENCE,
+        EventPlanReason.MISSING_LOCATION_REFERENCE,
+        EventPlanReason.AMBIGUOUS_LOCATION,
+    }:
+        requested_event_dimensions.append(EventQueryDimension.LOCATION)
+    if EventQueryDimension.FILTERS in event_query_plan.unapplied_dimensions:
+        requested_event_dimensions.append(EventQueryDimension.FILTERS)
+    requested = tuple(field_by_dimension[item] for item in requested_event_dimensions)
+    return with_transition_diagnostics(
+        transition,
+        requested_dimensions=tuple(dict.fromkeys(requested)),
+        applied_dimensions=tuple(
+            field_by_dimension[item] for item in event_query_plan.applied_dimensions
+        ),
+        unapplied_dimensions=tuple(
+            field_by_dimension[item] for item in event_query_plan.unapplied_dimensions
+        ),
+        retrieval_matched=event_retrieval_matched,
     )
 
 
@@ -2829,8 +2889,11 @@ def _cache_for_conversation_transition(
     current_cache: Dict[str, Any],
     next_cache: Dict[str, Any],
     transition: ConversationTransition,
+    replacement_cache_valid: bool = False,
 ) -> tuple[Dict[str, Any], bool]:
     if transition.commit_allowed and transition.cache_action is CacheAction.INVALIDATE:
+        if replacement_cache_valid:
+            return next_cache, True
         return create_empty_cache(), True
     if (
         not transition.commit_allowed
@@ -2838,6 +2901,167 @@ def _cache_for_conversation_transition(
     ):
         return copy.deepcopy(current_cache), False
     return next_cache, False
+
+
+def _state_aware_event_candidate(
+    message: str,
+    *,
+    state: ConversationState,
+    relationship: Optional[RelationshipDecision],
+    dimensions: Optional[ConversationDimensions],
+) -> bool:
+    if _explicit_event_list_request(message):
+        return True
+    if (
+        state.active_topic is not CanonicalTopic.EVENTS
+        or relationship is None
+        or dimensions is None
+        or relationship.relationship
+        not in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}
+    ):
+        return False
+    reason_values = {reason.value for reason in dimensions.reason_codes}
+    return bool(
+        dimensions.location is not None
+        or dimensions.time_range is not None
+        or dimensions.references.location_reference is not None
+        or dimensions.references.time_reference is not None
+        or any(
+            value.startswith((
+                "explicit_free_",
+                "explicit_paid_",
+                "explicit_morning_",
+                "explicit_afternoon_",
+                "explicit_evening_",
+                "explicit_virtual_",
+                "explicit_in_person_",
+                "explicit_hybrid_",
+                "explicit_registration_",
+            ))
+            or value == "unsupported_filter"
+            for value in reason_values
+        )
+    )
+
+
+def _explicit_event_list_request(message: str) -> bool:
+    return is_generic_events_list_question(message) or is_direct_event_list_request(message)
+
+
+def _state_aware_event_agent_result(
+    conn,
+    *,
+    message: str,
+    state: ConversationState,
+    relationship: Optional[RelationshipDecision],
+    dimensions: Optional[ConversationDimensions],
+    retrieval_cache: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], Optional[EventQueryPlan]]:
+    candidate = _state_aware_event_candidate(
+        message,
+        state=state,
+        relationship=relationship,
+        dimensions=dimensions,
+    )
+    if not candidate or dimensions is None:
+        return None, None
+    plan = plan_event_query(
+        relationship=relationship,
+        dimensions=dimensions,
+        state=state,
+        event_list_requested=True,
+    )
+    if plan is None:
+        return None, None
+    if plan.status is not EventPlanStatus.READY:
+        answer = compose_event_answer(plan, [])
+        return {
+            "answer": answer,
+            "mode": "structured_events",
+            "sources": [],
+            "result": {
+                "answer": answer,
+                "event_query_context": plan.to_dict(),
+                "event_retrieval_matched": False,
+            },
+            "retrieval_cache": copy.deepcopy(retrieval_cache),
+            "model_name": None,
+            "llm_calls": 0,
+            "execution_degraded": True,
+            "event_cache_replacement_valid": False,
+        }, plan
+
+    if event_cache_matches(retrieval_cache, plan):
+        rows, answer, sources = cached_event_result(retrieval_cache)
+        if answer:
+            return {
+                "answer": answer,
+                "mode": "structured_events",
+                "sources": sources,
+                "result": {
+                    "answer": answer,
+                    "rows": rows,
+                    "event_query_context": plan.to_dict(),
+                    "event_retrieval_matched": True,
+                    "cache_hit": True,
+                    "authoritative_no_results": not rows,
+                },
+                "retrieval_cache": copy.deepcopy(retrieval_cache),
+                "model_name": None,
+                "llm_calls": 0,
+                "event_cache_replacement_valid": False,
+            }, plan
+
+    try:
+        rows, candidate_count = retrieve_events(conn, plan)
+        answer = compose_event_answer(plan, rows, candidate_count=candidate_count)
+        sources = build_structured_event_sources(rows)
+        next_cache = build_event_cache(
+            base_cache=create_empty_cache(),
+            plan=plan,
+            rows=rows,
+            answer=answer,
+            sources=sources,
+        )
+        return {
+            "answer": answer,
+            "mode": "structured_events",
+            "sources": sources,
+            "result": {
+                "answer": answer,
+                "rows": rows,
+                "event_query_context": plan.to_dict(),
+                "event_retrieval_matched": True,
+                "candidate_count": candidate_count,
+                "authoritative_no_results": not rows,
+            },
+            "retrieval_cache": next_cache,
+            "model_name": None,
+            "llm_calls": 0,
+            "event_cache_replacement_valid": True,
+        }, plan
+    except Exception as exc:  # noqa: BLE001
+        _log_exception("Deterministic event retrieval failed", exc)
+        answer = (
+            "I couldn't load the current event listings right now. Your previous event "
+            "search context has been preserved."
+        )
+        return {
+            "answer": answer,
+            "mode": "structured_events",
+            "sources": [],
+            "result": {
+                "answer": answer,
+                "event_query_context": plan.to_dict(),
+                "event_retrieval_matched": False,
+                "error": "event_retrieval_unavailable",
+            },
+            "retrieval_cache": copy.deepcopy(retrieval_cache),
+            "model_name": None,
+            "llm_calls": 0,
+            "execution_degraded": True,
+            "event_cache_replacement_valid": False,
+        }, plan
 
 
 def _execute_agent_response_with_event_context(
@@ -2979,6 +3203,7 @@ def _extract_dimensions_shadow(
     *,
     thread_id: str,
     conversation_state: ConversationState,
+    event_list_context: bool = False,
 ) -> Optional[ConversationDimensions]:
     if not Config.CONVERSATION_DIMENSIONS_SHADOW_ENABLED:
         return None
@@ -2993,6 +3218,7 @@ def _extract_dimensions_shadow(
                 if Config.CONVERSATION_DIMENSIONS_LLM_FALLBACK_ENABLED
                 else None
             ),
+            resolve_yearless_named_dates=event_list_context,
         )
     except Exception as exc:  # noqa: BLE001
         _log_exception("Conversation dimension shadow extraction failed", exc)
@@ -3020,6 +3246,7 @@ def _user_message_metadata(
     transition: Optional[ConversationTransition] = None,
     active_event_behavior_applied: bool = False,
     emergency_decision: Optional[EmergencyDecision] = None,
+    event_query_plan: Optional[EventQueryPlan] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
@@ -3030,6 +3257,8 @@ def _user_message_metadata(
         metadata["conversation_dimensions_shadow"] = dimensions.to_dict()
     if transition is not None:
         metadata["conversation_transition"] = transition.to_diagnostic_dict()
+    if event_query_plan is not None:
+        metadata["event_query_context"] = event_query_plan.to_dict()
     if active_event_behavior_applied:
         metadata["active_event_followup_applied"] = True
     if emergency_decision is not None and emergency_decision.is_active_emergency:
@@ -3590,6 +3819,8 @@ def post_conversation_message(thread_id: str):
         relationship = None
         dimensions = None
         active_event_result = None
+        state_aware_event_result = None
+        event_query_plan = None
         stale_active_event = False
         # Emergency detection uses only the current message. Skip history load so
         # prior turns cannot influence response wiring; title uses the thread row.
@@ -3612,6 +3843,18 @@ def post_conversation_message(thread_id: str):
                 message,
                 thread_id=thread_id,
                 conversation_state=conversation_state,
+                event_list_context=(
+                    _explicit_event_list_request(message)
+                    or bool(
+                        conversation_state.active_topic is CanonicalTopic.EVENTS
+                        and relationship
+                        and relationship.relationship
+                        in {
+                            ConversationRelationship.REFINEMENT,
+                            ConversationRelationship.FOLLOW_UP,
+                        }
+                    )
+                ),
             )
             if event_resolution is None:
                 active_event_result, stale_active_event = _resolve_active_event_request(
@@ -3621,6 +3864,15 @@ def post_conversation_message(thread_id: str):
                     relationship=relationship,
                     retrieval_cache=retrieval_cache,
                 )
+                if active_event_result is None:
+                    state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+                        conn,
+                        message=message,
+                        state=conversation_state,
+                        relationship=relationship,
+                        dimensions=dimensions,
+                        retrieval_cache=retrieval_cache,
+                    )
         conn.close()
         conn = None
 
@@ -3632,13 +3884,17 @@ def post_conversation_message(thread_id: str):
                 retrieval_cache,
                 detector_latency_ms=detector_latency_ms,
             )
-        elif active_event_result is not None:
-            agent_result = active_event_result
+        elif active_event_result is not None or state_aware_event_result is not None:
+            agent_result = active_event_result or state_aware_event_result
             _log_agent_metrics(
                 mode=agent_result["mode"],
                 thread_id=thread_id,
                 streaming=False,
-                extra={"active_event_followup": True},
+                extra={
+                    "active_event_followup": active_event_result is not None,
+                    "state_aware_event_query": state_aware_event_result is not None,
+                    "llm_calls": 0,
+                },
             )
         else:
             agent_result = _execute_agent_response_with_event_context(
@@ -3666,6 +3922,12 @@ def post_conversation_message(thread_id: str):
                 agent_result=agent_result,
                 selected_resolution=event_resolution,
                 stale_active_event=stale_active_event,
+                event_query_plan=event_query_plan,
+                event_retrieval_matched=(
+                    agent_result.get("result", {}).get("event_retrieval_matched")
+                    if event_query_plan is not None
+                    else None
+                ),
             )
         )
         transition = conversation_transition.state_proposal(conversation_state)
@@ -3673,6 +3935,9 @@ def post_conversation_message(thread_id: str):
             current_cache=retrieval_cache,
             next_cache=next_cache,
             transition=conversation_transition,
+            replacement_cache_valid=bool(
+                agent_result.get("event_cache_replacement_valid")
+            ),
         )
 
         persisted = _persist_conversation_turn(
@@ -3691,6 +3956,7 @@ def post_conversation_message(thread_id: str):
                 transition=conversation_transition,
                 active_event_behavior_applied=active_event_result is not None,
                 emergency_decision=emergency_decision,
+                event_query_plan=event_query_plan,
             ),
             assistant_content=answer,
             assistant_mode=mode,
@@ -3816,6 +4082,8 @@ def post_conversation_message_stream(thread_id: str):
         relationship = None
         dimensions = None
         active_event_result = None
+        state_aware_event_result = None
+        event_query_plan = None
         stale_active_event = False
         # Emergency detection uses only the current message. Skip history load so
         # prior turns cannot influence response wiring; title uses the thread row.
@@ -3838,6 +4106,18 @@ def post_conversation_message_stream(thread_id: str):
                 message,
                 thread_id=thread_id,
                 conversation_state=conversation_state,
+                event_list_context=(
+                    _explicit_event_list_request(message)
+                    or bool(
+                        conversation_state.active_topic is CanonicalTopic.EVENTS
+                        and relationship
+                        and relationship.relationship
+                        in {
+                            ConversationRelationship.REFINEMENT,
+                            ConversationRelationship.FOLLOW_UP,
+                        }
+                    )
+                ),
             )
             if event_resolution is None:
                 active_event_result, stale_active_event = _resolve_active_event_request(
@@ -3847,6 +4127,15 @@ def post_conversation_message_stream(thread_id: str):
                     relationship=relationship,
                     retrieval_cache=retrieval_cache,
                 )
+                if active_event_result is None:
+                    state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+                        conn,
+                        message=message,
+                        state=conversation_state,
+                        relationship=relationship,
+                        dimensions=dimensions,
+                        retrieval_cache=retrieval_cache,
+                    )
     except Exception as exc:
         _log_exception("Error preparing streamed message", exc)
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
@@ -3873,7 +4162,13 @@ def post_conversation_message_stream(thread_id: str):
         next_cache = retrieval_cache
         selected_request = event_resolution is not None
         active_event_request = active_event_result is not None
-        deterministic_request = emergency_request or selected_request or active_event_request
+        state_aware_event_request = state_aware_event_result is not None
+        deterministic_request = (
+            emergency_request
+            or selected_request
+            or active_event_request
+            or state_aware_event_request
+        )
         semantic_eligible = (
             False
             if deterministic_request
@@ -3897,6 +4192,8 @@ def post_conversation_message_stream(thread_id: str):
                 )
             elif active_event_request:
                 deterministic_result = active_event_result
+            elif state_aware_event_request:
+                deterministic_result = state_aware_event_result
             elif selected_request:
                 deterministic_result = _selected_event_agent_result(
                     message,
@@ -4027,6 +4324,12 @@ def post_conversation_message_stream(thread_id: str):
                     agent_result=transition_result,
                     selected_resolution=event_resolution,
                     stale_active_event=stale_active_event,
+                    event_query_plan=event_query_plan,
+                    event_retrieval_matched=(
+                        transition_result.get("result", {}).get("event_retrieval_matched")
+                        if event_query_plan is not None
+                        else None
+                    ),
                     partial=generation_degraded,
                 )
             )
@@ -4035,6 +4338,9 @@ def post_conversation_message_stream(thread_id: str):
                 current_cache=retrieval_cache,
                 next_cache=next_cache,
                 transition=conversation_transition,
+                replacement_cache_valid=bool(
+                    transition_result.get("event_cache_replacement_valid")
+                ),
             )
             persisted = _persist_conversation_turn(
                 thread_id=thread_id,
@@ -4052,6 +4358,7 @@ def post_conversation_message_stream(thread_id: str):
                     transition=conversation_transition,
                     active_event_behavior_applied=active_event_request,
                     emergency_decision=emergency_decision,
+                    event_query_plan=event_query_plan,
                 ),
                 assistant_content=full_answer,
                 assistant_mode=mode,

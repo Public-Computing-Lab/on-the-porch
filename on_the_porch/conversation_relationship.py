@@ -435,8 +435,10 @@ _CORRECTION_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _FILTER_REFINEMENT_PATTERN = re.compile(
-    r"^(?:only\b|just show\b|show only\b|free ones?\b|family[- ]friendly\b|"
-    r"evening events?\b)",
+    r"^(?:only\b|just show\b|show only\b|free ones?\b|paid ones?\b|"
+    r"family[- ]friendly\b|(?:morning|afternoon|evening|virtual|online|"
+    r"in[- ]person|hybrid) (?:events?|ones?)\b|(?:registration|sign[- ]up) "
+    r"(?:required|not required|unknown)\b)",
     flags=re.IGNORECASE,
 )
 _TIME_REFINEMENT_PATTERN = re.compile(
