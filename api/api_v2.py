@@ -30,7 +30,19 @@ from mysql.connector.pooling import MySQLConnectionPool
 from db_migrations import run_migrations
 from mysql_cache import MySQLCacheStore
 from ops_health import check_ingestion_lag, check_311_feed_balance, validate_production_config
+from launch_runtime import (
+    emit_request_completion,
+    legacy_chat_enabled,
+    normalize_request_id,
+    note_timing,
+    request_id_header_name,
+    require_client_turn_id,
+    reset_request_observability,
+    set_idempotency_outcome,
+    validate_launch_runtime,
+)
 from request_metrics import (
+    elapsed_ms,
     get_llm_calls,
     get_request_id,
     log_chat_metrics,
@@ -373,7 +385,14 @@ CORS(
     app,
     supports_credentials=True,
     resources={r"/*": {"origins": Config.ALLOWED_ORIGINS}},
-    allow_headers=["Content-Type", "X-CSRF-Token", "RethinkAI-API-Key", "Authorization"],
+    allow_headers=[
+        "Content-Type",
+        "X-CSRF-Token",
+        "RethinkAI-API-Key",
+        "Authorization",
+        "X-Request-ID",
+    ],
+    expose_headers=["X-Request-ID", "Retry-After"],
 )
 
 
@@ -388,20 +407,28 @@ def get_db_connection():
     We ``ping(reconnect=True)`` before returning so a dead connection is
     transparently revived. If that slot cannot be revived, we discard it and
     take another from the pool.
+
+    Checkout is bounded: mysql-connector uses non-blocking pool acquisition and
+    raises PoolError immediately when the per-process pool is exhausted (no
+    indefinite wait). Timing is recorded for privacy-safe observability.
     """
-    conn = db_pool.get_connection()
+    started = time.perf_counter()
     try:
-        conn.ping(reconnect=True, attempts=2, delay=1)
-        return conn
-    except Exception:
-        # Could not revive this pooled connection; return it and get a fresh one.
-        try:
-            conn.close()
-        except Exception:
-            pass
         conn = db_pool.get_connection()
-        conn.ping(reconnect=True, attempts=2, delay=1)
-        return conn
+        try:
+            conn.ping(reconnect=True, attempts=2, delay=1)
+            return conn
+        except Exception:
+            # Could not revive this pooled connection; return it and get a fresh one.
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = db_pool.get_connection()
+            conn.ping(reconnect=True, attempts=2, delay=1)
+            return conn
+    finally:
+        note_timing("mysql_checkout_ms", (time.perf_counter() - started) * 1000.0)
 
 
 _mysql_cache_store: Optional[MySQLCacheStore] = None
@@ -740,9 +767,63 @@ print(
 )
 
 
+def _production_env_overlay() -> Dict[str, str]:
+    """Build env overlay from Config so one validator covers Flask/Gunicorn/scripts."""
+    origins = Config.ALLOWED_ORIGINS
+    if isinstance(origins, (list, tuple)):
+        origins_text = ",".join(str(o) for o in origins)
+    else:
+        origins_text = str(origins or "")
+    overlay = dict(os.environ)
+    overlay.update(
+        {
+            "PRODUCTION_MODE": "true" if Config.PRODUCTION_MODE else "false",
+            "FLASK_SECRET_KEY": str(Config.SECRET_KEY or ""),
+            "TOKEN_PEPPER": str(Config.TOKEN_PEPPER or ""),
+            "FLASK_DEBUG": "true" if app.debug else os.getenv("FLASK_DEBUG", "false"),
+            "TESTING": "true" if app.testing else os.getenv("TESTING", "false"),
+            "FLASK_SESSION_COOKIE_SECURE": (
+                "true" if Config.SESSION_COOKIE_SECURE else "false"
+            ),
+            "CACHE_BACKEND": str(Config.CACHE_BACKEND or ""),
+            "SEMANTIC_CACHE_BACKEND": str(Config.SEMANTIC_CACHE_BACKEND or ""),
+            "SEMANTIC_CACHE_ENABLED": (
+                "true" if Config.SEMANTIC_CACHE_ENABLED else "false"
+            ),
+            "DYNAMIC_SQL_ENABLED": "true" if Config.DYNAMIC_SQL_ENABLED else "false",
+            "CHAT_VECTOR_WRITES_ENABLED": (
+                "true" if Config.CHAT_VECTOR_WRITES_ENABLED else "false"
+            ),
+            "MYSQL_HOST": str(Config.MYSQL_HOST or ""),
+            "MYSQL_DB": str(Config.MYSQL_DB or ""),
+            "MYSQL_USER": str(Config.MYSQL_USER or ""),
+            "RATE_LIMIT_ENABLED": "true" if Config.RATE_LIMIT_ENABLED else "false",
+            "ALLOWED_ORIGINS": origins_text,
+            "LEGACY_CHAT_ENABLED": "true" if Config.LEGACY_CHAT_ENABLED else "false",
+            "OTP_TURN_IDEMPOTENCY_FAULTS": os.getenv(
+                "OTP_TURN_IDEMPOTENCY_FAULTS", ""
+            ),
+        }
+    )
+    return overlay
+
+
 def _run_startup_checks() -> None:
-    ok, issues = validate_production_config(
-        production_mode=Config.PRODUCTION_MODE,
+    """Authoritative production fail-closed contract (see launch_runtime)."""
+    overlay = _production_env_overlay()
+    result = validate_launch_runtime(production_mode=True, env=overlay)
+    for msg in result.warnings:
+        print(f"WARNING: Launch runtime: {msg}", file=sys.stderr)
+    for msg in result.errors:
+        print(f"ERROR: Launch runtime: {msg}", file=sys.stderr)
+    if not result.ok:
+        raise RuntimeError(
+            "Invalid production configuration (PRODUCTION_MODE=true). "
+            "Fix environment settings (categories logged above), then restart."
+        )
+    # Advisory cost/ops warnings (non-blocking) from ops_health.
+    _, advisory = validate_production_config(
+        production_mode=True,
         cache_backend=Config.CACHE_BACKEND,
         semantic_cache_enabled=Config.SEMANTIC_CACHE_ENABLED,
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
@@ -750,18 +831,18 @@ def _run_startup_checks() -> None:
         embed_provider=Config.EMBED_PROVIDER,
         vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
         vector_db_provider=Config.VECTOR_DB_PROVIDER,
+        semantic_cache_backend=Config.SEMANTIC_CACHE_BACKEND,
     )
-    for msg in issues:
-        prefix = "ERROR" if ("must be" in msg or "missing" in msg) else "WARNING"
-        print(f"{prefix}: Production config: {msg}", file=sys.stderr)
-    if not ok:
-        raise RuntimeError(
-            "Invalid production configuration (PRODUCTION_MODE=true). "
-            "Fix CACHE_BACKEND and other settings in .env, then restart."
-        )
+    # validate_production_config already includes launch errors; only print advisories
+    # that are not already listed as launch errors.
+    launch_msgs = set(result.errors) | set(result.warnings)
+    for msg in advisory:
+        if msg in launch_msgs:
+            continue
+        print(f"WARNING: Production config: {msg}", file=sys.stderr)
 
 
-# Fail fast if Redis (or another unsupported backend) is configured.
+# Fail fast before binding if Redis/unsupported backends or insecure production config.
 if Config.PRODUCTION_MODE:
     _run_startup_checks()
     print("Production mode: enabled", file=sys.stderr)
@@ -890,8 +971,13 @@ def _json_error(message: str, status: int, code: Optional[str] = None):
     return jsonify(payload), status
 
 
-def _turn_in_progress_response(retry_after: int = 1):
+def _turn_in_progress_response(
+    retry_after: int = 1,
+    *,
+    outcome: str = "TURN_IN_PROGRESS",
+):
     """Controlled retryable conflict while an identical turn is still completing."""
+    set_idempotency_outcome(outcome)
     retry_after = max(1, min(5, int(retry_after)))
     response = jsonify(
         {
@@ -1786,12 +1872,20 @@ def _resolve_turn_reservation(
     except TurnIdempotencyError as exc:
         return None, _json_error(str(exc), 400, "invalid_client_turn_id")
     if not client_turn_id:
+        if require_client_turn_id(production_mode=Config.PRODUCTION_MODE):
+            return None, _json_error(
+                "client_turn_id is required.",
+                400,
+                "missing_client_turn_id",
+            )
+        set_idempotency_outcome("NOT_APPLICABLE")
         return None, None
     fingerprint = build_request_fingerprint(
         thread_id=thread_id,
         message=message,
         event_context=event_context if isinstance(event_context, Mapping) else None,
     )
+    reserve_started = time.perf_counter()
     try:
         reservation = begin_or_replay_turn(
             get_db_connection,
@@ -1801,6 +1895,7 @@ def _resolve_turn_reservation(
             request_fingerprint=fingerprint,
         )
     except IdempotencyKeyReused:
+        set_idempotency_outcome("IDEMPOTENCY_KEY_REUSED")
         return None, _json_error(
             "This request identifier was already used with a different message.",
             409,
@@ -1810,11 +1905,29 @@ def _resolve_turn_reservation(
         return None, _json_error(str(exc), 400, "invalid_client_turn_id")
     except Exception as exc:
         if _is_retryable_db_contention(exc):
+            errno = getattr(exc, "errno", None)
+            name = exc.__class__.__name__
+            if name == "PoolError" or "pool" in str(exc).lower():
+                return None, _turn_in_progress_response(
+                    1, outcome="POOL_PRESSURE_MAPPED_TO_RETRY"
+                )
+            if errno in {1213, 1205} or "deadlock" in str(exc).lower():
+                return None, _turn_in_progress_response(
+                    1, outcome="DEADLOCK_MAPPED_TO_RETRY"
+                )
             return None, _turn_in_progress_response(1)
         raise
+    finally:
+        note_timing(
+            "idempotency_reservation_ms",
+            (time.perf_counter() - reserve_started) * 1000.0,
+        )
 
     if reservation.replay:
+        set_idempotency_outcome("COMPLETED_REPLAY")
         return reservation, None
+
+    set_idempotency_outcome("NEW_TURN")
 
     if not reservation.owned:
         try:
@@ -1823,12 +1936,27 @@ def _resolve_turn_reservation(
                 thread_id=thread_id,
                 client_turn_id=client_turn_id,
                 request_fingerprint=fingerprint,
+                timeout_seconds=float(Config.TURN_DUPLICATE_WAIT_SECONDS),
+            )
+        except IdempotencyKeyReused:
+            set_idempotency_outcome("IDEMPOTENCY_KEY_REUSED")
+            return None, _json_error(
+                "This request identifier was already used with a different message.",
+                409,
+                "idempotency_key_reused",
             )
         except Exception as exc:
             if _is_retryable_db_contention(exc):
-                return None, _turn_in_progress_response(1)
+                if exc.__class__.__name__ == "PoolError" or "pool" in str(exc).lower():
+                    return None, _turn_in_progress_response(
+                        1, outcome="POOL_PRESSURE_MAPPED_TO_RETRY"
+                    )
+                return None, _turn_in_progress_response(
+                    1, outcome="DEADLOCK_MAPPED_TO_RETRY"
+                )
             raise
         if waited is not None and waited.replay:
+            set_idempotency_outcome("COMPLETED_REPLAY")
             return waited, None
         try:
             reservation = begin_or_replay_turn(
@@ -1839,6 +1967,7 @@ def _resolve_turn_reservation(
                 request_fingerprint=fingerprint,
             )
         except IdempotencyKeyReused:
+            set_idempotency_outcome("IDEMPOTENCY_KEY_REUSED")
             return None, _json_error(
                 "This request identifier was already used with a different message.",
                 409,
@@ -1849,6 +1978,7 @@ def _resolve_turn_reservation(
                 return None, _turn_in_progress_response(1)
             raise
         if reservation.replay:
+            set_idempotency_outcome("COMPLETED_REPLAY")
             return reservation, None
         if not reservation.owned:
             return None, _turn_in_progress_response(1)
@@ -2111,6 +2241,8 @@ def _persist_conversation_turn(
                 raise RuntimeError("Failed to mark conversation turn completed")
         maybe_fault("before_persist_commit")
         conn.commit()
+        if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
+            set_idempotency_outcome("PERSISTENCE_COMPLETED")
     except Exception:
         if conn:
             try:
@@ -2118,6 +2250,7 @@ def _persist_conversation_turn(
             except Exception:
                 pass
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
+            set_idempotency_outcome("PERSISTENCE_FAILED")
             fail_turn(
                 get_db_connection,
                 turn_row_id=turn_reservation.turn_row_id,
@@ -2142,6 +2275,7 @@ def _persist_conversation_turn(
     # resident turn has committed and released its pooled connection.
     log_conn = None
     log_id = None
+    log_started = time.perf_counter()
     try:
         log_conn = get_db_connection()
         log_conn.start_transaction()
@@ -2173,6 +2307,7 @@ def _persist_conversation_turn(
                 pass
         _log_exception("Failed to log persisted conversation turn", exc)
     finally:
+        note_timing("interaction_log_ms", (time.perf_counter() - log_started) * 1000.0)
         if log_conn:
             log_conn.close()
 
@@ -3439,7 +3574,16 @@ def before_request_handler():
     g.is_guest = False
     g.clear_auth_cookies = False
     g.csrf_cookie_written = False
-    g.request_id = str(uuid.uuid4())[:12]
+    g.request_started_at = time.perf_counter()
+    g.emit_request_completion = False
+    g.endpoint_family = None
+    g.route_or_mode = None
+    g.completion_status = None
+    g.error_code = None
+    g.source_freshness_status = None
+    reset_request_observability()
+    incoming_rid = request.headers.get(request_id_header_name())
+    g.request_id = normalize_request_id(incoming_rid)
 
     provided_api_key = request.headers.get("RethinkAI-API-Key", "")
     if provided_api_key and provided_api_key in Config.RETHINKAI_API_KEYS:
@@ -3485,6 +3629,47 @@ def after_request_handler(response):
             **_cookie_kwargs(httponly=False),
         )
         g.csrf_cookie_written = True
+    try:
+        response.headers[request_id_header_name()] = str(g.get("request_id") or "")
+    except Exception:
+        pass
+    if getattr(g, "emit_request_completion", False):
+        auth_label = "guest" if g.get("is_guest") else (
+            "authenticated" if g.get("current_user_row") else "anonymous"
+        )
+        status = response.status_code
+        completion = g.get("completion_status")
+        if not completion:
+            if status >= 500:
+                completion = "error"
+            elif status >= 400:
+                completion = "rejected"
+            else:
+                completion = "ok"
+        timings = {}
+        try:
+            from launch_runtime import get_timings
+
+            timings = get_timings()
+        except Exception:
+            timings = {}
+        emit_request_completion(
+            enabled=Config.REQUEST_METRICS_ENABLED,
+            request_id=g.get("request_id"),
+            endpoint_family=str(g.get("endpoint_family") or "unknown"),
+            route_or_mode=str(g.get("route_or_mode") or request.path),
+            http_status=int(status),
+            completion_status=str(completion),
+            latency_ms=int((time.perf_counter() - float(g.get("request_started_at") or time.perf_counter())) * 1000),
+            worker_pid=os.getpid(),
+            authenticated_or_guest=auth_label,
+            mysql_pool_wait_ms=timings.get("mysql_checkout_ms"),
+            llm_calls=get_llm_calls(),
+            embedding_calls=0,
+            source_freshness_status=g.get("source_freshness_status"),
+            error_code=g.get("error_code"),
+            streaming=bool(g.get("streaming_request")),
+        )
     return response
 
 
@@ -3933,6 +4118,9 @@ def get_conversation_messages(thread_id: str):
 
 @app.route("/conversations/<thread_id>/messages", methods=["POST"])
 def post_conversation_message(thread_id: str):
+    g.emit_request_completion = True
+    g.endpoint_family = "conversation"
+    g.route_or_mode = "messages_json"
     result = _require_user()
     if result:
         return result
@@ -3979,6 +4167,7 @@ def post_conversation_message(thread_id: str):
         if turn_error:
             return turn_error
         if turn_reservation is not None and turn_reservation.replay:
+            replay_started = time.perf_counter()
             conn = get_db_connection()
             replay = _load_replay_turn_payload(
                 conn,
@@ -3989,12 +4178,14 @@ def post_conversation_message(thread_id: str):
             )
             conn.close()
             conn = None
+            note_timing("replay_ms", (time.perf_counter() - replay_started) * 1000.0)
             if replay is None:
                 return _json_error(
                     "Previous turn could not be loaded.",
                     409,
                     "idempotency_replay_missing",
                 )
+            g.completion_status = "replay"
             response_payload = {
                 "thread": _serialize_thread(replay["thread"]),
                 "user_message": _serialize_message(replay["user_message"]),
@@ -4247,6 +4438,10 @@ def post_conversation_message_stream(thread_id: str):
     then a final `data: {"type":"final", ...}` with the persisted thread/messages
     (or `{"type":"error", ...}`). The non-streaming endpoint remains the default.
     """
+    g.emit_request_completion = True
+    g.endpoint_family = "conversation"
+    g.route_or_mode = "messages_sse"
+    g.streaming_request = True
     if not Config.STREAMING_ENABLED:
         return _json_error("Streaming is disabled.", 404, "streaming_disabled")
 
@@ -4789,6 +4984,17 @@ def post_conversation_message_stream(thread_id: str):
 # =============================================================================
 @app.route("/chat", methods=["POST"])
 def chat():
+    """Legacy compatibility endpoint (unsupported for the public web client).
+
+    Disabled by default when PRODUCTION_MODE=true unless LEGACY_CHAT_ENABLED=true.
+    Prefer POST /conversations/<id>/messages (JSON) or .../messages/stream (SSE).
+    """
+    if not legacy_chat_enabled(production_mode=Config.PRODUCTION_MODE):
+        return _json_error(
+            "Legacy /chat is disabled. Use the conversation messages API.",
+            410,
+            "legacy_chat_disabled",
+        )
     result = _require_api_key_or_user()
     if result:
         return result
@@ -5025,7 +5231,17 @@ def events():
 
 @app.route("/health", methods=["GET"])
 def health():
-    status = {
+    """Unauthenticated public liveness probe — minimal payload only."""
+    payload = {"status": "ok"}
+    version = getattr(Config, "API_VERSION", None)
+    if version:
+        payload["version"] = version
+    return jsonify(payload)
+
+
+def _build_detailed_readiness() -> Dict[str, Any]:
+    """Internal/admin readiness details (not for public unauthenticated clients)."""
+    status: Dict[str, Any] = {
         "status": "ok",
         "version": Config.API_VERSION,
         "cache_backend": Config.CACHE_BACKEND,
@@ -5076,14 +5292,7 @@ def health():
     if ingest.get("status") in {"stale", "degraded"}:
         status["status"] = "degraded"
 
-    try:
-        feed_311 = check_311_feed_balance(get_db_connection)
-        status["boston_311_feeds"] = feed_311
-        if feed_311.get("status") == "degraded":
-            status["status"] = "degraded"
-    except Exception:
-        pass
-
+    # Deliberately skip expensive civic table scans (check_311_feed_balance) here.
     try:
         from ingest_queue import check_311_freshness, get_ingest_job_status
 
@@ -5110,11 +5319,21 @@ def health():
         embed_provider=Config.EMBED_PROVIDER,
         vectordb_dir=Path(_retrieval.VECTORDB_DIR) if _retrieval else None,
         vector_db_provider=Config.VECTOR_DB_PROVIDER,
+        semantic_cache_backend=Config.SEMANTIC_CACHE_BACKEND,
     )
     if prod_issues:
         status["config_warnings"] = prod_issues
 
-    return jsonify(status)
+    return status
+
+
+@app.route("/admin/health/ready", methods=["GET"])
+def admin_health_ready():
+    """Detailed readiness behind admin authentication."""
+    result = _require_admin()
+    if result:
+        return result
+    return jsonify(_build_detailed_readiness())
 
 
 # =============================================================================

@@ -32,6 +32,21 @@ ALLOWED_STATUSES = frozenset(
 )
 
 # Test-only fault injection. Disabled unless OTP_TURN_IDEMPOTENCY_FAULTS=1.
+# Never active when PRODUCTION_MODE is true (startup must also fail closed).
+ALLOWED_FAULT_POINTS = frozenset(
+    {
+        "before_reservation",
+        "after_reservation",
+        "before_generation",
+        "before_persist_complete",
+        "before_persist_commit",
+        "after_persist_commit",
+        "before_sse_final",
+        "before_complete",
+        "after_complete_before_commit",
+        "before_fail",
+    }
+)
 _FAULT_POINTS: Dict[str, Callable[[], None]] = {}
 
 
@@ -70,12 +85,25 @@ def _as_naive_utc(value: Any) -> Optional[datetime]:
     return None
 
 
+def _production_mode() -> bool:
+    return (os.getenv("PRODUCTION_MODE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _faults_enabled() -> bool:
+    if _production_mode():
+        return False
     return os.getenv("OTP_TURN_IDEMPOTENCY_FAULTS", "").strip() == "1"
 
 
 def register_fault(point: str, callback: Optional[Callable[[], None]]) -> None:
     """Register or clear a test-only fault hook (no-op unless faults enabled)."""
+    if point not in ALLOWED_FAULT_POINTS:
+        return
     if callback is None:
         _FAULT_POINTS.pop(point, None)
     else:
@@ -87,17 +115,22 @@ def clear_faults() -> None:
 
 
 def maybe_fault(point: str) -> None:
+    """Strict allowlist. Headers ignored when faults disabled; never runs in production."""
     if not _faults_enabled():
+        return
+    if point not in ALLOWED_FAULT_POINTS:
         return
     hook = _FAULT_POINTS.get(point)
     if hook is not None:
         hook()
-    # Optional request-header injection for multi-process live tests.
+    # Optional request-header injection for multi-process live tests only.
     try:
         from flask import has_request_context, request
 
         if has_request_context():
             requested = (request.headers.get("X-OTP-Test-Fault") or "").strip()
+            if not requested or requested not in ALLOWED_FAULT_POINTS:
+                return
             if requested == point:
                 raise RuntimeError(f"injected crash at {point}")
     except ImportError:

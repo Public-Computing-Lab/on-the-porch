@@ -80,3 +80,14 @@ def when_ready(server) -> None:  # noqa: ARG001
         f"bind={bind} timeout={timeout}",
         flush=True,
     )
+    # Defense in depth: re-check production contract after master is ready.
+    # Workers also validate on api_v2 import when PRODUCTION_MODE=true.
+    if (os.getenv("PRODUCTION_MODE") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        from launch_runtime import assert_launch_runtime
+
+        assert_launch_runtime(production_mode=True)

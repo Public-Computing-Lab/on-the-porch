@@ -327,6 +327,24 @@ MYSQL_POOL_SIZE = max(1, min(32, _int("MYSQL_POOL_SIZE", 6)))
 MYSQL_CONNECT_TIMEOUT = _int("MYSQL_CONNECT_TIMEOUT", 10)
 MYSQL_MAX_RETRIES = _int("MYSQL_MAX_RETRIES", 3)
 MYSQL_POOL_RECYCLE = _int("MYSQL_POOL_RECYCLE", 3600)
+# mysql-connector raises PoolError immediately when the per-process pool is empty
+# (non-blocking checkout). This bound documents reconnect/ping budget expectations.
+MYSQL_POOL_CHECKOUT_TIMEOUT_SECONDS = max(
+    0.5, _float("MYSQL_POOL_CHECKOUT_TIMEOUT_SECONDS", 5.0)
+)
+# Bounded wait when a duplicate request polls for an in-flight turn to complete.
+TURN_DUPLICATE_WAIT_SECONDS = max(0.5, min(10.0, _float("TURN_DUPLICATE_WAIT_SECONDS", 3.0)))
+
+# Legacy POST /chat: unsupported for the public web client. Default off in production.
+LEGACY_CHAT_ENABLED = _truthy(
+    "LEGACY_CHAT_ENABLED",
+    "false" if _truthy("PRODUCTION_MODE", "false") else "true",
+)
+# Modern conversation endpoints: require client_turn_id in production by default.
+REQUIRE_CLIENT_TURN_ID = _truthy(
+    "REQUIRE_CLIENT_TURN_ID",
+    "true" if _truthy("PRODUCTION_MODE", "false") else "false",
+)
 
 MATERIALIZED_VIEWS_ENABLED = _truthy("MATERIALIZED_VIEWS_ENABLED", "true")
 EVENTS_MATERIALIZED_DAYS = max(7, min(_int("EVENTS_MATERIALIZED_DAYS", 90), 180))
@@ -727,6 +745,10 @@ class Config:
     MYSQL_DB = MYSQL_DB
     MYSQL_POOL_SIZE = MYSQL_POOL_SIZE
     MYSQL_CONNECT_TIMEOUT = MYSQL_CONNECT_TIMEOUT
+    MYSQL_POOL_CHECKOUT_TIMEOUT_SECONDS = MYSQL_POOL_CHECKOUT_TIMEOUT_SECONDS
+    TURN_DUPLICATE_WAIT_SECONDS = TURN_DUPLICATE_WAIT_SECONDS
+    LEGACY_CHAT_ENABLED = LEGACY_CHAT_ENABLED
+    REQUIRE_CLIENT_TURN_ID = REQUIRE_CLIENT_TURN_ID
     LOGIN_WINDOW_MINUTES = LOGIN_WINDOW_MINUTES
     LOGIN_LOCK_THRESHOLD = LOGIN_LOCK_THRESHOLD
     LOGIN_LOCK_MINUTES = LOGIN_LOCK_MINUTES
