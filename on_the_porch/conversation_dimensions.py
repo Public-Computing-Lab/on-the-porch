@@ -7,6 +7,7 @@ routing, retrieval, answer generation, and durable conversation state.
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -19,6 +20,20 @@ from zoneinfo import ZoneInfo
 
 NEW_YORK_TIMEZONE = "America/New_York"
 NEW_YORK = ZoneInfo(NEW_YORK_TIMEZONE)
+
+
+def resolve_app_now(now: Optional[datetime] = None) -> datetime:
+    """America/New_York clock; OTP_FREEZE_NOW enables deterministic local tests."""
+    if now is not None:
+        value = now if now.tzinfo is not None else now.replace(tzinfo=NEW_YORK)
+        return value.astimezone(NEW_YORK)
+    raw = str(os.environ.get("OTP_FREEZE_NOW") or "").strip()
+    if raw:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=NEW_YORK)
+        return parsed.astimezone(NEW_YORK)
+    return datetime.now(NEW_YORK)
 MAX_MESSAGE_CHARS = 1200
 MAX_REASON_CODES = 16
 MAX_SERIALIZED_BYTES = 4096
@@ -50,13 +65,21 @@ class TimeLabelCode(str, Enum):
     TODAY = "TODAY"
     TOMORROW = "TOMORROW"
     THIS_WEEK = "THIS_WEEK"
+    THIS_CALENDAR_WEEK = "THIS_CALENDAR_WEEK"
+    NEXT_CALENDAR_WEEK = "NEXT_CALENDAR_WEEK"
+    WEEK_AFTER_NEXT = "WEEK_AFTER_NEXT"
     LAST_WEEK = "LAST_WEEK"
     THIS_WEEKEND = "THIS_WEEKEND"
     NEXT_WEEKEND = "NEXT_WEEKEND"
+    LATER_THIS_WEEK = "LATER_THIS_WEEK"
+    EARLIER_THIS_WEEK = "EARLIER_THIS_WEEK"
     THIS_MONTH = "THIS_MONTH"
+    NEXT_MONTH = "NEXT_MONTH"
     LAST_MONTH = "LAST_MONTH"
+    ROLLING_DAYS = "ROLLING_DAYS"
     ROLLING_7_DAYS = "ROLLING_7_DAYS"
     ROLLING_30_DAYS = "ROLLING_30_DAYS"
+    UPCOMING_DEFAULT = "UPCOMING_DEFAULT"
     EXPLICIT_DATE = "EXPLICIT_DATE"
     EXPLICIT_RANGE = "EXPLICIT_RANGE"
     UNKNOWN = "UNKNOWN"
@@ -148,13 +171,20 @@ class ReasonCode(str, Enum):
     EXPLICIT_TODAY = "explicit_today"
     EXPLICIT_TOMORROW = "explicit_tomorrow"
     EXPLICIT_THIS_WEEK = "explicit_this_week"
+    EXPLICIT_NEXT_CALENDAR_WEEK = "explicit_next_calendar_week"
+    EXPLICIT_WEEK_AFTER_NEXT = "explicit_week_after_next"
+    EXPLICIT_LATER_THIS_WEEK = "explicit_later_this_week"
+    EXPLICIT_EARLIER_THIS_WEEK = "explicit_earlier_this_week"
     EXPLICIT_LAST_WEEK = "explicit_last_week"
     EXPLICIT_THIS_WEEKEND = "explicit_this_weekend"
     EXPLICIT_NEXT_WEEKEND = "explicit_next_weekend"
     EXPLICIT_THIS_MONTH = "explicit_this_month"
+    EXPLICIT_NEXT_MONTH = "explicit_next_month"
     EXPLICIT_LAST_MONTH = "explicit_last_month"
+    EXPLICIT_ROLLING_DAYS = "explicit_rolling_days"
     EXPLICIT_ROLLING_7_DAYS = "explicit_rolling_7_days"
     EXPLICIT_ROLLING_30_DAYS = "explicit_rolling_30_days"
+    EXPLICIT_UPCOMING_DEFAULT = "explicit_upcoming_default"
     EXPLICIT_DATE = "explicit_date"
     EXPLICIT_RANGE = "explicit_range"
     AMBIGUOUS_EXPLICIT_DATE = "ambiguous_explicit_date"
@@ -228,7 +258,7 @@ GEOGRAPHY_REGISTRY: Tuple[GeographyEntry, ...] = (
         name="Dorchester",
         kind=GeographyKind.NEIGHBORHOOD,
         parent_id=None,
-        aliases=("dorchester",),
+        aliases=("dorchester", "all of dorchester", "rest of dorchester", "across dorchester"),
     ),
     GeographyEntry(
         id="codman_square",
@@ -606,6 +636,23 @@ _NON_LOCATION_WHAT_ABOUT = frozenset(
         "tomorrow",
         "this weekend",
         "next weekend",
+        "this week",
+        "next week",
+        "later this week",
+        "earlier this week",
+        "the week after next",
+        "week after next",
+        "the next 14 days",
+        "next 14 days",
+        "the next seven days",
+        "next seven days",
+        "over the next week",
+        "virtual",
+        "virtual events",
+        "online",
+        "online events",
+        "in person",
+        "in person events",
     }
 )
 
@@ -616,7 +663,7 @@ def _looks_like_unknown_location(normalized: str) -> bool:
         suffix = cue.group(1).strip()
         if not suffix.startswith(_NON_LOCATION_CUE_PREFIXES):
             return True
-    match = re.fullmatch(r"what about ([a-z][a-z ]{1,50})", normalized)
+    match = re.fullmatch(r"what about ([a-z0-9][a-z0-9 ]{1,50})", normalized)
     return bool(match and match.group(1).strip() not in _NON_LOCATION_WHAT_ABOUT)
 
 
@@ -646,11 +693,7 @@ def _range(
 
 
 def _local_now(value: Optional[datetime]) -> datetime:
-    if value is None:
-        return datetime.now(NEW_YORK)
-    if value.tzinfo is None:
-        return value.replace(tzinfo=NEW_YORK)
-    return value.astimezone(NEW_YORK)
+    return resolve_app_now(value)
 
 
 _MONTHS = {
@@ -681,11 +724,19 @@ def _next_named_date(month: str, day_value: str, today: date) -> date:
     return resolved
 
 
+def _past_named_date(month: str, day_value: str, today: date) -> date:
+    resolved = date(today.year, _MONTHS[month.lower()], int(day_value))
+    if resolved > today:
+        resolved = date(today.year - 1, resolved.month, resolved.day)
+    return resolved
+
+
 def _extract_explicit_time(
     original: str,
     today: date,
     *,
     resolve_yearless_named_dates: bool,
+    prefer_past: bool = False,
 ) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
     iso_range = re.search(
         r"\b(\d{4}-\d{2}-\d{2})\s+(?:to|through)\s+(\d{4}-\d{2}-\d{2})\b",
@@ -744,9 +795,12 @@ def _extract_explicit_time(
         if not resolve_yearless_named_dates:
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
         try:
-            start = _next_named_date(*yearless_month_range.group(1, 2), today)
+            resolver = _past_named_date if prefer_past else _next_named_date
+            start = resolver(*yearless_month_range.group(1, 2), today)
             end = date(start.year, _MONTHS[yearless_month_range.group(3).lower()], int(yearless_month_range.group(4)))
-            if end < start:
+            if prefer_past and end > start:
+                pass
+            elif end < start:
                 end = date(start.year + 1, end.month, end.day)
             return _range(TimeLabelCode.EXPLICIT_RANGE, start, end + timedelta(days=1), TimeGranularity.RANGE), ReasonCode.EXPLICIT_RANGE, False
         except ValueError:
@@ -761,7 +815,8 @@ def _extract_explicit_time(
         if not resolve_yearless_named_dates:
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
         try:
-            resolved = _next_named_date(*yearless_month_date.group(1, 2), today)
+            resolver = _past_named_date if prefer_past else _next_named_date
+            resolved = resolver(*yearless_month_date.group(1, 2), today)
             return _day_range(TimeLabelCode.EXPLICIT_DATE, resolved, TimeGranularity.DAY), ReasonCode.EXPLICIT_DATE, False
         except ValueError:
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
@@ -776,6 +831,18 @@ def _extract_explicit_time(
     return None, None, False
 
 
+def _week_start_monday(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def _month_start(day: date) -> date:
+    return day.replace(day=1)
+
+
+def _next_month_start(day: date) -> date:
+    return (_month_start(day).replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
 def _extract_time(
     original: str,
     normalized: str,
@@ -784,6 +851,10 @@ def _extract_time(
     resolve_yearless_named_dates: bool,
 ) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
     today = now.date()
+    this_week = _week_start_monday(today)
+    next_week = this_week + timedelta(days=7)
+    week_after_next = next_week + timedelta(days=7)
+
     if _contains_phrase(normalized, "right now"):
         return _day_range(TimeLabelCode.RIGHT_NOW, today, TimeGranularity.INSTANT), ReasonCode.EXPLICIT_RIGHT_NOW, False
     if _contains_phrase(normalized, "next weekend"):
@@ -793,32 +864,173 @@ def _extract_time(
     if _contains_phrase(normalized, "this weekend"):
         start = _current_or_upcoming_weekend(today)
         return _range(TimeLabelCode.THIS_WEEKEND, start, start + timedelta(days=2), TimeGranularity.RANGE), ReasonCode.EXPLICIT_THIS_WEEKEND, False
+    if (
+        _contains_phrase(normalized, "the week after next")
+        or _contains_phrase(normalized, "week after next")
+    ):
+        return (
+            _range(
+                TimeLabelCode.WEEK_AFTER_NEXT,
+                week_after_next,
+                week_after_next + timedelta(days=7),
+                TimeGranularity.WEEK,
+            ),
+            ReasonCode.EXPLICIT_WEEK_AFTER_NEXT,
+            False,
+        )
+    if (
+        _contains_phrase(normalized, "over the next week")
+        or _contains_phrase(normalized, "next seven days")
+        or _contains_phrase(normalized, "next 7 days")
+    ):
+        return (
+            _range(
+                TimeLabelCode.ROLLING_DAYS,
+                today,
+                today + timedelta(days=7),
+                TimeGranularity.RANGE,
+            ),
+            ReasonCode.EXPLICIT_ROLLING_DAYS,
+            False,
+        )
+    if (
+        _contains_phrase(normalized, "next 14 days")
+        or _contains_phrase(normalized, "next fourteen days")
+        or _contains_phrase(normalized, "the next 14 days")
+        or _contains_phrase(normalized, "over the next 14 days")
+    ):
+        return (
+            _range(
+                TimeLabelCode.ROLLING_DAYS,
+                today,
+                today + timedelta(days=14),
+                TimeGranularity.RANGE,
+            ),
+            ReasonCode.EXPLICIT_ROLLING_DAYS,
+            False,
+        )
     if _contains_phrase(normalized, "last 7 days") or _contains_phrase(normalized, "past 7 days"):
         return _range(TimeLabelCode.ROLLING_7_DAYS, today - timedelta(days=6), today + timedelta(days=1), TimeGranularity.RANGE), ReasonCode.EXPLICIT_ROLLING_7_DAYS, False
     if _contains_phrase(normalized, "last 30 days") or _contains_phrase(normalized, "past 30 days"):
         return _range(TimeLabelCode.ROLLING_30_DAYS, today - timedelta(days=29), today + timedelta(days=1), TimeGranularity.RANGE), ReasonCode.EXPLICIT_ROLLING_30_DAYS, False
-    if _contains_phrase(normalized, "last month"):
-        this_month = today.replace(day=1)
-        previous_month_end = this_month - timedelta(days=1)
-        previous_month = previous_month_end.replace(day=1)
-        return _range(TimeLabelCode.LAST_MONTH, previous_month, this_month, TimeGranularity.MONTH), ReasonCode.EXPLICIT_LAST_MONTH, False
-    if _contains_phrase(normalized, "this month"):
-        this_month = today.replace(day=1)
-        next_month = (this_month.replace(day=28) + timedelta(days=4)).replace(day=1)
-        return _range(TimeLabelCode.THIS_MONTH, this_month, next_month, TimeGranularity.MONTH), ReasonCode.EXPLICIT_THIS_MONTH, False
+    if (
+        _contains_phrase(normalized, "coming up next week")
+        or _contains_phrase(normalized, "this coming week")
+        or _contains_phrase(normalized, "sometime next week")
+        or _contains_phrase(normalized, "next week")
+        or _contains_phrase(normalized, "next wk")
+        or _contains_phrase(normalized, "whats on next week")
+        or _contains_phrase(normalized, "what is on next week")
+    ):
+        return (
+            _range(
+                TimeLabelCode.NEXT_CALENDAR_WEEK,
+                next_week,
+                next_week + timedelta(days=7),
+                TimeGranularity.WEEK,
+            ),
+            ReasonCode.EXPLICIT_NEXT_CALENDAR_WEEK,
+            False,
+        )
+    if _contains_phrase(normalized, "later this week"):
+        return (
+            _range(
+                TimeLabelCode.LATER_THIS_WEEK,
+                today,
+                this_week + timedelta(days=7),
+                TimeGranularity.RANGE,
+            ),
+            ReasonCode.EXPLICIT_LATER_THIS_WEEK,
+            False,
+        )
+    if _contains_phrase(normalized, "earlier this week"):
+        return (
+            _range(
+                TimeLabelCode.EARLIER_THIS_WEEK,
+                this_week,
+                today + timedelta(days=1),
+                TimeGranularity.RANGE,
+            ),
+            ReasonCode.EXPLICIT_EARLIER_THIS_WEEK,
+            False,
+        )
     if _contains_phrase(normalized, "last week"):
-        this_week = today - timedelta(days=today.weekday())
         return _range(TimeLabelCode.LAST_WEEK, this_week - timedelta(days=7), this_week, TimeGranularity.WEEK), ReasonCode.EXPLICIT_LAST_WEEK, False
     if _contains_phrase(normalized, "this week"):
-        this_week = today - timedelta(days=today.weekday())
-        return _range(TimeLabelCode.THIS_WEEK, this_week, this_week + timedelta(days=7), TimeGranularity.WEEK), ReasonCode.EXPLICIT_THIS_WEEK, False
+        # Semantic calendar week Mon–Sun; upcoming floor is applied at retrieval.
+        return (
+            _range(
+                TimeLabelCode.THIS_CALENDAR_WEEK,
+                this_week,
+                this_week + timedelta(days=7),
+                TimeGranularity.WEEK,
+            ),
+            ReasonCode.EXPLICIT_THIS_WEEK,
+            False,
+        )
+    if _contains_phrase(normalized, "next month"):
+        start = _next_month_start(today)
+        end = _next_month_start(start)
+        return _range(TimeLabelCode.NEXT_MONTH, start, end, TimeGranularity.MONTH), ReasonCode.EXPLICIT_NEXT_MONTH, False
+    if _contains_phrase(normalized, "last month"):
+        this_month = _month_start(today)
+        previous_month_end = this_month - timedelta(days=1)
+        previous_month = _month_start(previous_month_end)
+        return _range(TimeLabelCode.LAST_MONTH, previous_month, this_month, TimeGranularity.MONTH), ReasonCode.EXPLICIT_LAST_MONTH, False
+    if _contains_phrase(normalized, "this month"):
+        this_month = _month_start(today)
+        return _range(TimeLabelCode.THIS_MONTH, this_month, _next_month_start(today), TimeGranularity.MONTH), ReasonCode.EXPLICIT_THIS_MONTH, False
+    if _contains_phrase(normalized, "later today"):
+        return _day_range(TimeLabelCode.TODAY, today, TimeGranularity.DAY), ReasonCode.EXPLICIT_TODAY, False
     if _contains_phrase(normalized, "tomorrow"):
         return _day_range(TimeLabelCode.TOMORROW, today + timedelta(days=1), TimeGranularity.DAY), ReasonCode.EXPLICIT_TOMORROW, False
     if _contains_phrase(normalized, "today") or _contains_phrase(normalized, "tonight"):
         return _day_range(TimeLabelCode.TODAY, today, TimeGranularity.DAY), ReasonCode.EXPLICIT_TODAY, False
+    if (
+        _contains_phrase(normalized, "upcoming")
+        or _contains_phrase(normalized, "coming up")
+        or re.search(r"\bsoon\b", normalized)
+    ):
+        return (
+            _range(
+                TimeLabelCode.UPCOMING_DEFAULT,
+                today,
+                today + timedelta(days=14),
+                TimeGranularity.RANGE,
+            ),
+            ReasonCode.EXPLICIT_UPCOMING_DEFAULT,
+            False,
+        )
+    prefer_past = bool(
+        re.search(
+            r"\b(?:happened|were there|was there|held|took place|yesterday)\b",
+            normalized,
+        )
+    )
     return _extract_explicit_time(
         original,
         today,
+        resolve_yearless_named_dates=resolve_yearless_named_dates,
+        prefer_past=prefer_past,
+    )
+
+
+def resolve_canonical_time_expression(
+    message: str,
+    *,
+    now: Optional[datetime] = None,
+    resolve_yearless_named_dates: bool = False,
+) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
+    """Resolve one natural-language time expression through the canonical parser.
+
+    Event discovery and compatibility callers use this entry point so phrase
+    semantics cannot drift from conversation dimensions.
+    """
+    original = str(message or "")[:MAX_MESSAGE_CHARS]
+    return _extract_time(
+        original,
+        _normalize_text(original),
+        _local_now(now),
         resolve_yearless_named_dates=resolve_yearless_named_dates,
     )
 
@@ -859,6 +1071,23 @@ def _extract_topic(
         return CanonicalTopic.MEETINGS, ReasonCode.EXPLICIT_MEETINGS_TOPIC
     if re.search(r"\b(?:events?|festival|calendar)\b", normalized):
         return CanonicalTopic.EVENTS, ReasonCode.EXPLICIT_EVENTS_TOPIC
+    natural_event_discovery = bool(
+        re.search(
+            r"\b(?:what(?:\s+s|\s+is)?\s+going\s+on|whats\s+going\s+on|"
+            r"what(?:\s+s|\s+is)?\s+happening|whats\s+happening|anything\s+happening|"
+            r"what(?:\s+s|\s+is)?\s+on|whats\s+on|things\s+to\s+do)\b",
+            normalized,
+        )
+        and re.search(
+            r"\b(?:today|tomorrow|tonight|weekend|week|month|upcoming|coming\s+up|"
+            r"soon|days|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            normalized,
+        )
+    )
+    # Without an explicit "events" keyword, named-place "what's happening" stays
+    # neighborhood information. Bare temporal discovery defaults to events.
+    if natural_event_discovery and location is None:
+        return CanonicalTopic.EVENTS, ReasonCode.EXPLICIT_EVENTS_TOPIC
     city_service = re.search(
         r"\b(?:311|potholes?|trash|garbage|streetlights?|missed pickup|city services?)\b",
         normalized,
@@ -877,7 +1106,12 @@ def _extract_topic(
             CanonicalTopic.NEIGHBORHOOD_INFORMATION,
             ReasonCode.EXPLICIT_NEIGHBORHOOD_INFORMATION_TOPIC,
         )
-    correction = bool(re.match(r"^(?:no i mean|i meant|not that one|actually i mean)\b", normalized))
+    correction = bool(
+        re.match(
+            r"^(?:no i mean|i meant|not that one|actually i mean|actually all of|all of dorchester)\b",
+            normalized,
+        )
+    )
     if context.active_topic is not None and (has_filter_refinement or correction):
         return context.active_topic, ReasonCode.TRUSTED_TOPIC_CONTEXT
     return CanonicalTopic.UNKNOWN, ReasonCode.RULE_NO_MATCH
@@ -887,7 +1121,7 @@ def _extract_filters(normalized: str) -> Tuple[CanonicalFilters, Tuple[ReasonCod
     reasons = []
     event_filter_scope = bool(
         re.search(r"\b(?:events?|ones)\b", normalized)
-        or re.match(r"^(?:only|show|list|find|just show|show only)\b", normalized)
+        or re.match(r"^(?:only|show|list|find|just show|show only|what about)\b", normalized)
     )
     cost = CostFilter.ANY
     if event_filter_scope and re.search(r"\b(?:free|no cost|at no charge)\b", normalized):
@@ -1020,10 +1254,9 @@ def extract_with_rules(
         trusted,
     )
     location, location_reason, location_clarification = _resolve_location(normalized)
-    time_range, time_reason, time_clarification = _extract_time(
+    time_range, time_reason, time_clarification = resolve_canonical_time_expression(
         original,
-        normalized,
-        _local_now(now),
+        now=now,
         resolve_yearless_named_dates=resolve_yearless_named_dates,
     )
     topic, topic_reason = _extract_topic(

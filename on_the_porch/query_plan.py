@@ -258,23 +258,22 @@ def infer_metric(question: str) -> Optional[str]:
 
 
 def days_ahead_from_question(question: str, default: int = 14) -> int:
-    """Forward-looking window for upcoming events/calendar queries."""
-    q = (question or "").lower()
-    if "today" in q:
-        return 1
-    if "tomorrow" in q:
-        return 2
-    if "this weekend" in q or ("weekend" in q and "next" not in q):
-        return 7
-    if "this week" in q:
-        return 7
-    if "next week" in q:
-        return 14
-    if "this month" in q:
-        return 30
-    if "next month" in q:
-        return 60
-    return default
+    """Compatibility horizon derived from canonical event-time semantics."""
+    from conversation_dimensions import (  # noqa: WPS433
+        resolve_app_now,
+        resolve_canonical_time_expression,
+    )
+
+    now = resolve_app_now()
+    resolved, _reason, clarification = resolve_canonical_time_expression(
+        question,
+        now=now,
+        resolve_yearless_named_dates=True,
+    )
+    if resolved is None or clarification:
+        return default
+    end_exclusive = date.fromisoformat(str(resolved.end_date_exclusive))
+    return max(1, (end_exclusive - now.date()).days)
 
 
 def build_query_plan(question: str, *, mode: str = "sql", default_days: int = 7) -> QueryPlan:

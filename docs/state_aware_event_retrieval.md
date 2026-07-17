@@ -14,44 +14,72 @@ production database was not accessed.
   locations outside Dorchester, including Randolph, Newton, Brookline, Jamaica Plain,
   Mattapan, Allston-Brighton, and Roslindale.
 - Sources represented were `codman`, `csndc`, a community email source, and Dorchester
-  Reporter PDF editions (`REP-*`). Current/future rows came from `codman`, `csndc`,
-  `REP-19_26-web.pdf`, `REP-22_26web.pdf`, and `REP-25_26web.pdf`.
+  Reporter PDF editions (`REP-*`).
 - Structured columns include event ID, title, display date, start/end dates,
   start/end times, source, category, normalized name, raw text, and ingestion time.
 - Location, URL, description, modality, contact, registration, and cost are embedded
-  in labeled or prose content in `raw_text`. The prepared event materialization extracts
-  an event URL but does not add a structured neighborhood field.
-- Of 59 current/future rows, 42 had a labeled location and 29 were explicitly virtual.
-- Four physical rows could be canonicalized with the vetted exact-location registry:
-  three in Codman Square and one in broader Dorchester. No current/future row could be
-  confirmed for Fields Corner.
-- Eleven rows had an address without a vetted supported-neighborhood mapping. Other
-  rows had unknown or unsupported physical location metadata.
+  in labeled or prose content in `raw_text`.
 
 Because the table is not Dorchester-scoped and has no authoritative neighborhood
-column, date filtering is performed with bound SQL parameters and location filtering
-is performed deterministically after retrieval. Only explicit labeled locations and a
-small server-owned exact registry are accepted. Source name, organizer, title, URL,
-and incidental description mentions never establish physical location.
+column, date filtering uses bound SQL parameters and Dorchester relevance uses a
+bounded deterministic classifier (`event_relevance.py`).
 
-## Safe defaults
+## Natural-language time
 
-- Relative dates are constructed from America/New_York server time and represented as
-  half-open ranges. SQL never uses `CURDATE()` or `NOW()` for this path.
-- A date-less event-list request uses a documented 14-day upcoming window.
-- Because the dataset is not Dorchester-scoped, a request without an explicit location
-  is retrieved with a Dorchester location scope. That retrieval default is not treated
-  as an explicit resident location and is not persisted by itself.
-- Unknown and virtual locations are excluded from physical location results.
-- Missing `there` or `that day` antecedents produce deterministic clarification and no
-  query, model call, state transition, or cache invalidation.
-- Cost, time-of-day, modality, and registration filters are explicitly unsupported in
-  this slice. They produce a deterministic limitation response and preserve prior state
-  and cache.
+Relative phrases resolve in America/New_York to half-open ranges. Examples at
+Friday 2026-07-17:
+
+| Phrase | Kind | Effective upcoming range |
+|---|---|---|
+| next week | `NEXT_CALENDAR_WEEK` | [2026-07-20, 2026-07-27) |
+| over the next week / next seven days | `ROLLING_DAYS` | [2026-07-17, 2026-07-24) |
+| next 14 days | `ROLLING_DAYS` | [2026-07-17, 2026-07-31) |
+| this week (upcoming discovery) | `THIS_CALENDAR_WEEK` semantic; floor applied | [2026-07-17, 2026-07-20) |
+
+“Next week” and “next seven days” are distinct. Semantic calendar-week state is
+preserved while upcoming retrieval applies today’s floor. Historical phrases such as
+“what happened on July 16” do not apply the upcoming floor.
+
+## Dorchester relevance
+
+Default generic event discovery uses geography `dorchester` with no subarea.
+
+Qualifying kinds for the Dorchester default (chat and sidebar):
+
+- confirmed physical Dorchester addresses / vetted address registry;
+- vetted Dorchester subarea addresses (Codman Square, Fields Corner);
+- vetted Dorchester-serving virtual programs (bounded allowlist; labeled Virtual).
+
+Excluded from the default:
+
+- physical outside-Dorchester venues (for example Randolph);
+- unvetted virtual listings;
+- unknown / unlabeled locations;
+- relevance inferred only from title, URL, organizer address, or source name.
+
+Virtual modality is supported as an explicit filter. Cost, time-of-day, hybrid, and
+registration filters remain unsupported.
+
+## Sidebar contract
+
+The default sidebar title is **Upcoming Dorchester Events**. Date-range and count
+controls affect only `GET /events`. They never alter the chat event query plan.
 
 ## Cache contract
 
-Deterministic event-list cache entries use a five-minute TTL and an exact canonical
-signature containing only topic, half-open dates, canonical location ID, and an empty
-filters object. The signature contains no resident text, answer prose, SQL, excerpts,
-or identity data. A date or location change requires a fresh retrieval.
+Deterministic event-list cache entries use a five-minute TTL and an exact signature:
+
+```json
+{
+  "topic": "EVENTS",
+  "start_date": "2026-07-20",
+  "end_date_exclusive": "2026-07-27",
+  "location_id": "dorchester",
+  "subarea_id": null,
+  "modality": null,
+  "filters": {}
+}
+```
+
+The signature contains no resident text. Effective upcoming dates are used for
+SQL/cache execution; semantic label/dates remain on the plan for state.

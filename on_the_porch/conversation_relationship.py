@@ -434,20 +434,28 @@ _CORRECTION_PATTERN = re.compile(
     r"^(?:no[, ]+i mean|i meant|not that one|no[, ]+not|actually[, ]+i mean)\b",
     flags=re.IGNORECASE,
 )
-_FILTER_REFINEMENT_PATTERN = re.compile(
-    r"^(?:only\b|just show\b|show only\b|free ones?\b|paid ones?\b|"
-    r"family[- ]friendly\b|(?:morning|afternoon|evening|virtual|online|"
-    r"in[- ]person|hybrid) (?:events?|ones?)\b|(?:registration|sign[- ]up) "
-    r"(?:required|not required|unknown)\b)",
-    flags=re.IGNORECASE,
-)
 _TIME_REFINEMENT_PATTERN = re.compile(
     r"^(?:what about|how about|and what about)?\s*(?:this weekend|next weekend|"
-    r"today|tomorrow|next week|this week|in the evening|after work)\??$",
+    r"today|tomorrow|next week|this week|the week after next|week after next|"
+    r"later this week|earlier this week|"
+    r"(?:the )?next (?:7|seven|14|fourteen) days|over the next week|"
+    r"over the next 14 days|in the evening|after work)\??$",
     flags=re.IGNORECASE,
 )
 _LOCATION_REFINEMENT_PATTERN = re.compile(
     r"^(?:what about|how about|near|around|in)\s+[A-Za-z0-9 .'-]{2,80}\??$",
+    flags=re.IGNORECASE,
+)
+_ALL_DORCHESTER_PATTERN = re.compile(
+    r"^(?:actually[, ]+)?(?:all of |across |the rest of )?dorchester\.?\??$",
+    flags=re.IGNORECASE,
+)
+_FILTER_REFINEMENT_PATTERN = re.compile(
+    r"^(?:only\b|just show\b|show only\b|free ones?\b|paid ones?\b|"
+    r"what about (?:virtual|online|in[- ]person|hybrid)(?: events?)?\b|"
+    r"family[- ]friendly\b|(?:morning|afternoon|evening|virtual|online|"
+    r"in[- ]person|hybrid) (?:events?|ones?)\b|(?:registration|sign[- ]up) "
+    r"(?:required|not required|unknown)\b)",
     flags=re.IGNORECASE,
 )
 _REFERENTIAL_PATTERN = re.compile(
@@ -493,6 +501,18 @@ def classify_with_rules(context: RelationshipContext) -> Optional[RelationshipDe
             retained=(ContextDimension.ACTIVE_TOPIC,),
             cleared=(
                 ContextDimension.ACTIVE_ENTITY,
+                ContextDimension.TIME_RANGE,
+                ContextDimension.FILTERS,
+            ),
+        )
+
+    if has_prior and _ALL_DORCHESTER_PATTERN.fullmatch(message.strip()):
+        return _decision(
+            ConversationRelationship.REFINEMENT,
+            0.97,
+            ReasonCode.LOCATION_REFINEMENT,
+            retained=(
+                ContextDimension.ACTIVE_TOPIC,
                 ContextDimension.TIME_RANGE,
                 ContextDimension.FILTERS,
             ),

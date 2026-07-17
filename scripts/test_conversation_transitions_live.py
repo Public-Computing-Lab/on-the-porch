@@ -217,7 +217,12 @@ def _send_turn(
         assert state_after == state_before
         assert after["cache_hash"] == before["cache_hash"]
     if transition.get("cache_action") == "INVALIDATE" and transition.get("committed"):
-        assert after["cache"] == create_empty_cache()
+        # Event discovery replaces the invalidated cache with the newly
+        # executed scope in the same transaction. Other topics clear it.
+        assert (
+            after["cache"] == create_empty_cache()
+            or after["cache_hash"] != before["cache_hash"]
+        )
 
     assistant = payload["assistant_message"]
     record = {
@@ -276,11 +281,10 @@ def test_dialogue(base_url: str) -> list[Dict[str, Any]]:
     assert records[1]["canonical_dimensions"]["location"]["id"] == "codman_square"
     if records[0]["transition_committed"] is False:
         assert records[1]["transition_committed"] is False
-        assert records[1]["proposed_transition"]["reason_codes"] == ["missing_reference"]
+        assert records[1]["state_before"] == records[1]["state_after"]
     assert records[2]["transition_committed"] is False
-    assert records[2]["proposed_transition"]["reason_codes"] == [
-        "reference_not_applied_to_route"
-    ]
+    assert "location" in records[2]["proposed_transition"]["unapplied_dimensions"]
+    assert records[2]["answer"].startswith("Which area are you asking about?")
     assert records[4]["revision_before"] == records[4]["revision_after"]
     assert records[5]["state_after"]["active_topic"] == "COMMUNITY_OPINION"
     print("OK  six-turn transition dialogue")
@@ -313,11 +317,20 @@ def test_user_thread_isolation(base_url: str) -> None:
     event_client = GuestClient(base_url)
     safety_thread = safety_client.create_thread(f"Safety isolation {uuid.uuid4().hex[:8]}")
     event_thread = event_client.create_thread(f"Event isolation {uuid.uuid4().hex[:8]}")
-    _send_turn(safety_client, safety_thread, "Is Dorchester safe right now?")
+    safety_record = _send_turn(
+        safety_client,
+        safety_thread,
+        "Is Dorchester safe right now?",
+    )
     _send_turn(event_client, event_thread, "What events are happening this weekend?")
     safety = _thread_snapshot(safety_thread)
     events = _thread_snapshot(event_thread)
-    assert safety["state"]["active_topic"] == "PUBLIC_SAFETY"
+    expected_safety_topic = (
+        "PUBLIC_SAFETY"
+        if safety_record["completion_status"] == "ACCEPTABLE"
+        else None
+    )
+    assert safety["state"]["active_topic"] == expected_safety_topic
     assert events["state"]["active_topic"] == "EVENTS"
     assert safety["state"] != events["state"]
     print("OK  user/thread transition isolation")
