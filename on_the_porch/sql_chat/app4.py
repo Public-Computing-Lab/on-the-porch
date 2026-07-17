@@ -4,6 +4,7 @@ import json
 import re
 import time
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Callable
 
@@ -750,20 +751,51 @@ def is_generic_events_list_question(question: str) -> bool:
     return any(t in q for t in time_hints) or any(p in q for p in list_patterns)
 
 
-def _events_list_days_ahead(question: str) -> int:
-    from query_plan import days_ahead_from_question  # noqa: WPS433
+def _events_list_window(question: str) -> tuple[date, date]:
+    """Resolve the compatibility event path through canonical time semantics."""
+    from conversation_dimensions import (  # noqa: WPS433
+        resolve_app_now,
+        resolve_canonical_time_expression,
+    )
 
-    return days_ahead_from_question(question, default=14)
+    now = resolve_app_now()
+    resolved, _reason, clarification = resolve_canonical_time_expression(
+        question,
+        now=now,
+        resolve_yearless_named_dates=True,
+    )
+    if resolved is None or clarification:
+        return now.date(), now.date() + timedelta(days=14)
+    start = max(date.fromisoformat(str(resolved.start_date)), now.date())
+    end_exclusive = date.fromisoformat(str(resolved.end_date_exclusive))
+    if end_exclusive <= start:
+        end_exclusive = start + timedelta(days=1)
+    return start, end_exclusive
 
 
-def _fast_weekly_events_sql(days_ahead: int) -> str:
-    days = max(1, min(int(days_ahead), 90))
+def _fast_weekly_events_sql(
+    start_date: date | int,
+    end_date_exclusive: date | None = None,
+) -> str:
+    """Build the bounded event query, retaining the prior days-only test API."""
+    if isinstance(start_date, int) and end_date_exclusive is None:
+        from conversation_dimensions import resolve_app_now  # noqa: WPS433
+
+        today = resolve_app_now().date()
+        days = max(1, min(start_date, 90))
+        start_date = today
+        # The prior query included both today and today + days.
+        end_date_exclusive = today + timedelta(days=days + 1)
+    if end_date_exclusive is None:
+        raise TypeError("end_date_exclusive is required with an explicit start date")
+    start = start_date.isoformat()
+    end = end_date_exclusive.isoformat()
     return (
         "SELECT `event_name`, `event_date`, `start_date`, `end_date`, "
         "`start_time`, `end_time`, `raw_text`, `source_pdf` "
         "FROM `weekly_events` "
-        "WHERE `start_date` >= CURDATE() "
-        f"AND `start_date` <= DATE_ADD(CURDATE(), INTERVAL {days} DAY) "
+        f"WHERE `start_date` < '{end}' "
+        f"AND COALESCE(`end_date`, `start_date`) >= '{start}' "
         "ORDER BY `start_date` ASC, `start_time` ASC "
         "LIMIT 50"
     )
@@ -798,9 +830,9 @@ def run_generic_events_query(
     conversation_history: List[Dict[str, str]] | None = None,
 ) -> Dict[str, Any]:
     """Fetch upcoming events with a direct SQL query (no LLM SQL generation)."""
-    days = _events_list_days_ahead(question)
-    sql = _fast_weekly_events_sql(days)
-    print(f"\n[Fast events SQL — next {days} days]\n{sql}\n")
+    start_date, end_date_exclusive = _events_list_window(question)
+    sql = _fast_weekly_events_sql(start_date, end_date_exclusive)
+    print(f"\n[Fast events SQL — {start_date} to {end_date_exclusive})]\n{sql}\n")
     try:
         result = _execute_sql(sql)
     except Exception as exc:  # noqa: BLE001

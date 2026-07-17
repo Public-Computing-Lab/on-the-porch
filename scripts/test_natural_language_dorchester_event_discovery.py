@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,7 @@ from conversation_dimensions import (  # noqa: E402
     GeographyKind,
     TimeLabelCode,
     extract_conversation_dimensions,
+    resolve_canonical_time_expression,
 )
 from conversation_relationship import (  # noqa: E402
     ConversationRelationship,
@@ -38,10 +40,12 @@ from event_query_context import (  # noqa: E402
     build_event_cache,
     classify_event_relevance,
     compose_event_answer,
+    discover_events,
     event_cache_matches,
     is_direct_event_list_request,
     plan_event_query,
     retrieve_events,
+    retrieve_sidebar_events,
 )
 from event_relevance import EventLocationStatus  # noqa: E402
 
@@ -119,6 +123,37 @@ class _Connection:
         self.cursor_value = _Cursor(rows)
 
     def cursor(self, *, dictionary: bool = False) -> _Cursor:
+        assert dictionary
+        return self.cursor_value
+
+
+class _SidebarCursor:
+    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        self.rows = rows
+        self.params = ()
+
+    def execute(self, sql: str, params: tuple) -> None:
+        self.params = params
+        start_date, end_exclusive, _limit = params
+        self.filtered = [
+            row
+            for row in self.rows
+            if str(row.get("start_date")) >= str(start_date)
+            and str(row.get("start_date")) < str(end_exclusive)
+        ]
+
+    def fetchall(self) -> List[Dict[str, Any]]:
+        return self.filtered
+
+    def close(self) -> None:
+        pass
+
+
+class _SidebarConnection:
+    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        self.cursor_value = _SidebarCursor(rows)
+
+    def cursor(self, *, dictionary: bool = False) -> _SidebarCursor:
         assert dictionary
         return self.cursor_value
 
@@ -341,6 +376,23 @@ def test_relevance_classification() -> None:
         EventRelevanceKind.OUTSIDE_DORCHESTER_VIRTUAL,
     }
 
+    title_substring = _row(
+        96,
+        "Virtual Baby Cafe Special Session",
+        "Virtual",
+        start_date="2026-07-22",
+    )
+    assert classify_event_relevance(title_substring).kind is EventRelevanceKind.UNKNOWN_RELEVANCE
+
+    source_substring = _row(
+        95,
+        "Virtual Baby Cafe",
+        "Virtual",
+        start_date="2026-07-22",
+        source="codman-newsletter",
+    )
+    assert classify_event_relevance(source_substring).kind is EventRelevanceKind.UNKNOWN_RELEVANCE
+
 
 def test_screenshot_next_week_answer() -> None:
     plan = _plan("What events are coming up next week?")
@@ -357,6 +409,22 @@ def test_screenshot_next_week_answer() -> None:
     assert "Virtual" in answer
     assert "couldn't find any events" not in answer.lower()
     assert "Randolph" not in answer or "Virtual Baby" in answer
+
+    discovery = discover_events(_Connection(SCREENSHOT_ROWS), plan, now=NOW)
+    payload = discovery.to_dict()
+    assert payload["interpreted_scope"] == {
+        "time_kind": "NEXT_CALENDAR_WEEK",
+        "semantic_start_date": "2026-07-20",
+        "semantic_end_date_exclusive": "2026-07-27",
+        "effective_start_date": "2026-07-20",
+        "effective_end_date_exclusive": "2026-07-27",
+        "geography": "DORCHESTER",
+        "subarea": None,
+        "modality": None,
+    }
+    assert [row["id"] for row in payload["events"]] == [2]
+    assert payload["coverage"]["candidate_count"] == 3
+    assert payload["cache_signature"] == plan.cache_signature()
 
 
 def test_codman_and_virtual_refinement() -> None:
@@ -505,6 +573,17 @@ def test_sidebar_does_not_affect_chat_plan() -> None:
     assert (plan.start_date, plan.end_date_exclusive) == ("2026-07-20", "2026-07-27")
     assert plan.cache_signature()["start_date"] != "2026-07-17"
 
+    sidebar = retrieve_sidebar_events(
+        _SidebarConnection(SCREENSHOT_ROWS),
+        source_table="weekly_events",
+        limit=10,
+        days_ahead=14,
+        now=NOW,
+    )
+    assert [row["id"] for row in sidebar] == [2, 4]
+    assert sidebar[0]["location_label"] == "Virtual"
+    assert sidebar[0]["modality"] == "virtual"
+
 
 def test_no_llm_path_and_overmatch_guard() -> None:
     plan = _plan("What events are coming up next week?")
@@ -516,6 +595,27 @@ def test_no_llm_path_and_overmatch_guard() -> None:
         dims.time_range.label_code is TimeLabelCode.THIS_CALENDAR_WEEK
         and dims.topic is not CanonicalTopic.EVENTS
     )
+
+    previous = os.environ.get("OTP_FREEZE_NOW")
+    os.environ["OTP_FREEZE_NOW"] = "2026-07-17T12:00:00-04:00"
+    try:
+        from query_plan import days_ahead_from_question
+
+        assert days_ahead_from_question("What events are next week?") == 10
+        resolved, _, _ = resolve_canonical_time_expression(
+            "What events are next week?",
+            now=NOW,
+        )
+        assert resolved is not None
+        assert (resolved.start_date, resolved.end_date_exclusive) == (
+            "2026-07-20",
+            "2026-07-27",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("OTP_FREEZE_NOW", None)
+        else:
+            os.environ["OTP_FREEZE_NOW"] = previous
 
 
 def test_relationship_all_dorchester_and_virtual() -> None:

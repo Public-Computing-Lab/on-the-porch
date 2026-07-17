@@ -295,11 +295,15 @@ def run(base_url: str) -> None:
     civic = _send_turn(client, thread_id, "How many 311 requests were filed last week?")
     assert civic["stored_form_after"] == ThreadStateForm.ENVELOPE_V1_STATE_V2.value
     assert civic["schema_version_after"] == 2
-    assert civic["revision_after"] == civic["revision_before"] + 1
-    assert civic["active_entity_after"] is None
+    # The demo source does not cover last week. Its degraded answer must not
+    # replace the previously trusted event state.
+    assert "can't provide a reliable count" in civic["answer"].lower()
+    assert civic["revision_after"] == civic["revision_before"]
+    assert civic["active_entity_after"]["id"] == "435"
     assert civic["location_after"] is None
     assert civic["time_range_after"] is None
     assert civic["filters_after"] == {}
+    assert civic["retrieval_cache_hash_after"] == civic["retrieval_cache_hash_before"]
 
     print(f"OK  local legacy-to-v2 migration dialogue thread={thread_id}")
 

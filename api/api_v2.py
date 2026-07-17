@@ -172,13 +172,13 @@ from event_query_context import (  # noqa: E402
     EventQueryDimension,
     EventQueryPlan,
     build_event_cache,
-    build_event_sources as build_structured_event_sources,
     cached_event_result,
     compose_event_answer,
+    discover_events,
     event_cache_matches,
     is_direct_event_list_request,
     plan_event_query,
-    retrieve_events,
+    retrieve_sidebar_events,
 )
 from sql_chat.app4 import is_generic_events_list_question  # noqa: E402
 from intent_router import detect_civic_topic  # noqa: E402
@@ -3361,9 +3361,11 @@ def _state_aware_event_agent_result(
             }, plan
 
     try:
-        rows, candidate_count = retrieve_events(conn, plan)
+        discovery = discover_events(conn, plan)
+        rows = list(discovery.events)
+        candidate_count = discovery.candidate_count
         answer = compose_event_answer(plan, rows, candidate_count=candidate_count)
-        sources = build_structured_event_sources(rows)
+        sources = list(discovery.sources)
         next_cache = build_event_cache(
             base_cache=create_empty_cache(),
             plan=plan,
@@ -5319,74 +5321,19 @@ def events():
 
     limit = max(1, min(request.args.get("limit", 10, type=int), 100))
     days_ahead = max(1, min(request.args.get("days_ahead", 14, type=int), 365))
-    scope = str(request.args.get("scope") or "dorchester").strip().lower()
 
     conn = None
-    cursor = None
     try:
-        from conversation_dimensions import resolve_app_now
-        from event_query_context import classify_event_relevance, is_default_sidebar_event
-        from event_relevance import extract_labeled_event_location
-
-        today = resolve_app_now().date()
-        # Match prior inclusive sidebar window: today .. today+days_ahead inclusive.
-        end_exclusive = today + datetime.timedelta(days=days_ahead + 1)
-
         conn = get_db_connection()
         from materialized_views import events_query_source, is_materialized_views_enabled
 
         source_table = events_query_source(conn)
-        url_col = ", event_url" if source_table == "events_materialized" else ""
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            f"""
-            SELECT id, event_name, event_date, start_date, end_date,
-                   start_time, end_time, raw_text, source_pdf{url_col}
-            FROM {source_table}
-            WHERE start_date >= %s
-              AND start_date < %s
-            ORDER BY start_date ASC, start_time ASC
-            LIMIT %s
-            """,
-            (today.isoformat(), end_exclusive.isoformat(), max(limit * 5, 50)),
+        events_list = retrieve_sidebar_events(
+            conn,
+            source_table=source_table,
+            limit=limit,
+            days_ahead=days_ahead,
         )
-        rows = cursor.fetchall()
-        events_list = []
-        for row in rows:
-            if scope in {"dorchester", "default"} and not is_default_sidebar_event(row):
-                continue
-            relevance = classify_event_relevance(row)
-            event_url = row.get("event_url") if source_table == "events_materialized" else None
-            if not event_url and row.get("raw_text"):
-                match = re.search(
-                    r"URL:\s*(https?://\S+)", str(row["raw_text"]), re.IGNORECASE,
-                )
-                if match:
-                    event_url = match.group(1).rstrip(").,]")
-            location_label = (
-                "Virtual"
-                if relevance.is_virtual
-                else (relevance.display_location or extract_labeled_event_location(row.get("raw_text")))
-            )
-            events_list.append(
-                {
-                    "id": row["id"],
-                    "event_name": row["event_name"],
-                    "event_date": row["event_date"],
-                    "start_date": str(row["start_date"]) if row["start_date"] else None,
-                    "end_date": str(row["end_date"]) if row["end_date"] else None,
-                    "start_time": str(row["start_time"]) if row["start_time"] else None,
-                    "end_time": str(row["end_time"]) if row["end_time"] else None,
-                    "description": row["raw_text"],
-                    "source": row["source_pdf"],
-                    "url": event_url,
-                    "location_label": location_label,
-                    "modality": "virtual" if relevance.is_virtual else "in_person",
-                    "relevance_kind": relevance.kind.value,
-                }
-            )
-            if len(events_list) >= limit:
-                break
         return jsonify({
             "events": events_list,
             "total": len(events_list),
@@ -5404,8 +5351,6 @@ def events():
         _log_exception("Error in /events", exc)
         return _json_error("Failed to fetch events.", 500, "events_failed")
     finally:
-        if cursor:
-            cursor.close()
         if conn:
             conn.close()
 

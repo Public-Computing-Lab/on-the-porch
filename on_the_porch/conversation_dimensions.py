@@ -1015,6 +1015,26 @@ def _extract_time(
     )
 
 
+def resolve_canonical_time_expression(
+    message: str,
+    *,
+    now: Optional[datetime] = None,
+    resolve_yearless_named_dates: bool = False,
+) -> Tuple[Optional[CanonicalTimeRange], Optional[ReasonCode], bool]:
+    """Resolve one natural-language time expression through the canonical parser.
+
+    Event discovery and compatibility callers use this entry point so phrase
+    semantics cannot drift from conversation dimensions.
+    """
+    original = str(message or "")[:MAX_MESSAGE_CHARS]
+    return _extract_time(
+        original,
+        _normalize_text(original),
+        _local_now(now),
+        resolve_yearless_named_dates=resolve_yearless_named_dates,
+    )
+
+
 def _current_or_upcoming_weekend(today: date) -> date:
     # Monday=0 ... Sunday=6. Saturday/Sunday remain in the current weekend.
     if today.weekday() == 5:
@@ -1234,10 +1254,9 @@ def extract_with_rules(
         trusted,
     )
     location, location_reason, location_clarification = _resolve_location(normalized)
-    time_range, time_reason, time_clarification = _extract_time(
+    time_range, time_reason, time_clarification = resolve_canonical_time_expression(
         original,
-        normalized,
-        _local_now(now),
+        now=now,
         resolve_yearless_named_dates=resolve_yearless_named_dates,
     )
     topic, topic_reason = _extract_topic(

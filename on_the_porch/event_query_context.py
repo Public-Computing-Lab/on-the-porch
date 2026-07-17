@@ -47,8 +47,10 @@ MAX_PLAN_BYTES = 2048
 MAX_REASON_CODES = 12
 MAX_EVENT_ROWS = 100
 MAX_RESULT_ROWS = 25
+MAX_SIDEBAR_CANDIDATES = 500
 EVENT_CACHE_TTL_SECONDS = 300
 DEFAULT_EVENT_WINDOW_DAYS = 14
+_EVENT_SOURCE_TABLES = frozenset({"weekly_events", "events_materialized"})
 
 
 class EventPlanStatus(str, Enum):
@@ -83,7 +85,7 @@ class EventPlanReason(str, Enum):
     UNSUPPORTED_TIME = "unsupported_time"
     UPCOMING_FLOOR_APPLIED = "upcoming_floor_applied"
     HISTORICAL_QUERY = "historical_query"
-    VIRTUAL_MODALITY = "virtual_modality"
+    EXPLICIT_MODALITY = "explicit_modality"
 
 
 _SUPPORTED_TIME_LABELS = frozenset(
@@ -289,6 +291,45 @@ class EventQueryPlan:
         }
 
 
+@dataclass(frozen=True)
+class EventDiscoveryResult:
+    """Structured facts returned by the deterministic event capability."""
+
+    plan: EventQueryPlan
+    events: Tuple[Dict[str, Any], ...]
+    candidate_count: int
+    sources: Tuple[Dict[str, str], ...]
+    limitations: Tuple[str, ...] = ()
+
+    def to_dict(self) -> Dict[str, Any]:
+        location = self.plan.location
+        return {
+            "interpreted_scope": {
+                "time_kind": self.plan.semantic_label_code,
+                "semantic_start_date": self.plan.semantic_start_date,
+                "semantic_end_date_exclusive": self.plan.semantic_end_date_exclusive,
+                "effective_start_date": self.plan.start_date,
+                "effective_end_date_exclusive": self.plan.end_date_exclusive,
+                "geography": "DORCHESTER" if location is not None else None,
+                "subarea": (
+                    location.id
+                    if location is not None and location.id != "dorchester"
+                    else None
+                ),
+                "modality": self.plan.modality,
+            },
+            "events": [copy.deepcopy(row) for row in self.events],
+            "coverage": {
+                "candidate_count": self.candidate_count,
+                "returned_count": len(self.events),
+                "result_limit": MAX_RESULT_ROWS,
+            },
+            "limitations": list(self.limitations),
+            "sources": [dict(source) for source in self.sources],
+            "cache_signature": self.plan.cache_signature(),
+        }
+
+
 def _trusted_inputs(
     relationship: Optional[RelationshipDecision],
     dimensions: Any,
@@ -436,10 +477,10 @@ def plan_event_query(
         )
     if virtual_modality:
         modality = "virtual"
-        plan_reasons.append(EventPlanReason.VIRTUAL_MODALITY)
+        plan_reasons.append(EventPlanReason.EXPLICIT_MODALITY)
     elif in_person_modality:
         modality = "in_person"
-        plan_reasons.append(EventPlanReason.VIRTUAL_MODALITY)
+        plan_reasons.append(EventPlanReason.EXPLICIT_MODALITY)
 
     if refs.location_reference is not None and explicit_location is None:
         if state.location is None:
@@ -699,6 +740,100 @@ def build_event_sources(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, str
     return sources[:MAX_RESULT_ROWS]
 
 
+def discover_events(
+    conn: Any,
+    plan: EventQueryPlan,
+    *,
+    now: Optional[datetime] = None,
+) -> EventDiscoveryResult:
+    """Execute deterministic event selection and return structured evidence."""
+    rows, candidate_count = retrieve_events(conn, plan, now=now)
+    limitations = (
+        "Location relevance uses labeled venue fields and reviewed registries; "
+        "unknown locations are excluded.",
+    )
+    return EventDiscoveryResult(
+        plan=plan,
+        events=tuple(copy.deepcopy(rows)),
+        candidate_count=candidate_count,
+        sources=tuple(build_event_sources(rows)),
+        limitations=limitations,
+    )
+
+
+def retrieve_sidebar_events(
+    conn: Any,
+    *,
+    source_table: str,
+    limit: int,
+    days_ahead: int,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Return bounded Dorchester-relevant cards for the sidebar transport."""
+    table = str(source_table or "").strip().lower()
+    if table not in _EVENT_SOURCE_TABLES:
+        raise ValueError("unsupported event source table")
+    bounded_limit = max(1, min(int(limit), 100))
+    bounded_days = max(1, min(int(days_ahead), 365))
+    today = resolve_app_now(now).date()
+    end_exclusive = today + timedelta(days=bounded_days + 1)
+    url_column = ", event_url" if table == "events_materialized" else ""
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"""
+            SELECT id, event_name, event_date, start_date, end_date,
+                   start_time, end_time, raw_text, source_pdf{url_column}
+            FROM {table}
+            WHERE start_date >= %s
+              AND start_date < %s
+            ORDER BY start_date ASC, start_time ASC, event_name ASC, id ASC
+            LIMIT %s
+            """,
+            (
+                today.isoformat(),
+                end_exclusive.isoformat(),
+                min(MAX_SIDEBAR_CANDIDATES, max(bounded_limit * 5, 50)),
+            ),
+        )
+        candidates = [dict(row) for row in cursor.fetchall()]
+    finally:
+        cursor.close()
+
+    events: List[Dict[str, Any]] = []
+    for row in candidates:
+        if not is_default_sidebar_event(row):
+            continue
+        relevance = classify_event_relevance(row)
+        event_url = row.get("event_url") or prepared_sql._extract_event_url(
+            str(row.get("raw_text") or "")
+        )
+        events.append(
+            {
+                "id": row.get("id"),
+                "event_name": row.get("event_name"),
+                "event_date": row.get("event_date"),
+                "start_date": str(row.get("start_date")) if row.get("start_date") else None,
+                "end_date": str(row.get("end_date")) if row.get("end_date") else None,
+                "start_time": str(row.get("start_time")) if row.get("start_time") else None,
+                "end_time": str(row.get("end_time")) if row.get("end_time") else None,
+                "description": row.get("raw_text"),
+                "source": row.get("source_pdf"),
+                "url": event_url,
+                "location_label": (
+                    "Virtual"
+                    if relevance.is_virtual
+                    else relevance.display_location
+                ),
+                "modality": "virtual" if relevance.is_virtual else "in_person",
+                "relevance_kind": relevance.kind.value,
+            }
+        )
+        if len(events) >= bounded_limit:
+            break
+    return events
+
+
 def compose_event_answer(
     plan: EventQueryPlan,
     rows: Sequence[Mapping[str, Any]],
@@ -846,6 +981,7 @@ __all__ = [
     "EventPlanStatus",
     "EventQueryDimension",
     "EventQueryPlan",
+    "EventDiscoveryResult",
     "EventRelevanceKind",
     "build_event_cache",
     "build_event_sources",
@@ -853,6 +989,7 @@ __all__ = [
     "classify_event_location",
     "classify_event_relevance",
     "compose_event_answer",
+    "discover_events",
     "event_cache_matches",
     "extract_labeled_event_location",
     "is_default_sidebar_event",
@@ -860,4 +997,5 @@ __all__ = [
     "is_historical_event_intent",
     "plan_event_query",
     "retrieve_events",
+    "retrieve_sidebar_events",
 ]

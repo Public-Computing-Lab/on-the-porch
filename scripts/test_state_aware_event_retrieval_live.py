@@ -202,7 +202,13 @@ def _run_dialogues(base_url: str) -> None:
     assert b[0]["trusted_state_after"]["active_topic"] == "EVENTS"
     assert b[0]["trusted_state_after"]["location"]["id"] == "codman_square"
     assert b[1]["query_plan"]["location"]["id"] == "fields_corner"
-    assert b[2]["query_plan"]["start_date"] != b[1]["query_plan"]["start_date"]
+    assert (
+        b[2]["query_plan"]["start_date"],
+        b[2]["query_plan"]["end_date_exclusive"],
+    ) != (
+        b[1]["query_plan"]["start_date"],
+        b[1]["query_plan"]["end_date_exclusive"],
+    )
 
     dialogue_c = isolated.create_thread("State-aware events C")
     c = _turn(isolated, dialogue_c, "Are there events there this weekend?")

@@ -119,10 +119,31 @@ _EXACT_LOCATION_REGISTRY = {
     ): (EventLocationStatus.DORCHESTER, EventRelevanceKind.DORCHESTER_PHYSICAL),
 }
 
-# Bounded virtual-program allowlist. Source alone is never enough; the program
-# name must match and the labeled location must be virtual.
-_VETTED_VIRTUAL_PROGRAMS: Tuple[Tuple[str, Optional[str], EventLocationStatus], ...] = (
-    ("virtual baby cafe", "codman", EventLocationStatus.CODMAN_SQUARE),
+@dataclass(frozen=True)
+class VettedVirtualProgram:
+    """Reviewed data exception for a Dorchester-serving virtual program."""
+
+    canonical_id: str
+    exact_titles: Tuple[str, ...]
+    allowed_sources: Tuple[str, ...]
+    service_area: EventLocationStatus
+    evidence_basis: str
+
+
+# Stable event-series IDs are not available in weekly_events. Until ingestion
+# provides them, keep exceptions in one exact-match registry with a documented
+# evidence basis. Source alone never qualifies an event.
+VETTED_VIRTUAL_PROGRAMS: Tuple[VettedVirtualProgram, ...] = (
+    VettedVirtualProgram(
+        canonical_id="codman_virtual_baby_cafe",
+        exact_titles=("virtual baby cafe",),
+        allowed_sources=("codman",),
+        service_area=EventLocationStatus.CODMAN_SQUARE,
+        evidence_basis=(
+            "Codman Square Health Center program listing; recurring rows use the "
+            "exact title and source but do not expose a stable series ID."
+        ),
+    ),
 )
 
 
@@ -164,14 +185,13 @@ def _vetted_virtual_program(
     row: Mapping[str, Any],
 ) -> Optional[EventLocationStatus]:
     name = _normalize(row.get("event_name"))
-    source = _normalize(row.get("source_pdf")).replace(" ", "")
-    for program, allowed_source, status in _VETTED_VIRTUAL_PROGRAMS:
-        if program not in name:
+    source = _normalize(row.get("source_pdf"))
+    for program in VETTED_VIRTUAL_PROGRAMS:
+        titles = {_normalize(value) for value in program.exact_titles}
+        sources = {_normalize(value) for value in program.allowed_sources}
+        if name not in titles or source not in sources:
             continue
-        if allowed_source is None:
-            return status
-        if allowed_source.replace(" ", "") in source or source == allowed_source:
-            return status
+        return program.service_area
     return None
 
 
@@ -205,9 +225,7 @@ def classify_event_relevance(row: Mapping[str, Any]) -> EventRelevance:
                 subarea_id=subarea,
             )
         return EventRelevance(
-            EventRelevanceKind.OUTSIDE_DORCHESTER_VIRTUAL
-            if _outside_city(_normalize(row.get("event_name")))
-            else EventRelevanceKind.UNKNOWN_RELEVANCE,
+            EventRelevanceKind.UNKNOWN_RELEVANCE,
             EventLocationStatus.VIRTUAL,
             EventRelevanceReason.LABELED_VIRTUAL_UNVETTED,
             "Virtual",
@@ -240,7 +258,7 @@ def classify_event_relevance(row: Mapping[str, Any]) -> EventRelevance:
             False,
         )
 
-    if "codman square" in normalized or "norfolk st" in normalized:
+    if "codman square" in normalized:
         return EventRelevance(
             EventRelevanceKind.DORCHESTER_SUBAREA,
             EventLocationStatus.CODMAN_SQUARE,

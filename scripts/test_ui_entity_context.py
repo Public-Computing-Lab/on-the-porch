@@ -377,7 +377,10 @@ def _seed_live_event_fixture(db, *, days_ahead: int = 7, today=None):
                 start,
                 "10:00:00",
                 "11:00:00",
-                f"Test fixture event for UI live tests ({event_name})",
+                (
+                    "Location: Codman Square Library, Dorchester, MA\n"
+                    f"Test fixture event for UI live tests ({event_name})"
+                ),
                 "community",
                 event_name.lower(),
             ),
@@ -412,7 +415,10 @@ def _seed_live_event_fixture(db, *, days_ahead: int = 7, today=None):
                     start,
                     "10:00:00",
                     "11:00:00",
-                    f"Test fixture event for UI live tests ({event_name})",
+                    (
+                        "Location: Codman Square Library, Dorchester, MA\n"
+                        f"Test fixture event for UI live tests ({event_name})"
+                    ),
                     "otp-ui-live-fixture.pdf",
                     None,
                 ),
