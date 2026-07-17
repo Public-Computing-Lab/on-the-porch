@@ -5,9 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import re
-import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
@@ -19,9 +18,11 @@ from conversation_dimensions import (
     ConversationDimensions,
     DecisionSource as DimensionDecisionSource,
     GeographyKind,
+    ModalityFilter,
     ReasonCode as DimensionReasonCode,
     TimeLabelCode,
     TimeGranularity,
+    resolve_app_now,
 )
 from conversation_relationship import (
     ConversationRelationship,
@@ -29,6 +30,15 @@ from conversation_relationship import (
     RelationshipDecision,
 )
 from conversation_state import ConversationState
+from event_relevance import (
+    EventLocationStatus,
+    EventRelevanceKind,
+    classify_event_location,
+    classify_event_relevance,
+    extract_labeled_event_location,
+    is_default_sidebar_event,
+    matches_requested_scope,
+)
 from sql_chat import prepared_sql
 
 
@@ -71,14 +81,9 @@ class EventPlanReason(str, Enum):
     AMBIGUOUS_TIME = "ambiguous_time"
     UNSUPPORTED_FILTER = "unsupported_filter"
     UNSUPPORTED_TIME = "unsupported_time"
-
-
-class EventLocationStatus(str, Enum):
-    DORCHESTER = "dorchester"
-    CODMAN_SQUARE = "codman_square"
-    FIELDS_CORNER = "fields_corner"
-    VIRTUAL = "virtual"
-    UNKNOWN = "unknown"
+    UPCOMING_FLOOR_APPLIED = "upcoming_floor_applied"
+    HISTORICAL_QUERY = "historical_query"
+    VIRTUAL_MODALITY = "virtual_modality"
 
 
 _SUPPORTED_TIME_LABELS = frozenset(
@@ -86,11 +91,23 @@ _SUPPORTED_TIME_LABELS = frozenset(
         TimeLabelCode.TODAY,
         TimeLabelCode.TOMORROW,
         TimeLabelCode.THIS_WEEK,
+        TimeLabelCode.THIS_CALENDAR_WEEK,
+        TimeLabelCode.NEXT_CALENDAR_WEEK,
+        TimeLabelCode.WEEK_AFTER_NEXT,
+        TimeLabelCode.LATER_THIS_WEEK,
+        TimeLabelCode.EARLIER_THIS_WEEK,
         TimeLabelCode.THIS_WEEKEND,
         TimeLabelCode.NEXT_WEEKEND,
         TimeLabelCode.THIS_MONTH,
+        TimeLabelCode.NEXT_MONTH,
+        TimeLabelCode.ROLLING_DAYS,
+        TimeLabelCode.UPCOMING_DEFAULT,
         TimeLabelCode.EXPLICIT_DATE,
         TimeLabelCode.EXPLICIT_RANGE,
+        TimeLabelCode.LAST_WEEK,
+        TimeLabelCode.ROLLING_7_DAYS,
+        TimeLabelCode.ROLLING_30_DAYS,
+        TimeLabelCode.LAST_MONTH,
     }
 )
 _EXPLICIT_TIME_REASONS = frozenset(
@@ -98,9 +115,20 @@ _EXPLICIT_TIME_REASONS = frozenset(
         DimensionReasonCode.EXPLICIT_TODAY,
         DimensionReasonCode.EXPLICIT_TOMORROW,
         DimensionReasonCode.EXPLICIT_THIS_WEEK,
+        DimensionReasonCode.EXPLICIT_NEXT_CALENDAR_WEEK,
+        DimensionReasonCode.EXPLICIT_WEEK_AFTER_NEXT,
+        DimensionReasonCode.EXPLICIT_LATER_THIS_WEEK,
+        DimensionReasonCode.EXPLICIT_EARLIER_THIS_WEEK,
         DimensionReasonCode.EXPLICIT_THIS_WEEKEND,
         DimensionReasonCode.EXPLICIT_NEXT_WEEKEND,
         DimensionReasonCode.EXPLICIT_THIS_MONTH,
+        DimensionReasonCode.EXPLICIT_NEXT_MONTH,
+        DimensionReasonCode.EXPLICIT_LAST_MONTH,
+        DimensionReasonCode.EXPLICIT_LAST_WEEK,
+        DimensionReasonCode.EXPLICIT_ROLLING_DAYS,
+        DimensionReasonCode.EXPLICIT_ROLLING_7_DAYS,
+        DimensionReasonCode.EXPLICIT_ROLLING_30_DAYS,
+        DimensionReasonCode.EXPLICIT_UPCOMING_DEFAULT,
         DimensionReasonCode.EXPLICIT_DATE,
         DimensionReasonCode.EXPLICIT_RANGE,
         DimensionReasonCode.EXPLICIT_RIGHT_NOW,
@@ -113,7 +141,7 @@ _EXPLICIT_LOCATION_REASONS = frozenset(
         DimensionReasonCode.EXPLICIT_FIELDS_CORNER_LOCATION,
     }
 )
-_EXPLICIT_FILTER_REASONS = frozenset(
+_UNSUPPORTED_FILTER_REASONS = frozenset(
     {
         DimensionReasonCode.EXPLICIT_FREE_FILTER,
         DimensionReasonCode.EXPLICIT_PAID_FILTER,
@@ -121,13 +149,20 @@ _EXPLICIT_FILTER_REASONS = frozenset(
         DimensionReasonCode.EXPLICIT_MORNING_FILTER,
         DimensionReasonCode.EXPLICIT_AFTERNOON_FILTER,
         DimensionReasonCode.EXPLICIT_EVENING_FILTER,
-        DimensionReasonCode.EXPLICIT_VIRTUAL_FILTER,
-        DimensionReasonCode.EXPLICIT_IN_PERSON_FILTER,
         DimensionReasonCode.EXPLICIT_HYBRID_FILTER,
         DimensionReasonCode.EXPLICIT_REGISTRATION_REQUIRED_FILTER,
         DimensionReasonCode.EXPLICIT_REGISTRATION_NOT_REQUIRED_FILTER,
         DimensionReasonCode.EXPLICIT_REGISTRATION_UNKNOWN_FILTER,
         DimensionReasonCode.UNSUPPORTED_FILTER,
+    }
+)
+_HISTORICAL_TIME_LABELS = frozenset(
+    {
+        TimeLabelCode.EARLIER_THIS_WEEK,
+        TimeLabelCode.LAST_WEEK,
+        TimeLabelCode.LAST_MONTH,
+        TimeLabelCode.ROLLING_7_DAYS,
+        TimeLabelCode.ROLLING_30_DAYS,
     }
 )
 
@@ -155,6 +190,24 @@ def is_direct_event_list_request(message: str) -> bool:
     return bool(
         re.match(r"^(?:events\b|what events\b|which events\b|are there (?:any )?events\b)", value)
         or re.match(r"^(?:show|list|find) (?:me )?(?:any )?events\b", value)
+        or re.match(
+            r"^(?:what(?:'s|s| is)? going on|what(?:'s|s| is)? happening|"
+            r"anything happening|what(?:'s|s| is)? on)\b",
+            value,
+        )
+    )
+
+
+def is_historical_event_intent(message: str, time_range: Optional[CanonicalTimeRange]) -> bool:
+    text = re.sub(r"\s+", " ", str(message or "")).strip().lower()
+    if time_range is not None and time_range.label_code in _HISTORICAL_TIME_LABELS:
+        return True
+    return bool(
+        re.search(
+            r"\b(?:happened|were there|was there|held|took place|earlier this week|"
+            r"last week|yesterday|what events happened|what happened)\b",
+            text,
+        )
     )
 
 
@@ -169,6 +222,11 @@ class EventQueryPlan:
     unapplied_dimensions: Tuple[EventQueryDimension, ...]
     requires_clarification: bool
     reason_codes: Tuple[EventPlanReason, ...]
+    semantic_start_date: Optional[str] = None
+    semantic_end_date_exclusive: Optional[str] = None
+    semantic_label_code: Optional[str] = None
+    modality: Optional[str] = None
+    upcoming_intent: bool = True
 
     def __post_init__(self) -> None:
         if self.topic is not CanonicalTopic.EVENTS:
@@ -197,6 +255,11 @@ class EventQueryPlan:
             "unapplied_dimensions": [item.value for item in self.unapplied_dimensions],
             "requires_clarification": self.requires_clarification,
             "reason_codes": [item.value for item in self.reason_codes],
+            "semantic_start_date": self.semantic_start_date,
+            "semantic_end_date_exclusive": self.semantic_end_date_exclusive,
+            "semantic_label_code": self.semantic_label_code,
+            "modality": self.modality,
+            "upcoming_intent": self.upcoming_intent,
         }
         encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         if len(encoded.encode("utf-8")) > MAX_PLAN_BYTES:
@@ -206,11 +269,22 @@ class EventQueryPlan:
     def cache_signature(self) -> Optional[Dict[str, Any]]:
         if self.status is not EventPlanStatus.READY:
             return None
+        location_id = "dorchester"
+        subarea_id = None
+        if self.location is not None:
+            if self.location.id == "dorchester":
+                location_id = "dorchester"
+                subarea_id = None
+            else:
+                location_id = "dorchester"
+                subarea_id = self.location.id
         return {
             "topic": CanonicalTopic.EVENTS.value,
             "start_date": self.start_date,
             "end_date_exclusive": self.end_date_exclusive,
-            "location_id": self.location.id if self.location else None,
+            "location_id": location_id,
+            "subarea_id": subarea_id,
+            "modality": self.modality,
             "filters": {},
         }
 
@@ -230,7 +304,7 @@ def _trusted_inputs(
 def _default_time(now: datetime) -> CanonicalTimeRange:
     today = now.astimezone(NEW_YORK).date()
     return CanonicalTimeRange(
-        label_code=TimeLabelCode.EXPLICIT_RANGE,
+        label_code=TimeLabelCode.UPCOMING_DEFAULT,
         start_date=today.isoformat(),
         end_date_exclusive=(today + timedelta(days=DEFAULT_EVENT_WINDOW_DAYS)).isoformat(),
         timezone="America/New_York",
@@ -239,9 +313,25 @@ def _default_time(now: datetime) -> CanonicalTimeRange:
 
 
 def _default_location() -> CanonicalLocation:
-    # weekly_events is not reliably Dorchester-scoped; this is a retrieval scope,
-    # not an explicit resident dimension and is therefore not persisted by itself.
     return CanonicalLocation("dorchester", GeographyKind.NEIGHBORHOOD)
+
+
+def _effective_range(
+    time_range: CanonicalTimeRange,
+    *,
+    today: date,
+    historical: bool,
+) -> Tuple[str, str, bool]:
+    semantic_start = date.fromisoformat(str(time_range.start_date))
+    semantic_end = date.fromisoformat(str(time_range.end_date_exclusive))
+    if historical:
+        return semantic_start.isoformat(), semantic_end.isoformat(), False
+    effective_start = max(semantic_start, today)
+    if effective_start >= semantic_end:
+        # Empty upcoming window — keep a zero-width-safe single-day empty range.
+        return effective_start.isoformat(), (effective_start + timedelta(days=1)).isoformat(), True
+    floored = effective_start > semantic_start
+    return effective_start.isoformat(), semantic_end.isoformat(), floored
 
 
 def plan_event_query(
@@ -251,6 +341,7 @@ def plan_event_query(
     state: ConversationState,
     event_list_requested: bool,
     now: Optional[datetime] = None,
+    message: str = "",
 ) -> Optional[EventQueryPlan]:
     """Build a plan only for a trusted event-list request."""
     if not event_list_requested:
@@ -266,12 +357,21 @@ def plan_event_query(
     )
     explicit_time = dimensions.time_range if reasons & _EXPLICIT_TIME_REASONS else None
     explicit_location = dimensions.location if reasons & _EXPLICIT_LOCATION_REASONS else None
-    explicit_filters = bool(reasons & _EXPLICIT_FILTER_REASONS)
+    unsupported_filters = bool(reasons & _UNSUPPORTED_FILTER_REASONS)
+    virtual_modality = (
+        dimensions.filters.modality is ModalityFilter.VIRTUAL
+        and DimensionReasonCode.EXPLICIT_VIRTUAL_FILTER in reasons
+    )
+    in_person_modality = (
+        dimensions.filters.modality is ModalityFilter.IN_PERSON
+        and DimensionReasonCode.EXPLICIT_IN_PERSON_FILTER in reasons
+    )
     refs = dimensions.references
 
     plan_reasons: List[EventPlanReason] = []
     time_range: Optional[CanonicalTimeRange] = None
     location: Optional[CanonicalLocation] = None
+    modality: Optional[str] = None
 
     if relation is ConversationRelationship.STANDALONE:
         if not explicit_topic:
@@ -317,7 +417,7 @@ def plan_event_query(
             tuple(_dedupe((*plan_reasons, EventPlanReason.AMBIGUOUS_TIME))),
         )
 
-    if explicit_filters:
+    if unsupported_filters and not (virtual_modality or in_person_modality):
         return EventQueryPlan(
             EventPlanStatus.UNSUPPORTED,
             CanonicalTopic.EVENTS,
@@ -334,6 +434,12 @@ def plan_event_query(
                 EventPlanReason.UNSUPPORTED_FILTER,
             ),
         )
+    if virtual_modality:
+        modality = "virtual"
+        plan_reasons.append(EventPlanReason.VIRTUAL_MODALITY)
+    elif in_person_modality:
+        modality = "in_person"
+        plan_reasons.append(EventPlanReason.VIRTUAL_MODALITY)
 
     if refs.location_reference is not None and explicit_location is None:
         if state.location is None:
@@ -381,7 +487,7 @@ def plan_event_query(
             time_range = state.time_range
             plan_reasons.append(EventPlanReason.RETAINED_TIME)
 
-    local_now = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK)
+    local_now = resolve_app_now(now)
     if time_range is None:
         time_range = _default_time(local_now)
         plan_reasons.append(EventPlanReason.DEFAULT_UPCOMING_WINDOW)
@@ -401,86 +507,99 @@ def plan_event_query(
         location = _default_location()
         plan_reasons.append(EventPlanReason.DEFAULT_DORCHESTER_SCOPE)
 
+    # Retain modality from prior event state when refining time/location only.
+    if (
+        modality is None
+        and relation in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}
+        and state.filters is not None
+        and state.filters.modality is ModalityFilter.VIRTUAL
+    ):
+        modality = "virtual"
+
+    historical = is_historical_event_intent(message or "", time_range)
+    if historical:
+        plan_reasons.append(EventPlanReason.HISTORICAL_QUERY)
+    effective_start, effective_end, floored = _effective_range(
+        time_range,
+        today=local_now.date(),
+        historical=historical,
+    )
+    if floored and not historical:
+        plan_reasons.append(EventPlanReason.UPCOMING_FLOOR_APPLIED)
+
     applied = [EventQueryDimension.TOPIC, EventQueryDimension.TIME_RANGE]
     if location is not None:
         applied.append(EventQueryDimension.LOCATION)
+    if modality is not None:
+        applied.append(EventQueryDimension.FILTERS)
     return EventQueryPlan(
         EventPlanStatus.READY,
         CanonicalTopic.EVENTS,
-        time_range.start_date,
-        time_range.end_date_exclusive,
+        effective_start,
+        effective_end,
         location,
         tuple(applied),
         (),
         False,
         tuple(_dedupe(plan_reasons)),
+        semantic_start_date=time_range.start_date,
+        semantic_end_date_exclusive=time_range.end_date_exclusive,
+        semantic_label_code=time_range.label_code.value,
+        modality=modality,
+        upcoming_intent=not historical,
     )
 
 
-_LABEL_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_])(DATE|TIME|LOCATION|WHERE|CONTACT|URL|COST|REGISTRATION|RSVP)\s*:\s*",
-    flags=re.IGNORECASE,
-)
-
-
-def _normalize_location(value: Any) -> str:
-    text = unicodedata.normalize("NFKD", str(value or ""))
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    text = text.lower().replace("&", " and ")
-    return re.sub(r"[^a-z0-9]+", " ", text).strip()
-
-
-_EXACT_LOCATION_REGISTRY = {
-    _normalize_location(
-        "The Great Hall at Codman Square Health Center, 6 Norfolk St., Dorchester, MA"
-    ): EventLocationStatus.CODMAN_SQUARE,
-    _normalize_location(
-        "Great Hall at Codman Square Health Center, 6 Norfolk St., Dorchester, MA"
-    ): EventLocationStatus.CODMAN_SQUARE,
-    _normalize_location(
-        "Second Church of Dorchester, 44 Moultrie St., Dorchester"
-    ): EventLocationStatus.DORCHESTER,
-}
-
-
-def extract_labeled_event_location(raw_text: Any) -> str:
-    raw = str(raw_text or "")
-    matches = list(_LABEL_PATTERN.finditer(raw))
-    selected = ""
-    for index, match in enumerate(matches):
-        if match.group(1).lower() not in {"location", "where"}:
+def _parse_clock(value: Any) -> Optional[time]:
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        total = int(value.total_seconds())
+        hours, rem = divmod(total, 3600)
+        minutes, seconds = divmod(rem, 60)
+        return time(hour=hours % 24, minute=minutes, second=seconds)
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
             continue
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
-        value = raw[match.end():end].strip().splitlines()[0].strip(" ,;|")
-        if value:
-            selected = value[:300]
-    return selected
+    return None
 
 
-def classify_event_location(row: Mapping[str, Any]) -> EventLocationStatus:
-    location = extract_labeled_event_location(row.get("raw_text"))
-    normalized = _normalize_location(location)
-    if normalized in {"virtual", "online", "online only", "virtual event"}:
-        return EventLocationStatus.VIRTUAL
-    return _EXACT_LOCATION_REGISTRY.get(normalized, EventLocationStatus.UNKNOWN)
+def _event_still_active(row: Mapping[str, Any], *, now: datetime, upcoming: bool) -> bool:
+    if not upcoming:
+        return True
+    start_raw = row.get("start_date")
+    end_raw = row.get("end_date") or start_raw
+    try:
+        start_day = date.fromisoformat(str(start_raw))
+        end_day = date.fromisoformat(str(end_raw))
+    except (TypeError, ValueError):
+        return False
+    today = now.date()
+    if end_day < today:
+        return False
+    if end_day > today:
+        return True
+    # Ends today — honor end_time when present.
+    end_clock = _parse_clock(row.get("end_time"))
+    if end_clock is None:
+        return True
+    return datetime.combine(end_day, end_clock, tzinfo=NEW_YORK) > now
 
 
-def _location_matches(
-    requested: CanonicalLocation,
-    actual: EventLocationStatus,
-) -> bool:
-    if requested.id == "dorchester":
-        return actual in {EventLocationStatus.DORCHESTER, EventLocationStatus.CODMAN_SQUARE}
-    if requested.id == "codman_square":
-        return actual is EventLocationStatus.CODMAN_SQUARE
-    if requested.id == "fields_corner":
-        return actual is EventLocationStatus.FIELDS_CORNER
-    return False
-
-
-def retrieve_events(conn: Any, plan: EventQueryPlan) -> Tuple[List[Dict[str, Any]], int]:
+def retrieve_events(
+    conn: Any,
+    plan: EventQueryPlan,
+    *,
+    now: Optional[datetime] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
     if plan.status is not EventPlanStatus.READY:
         return [], 0
+    local_now = resolve_app_now(now)
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
@@ -498,12 +617,29 @@ def retrieve_events(conn: Any, plan: EventQueryPlan) -> Tuple[List[Dict[str, Any
         candidates = [dict(row) for row in cursor.fetchall()]
     finally:
         cursor.close()
-    if plan.location is None:
-        return candidates[:MAX_RESULT_ROWS], len(candidates)
-    matches = [
-        row for row in candidates
-        if _location_matches(plan.location, classify_event_location(row))
+
+    active = [
+        row
+        for row in candidates
+        if _event_still_active(row, now=local_now, upcoming=plan.upcoming_intent)
     ]
+    if plan.location is None:
+        return active[:MAX_RESULT_ROWS], len(candidates)
+    matches = []
+    for row in active:
+        relevance = classify_event_relevance(row)
+        if matches_requested_scope(
+            requested_location_id=plan.location.id,
+            relevance=relevance,
+            modality=plan.modality,
+        ):
+            enriched = dict(row)
+            enriched["_relevance_kind"] = relevance.kind.value
+            enriched["_display_location"] = (
+                "Virtual" if relevance.is_virtual else relevance.display_location
+            )
+            enriched["_is_virtual"] = relevance.is_virtual
+            matches.append(enriched)
     return matches[:MAX_RESULT_ROWS], len(candidates)
 
 
@@ -534,12 +670,20 @@ def _event_line(row: Mapping[str, Any]) -> str:
     time_label = start_time
     if start_time and end_time and end_time != start_time:
         time_label = f"{start_time}–{end_time}"
-    location = extract_labeled_event_location(row.get("raw_text"))
+    location = row.get("_display_location") or extract_labeled_event_location(row.get("raw_text"))
+    if row.get("_is_virtual"):
+        location = "Virtual"
     details = [item for item in (event_date, time_label, location) if item]
     suffix = f" — {'; '.join(details)}" if details else ""
     url = prepared_sql._extract_event_url(str(row.get("raw_text") or ""))
     title = f"[{name}]({url})" if url else name
-    return f"- **{title}**{suffix}"
+    source = str(row.get("source_pdf") or "").strip()
+    source_bit = f" ({source})" if source and source.lower() not in {"codman", "csndc"} else ""
+    if source.lower() == "codman":
+        source_bit = " (Codman Square Health Center)"
+    elif source.lower() == "csndc":
+        source_bit = " (CSNDC)"
+    return f"- **{title}**{suffix}{source_bit}"
 
 
 def build_event_sources(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, str]]:
@@ -579,29 +723,57 @@ def compose_event_answer(
 
     date_label = _human_date_range(plan)
     location_name = _location_name(plan.location)
+    remaining_prefix = ""
+    if (
+        plan.upcoming_intent
+        and plan.semantic_label_code
+        in {TimeLabelCode.THIS_CALENDAR_WEEK.value, TimeLabelCode.THIS_WEEK.value}
+        and EventPlanReason.UPCOMING_FLOOR_APPLIED in plan.reason_codes
+    ):
+        remaining_prefix = "remaining "
+
     if not rows:
-        if location_name:
+        if location_name and location_name != "Dorchester":
             return (
-                "I couldn't find any events in the current listings with a location "
-                f"explicitly confirmed as {location_name} for {date_label}. Some listings "
-                "may omit neighborhood information."
+                f"I couldn't find any events with a location confirmed in {location_name} "
+                f"for {date_label}. I can also show events across the rest of Dorchester."
+            )
+        if location_name == "Dorchester":
+            return (
+                f"I couldn't find any events in the current Dorchester listings for "
+                f"{date_label}."
             )
         return f"I couldn't find any events in the current listings for {date_label}."
 
-    opening = "Here are the events in the current listings"
-    if location_name:
-        opening += f" confirmed for {location_name}"
-    opening += f" for {date_label}."
-    lines = [opening, "", *(_event_line(row) for row in rows)]
-    unknown_count = max(0, candidate_count - len(rows))
-    if plan.location is not None and unknown_count:
-        lines.extend(
-            (
-                "",
-                "Some other listings in this date range were not included because their "
-                "location could not be confirmed for the requested area.",
-            )
+    virtual_rows = [row for row in rows if row.get("_is_virtual")]
+    physical_rows = [row for row in rows if not row.get("_is_virtual")]
+
+    if location_name == "Dorchester" and virtual_rows and not physical_rows:
+        opening = (
+            f"I found these Dorchester-serving virtual events for {date_label}. "
+            "I did not find a physical Dorchester location confirmed for another event "
+            "in that period."
         )
+    elif location_name == "Dorchester":
+        opening = (
+            f"Here are the {remaining_prefix}events in the current Dorchester listings "
+            f"for {date_label}."
+        )
+    elif location_name:
+        opening = (
+            f"Here are the {remaining_prefix}events in the current listings for "
+            f"{location_name} for {date_label}."
+        )
+    else:
+        opening = f"Here are the {remaining_prefix}events in the current listings for {date_label}."
+
+    if plan.modality == "virtual":
+        opening = (
+            f"Here are the {remaining_prefix}virtual events in the current "
+            f"{location_name or 'Dorchester'} listings for {date_label}."
+        )
+
+    lines = [opening, "", *(_event_line(row) for row in rows)]
     return "\n".join(lines)
 
 
@@ -615,7 +787,7 @@ def build_event_cache(
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     cache = copy.deepcopy(dict(base_cache))
-    timestamp = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK).isoformat()
+    timestamp = resolve_app_now(now).isoformat()
     cache.update(
         {
             "mode": "structured_events",
@@ -650,7 +822,7 @@ def event_cache_matches(
             created = created.replace(tzinfo=NEW_YORK)
     except (TypeError, ValueError):
         return False
-    current = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK)
+    current = resolve_app_now(now)
     age = (current - created.astimezone(NEW_YORK)).total_seconds()
     return 0 <= age <= EVENT_CACHE_TTL_SECONDS
 
@@ -666,3 +838,26 @@ def cached_event_result(cache: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]],
         if isinstance(sources, list)
         else [],
     )
+
+
+__all__ = [
+    "EventLocationStatus",
+    "EventPlanReason",
+    "EventPlanStatus",
+    "EventQueryDimension",
+    "EventQueryPlan",
+    "EventRelevanceKind",
+    "build_event_cache",
+    "build_event_sources",
+    "cached_event_result",
+    "classify_event_location",
+    "classify_event_relevance",
+    "compose_event_answer",
+    "event_cache_matches",
+    "extract_labeled_event_location",
+    "is_default_sidebar_event",
+    "is_direct_event_list_request",
+    "is_historical_event_intent",
+    "plan_event_query",
+    "retrieve_events",
+]

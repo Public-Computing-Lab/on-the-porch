@@ -243,7 +243,6 @@ def test_references_and_unsupported_filters() -> None:
     event_state = _events_state(location="codman_square")
     for message in (
         "Only show free ones.",
-        "Only show virtual events.",
         "Only show morning events.",
         "Only show events where registration is required.",
     ):
@@ -251,6 +250,15 @@ def test_references_and_unsupported_filters() -> None:
         assert unsupported.status is EventPlanStatus.UNSUPPORTED, message
         assert unsupported.cache_signature() is None
         assert "can't reliably filter" in compose_event_answer(unsupported, [])
+
+    virtual = _plan(
+        "Only show virtual events.",
+        event_state,
+        ConversationRelationship.REFINEMENT,
+    )
+    assert virtual.status is EventPlanStatus.READY
+    assert virtual.modality == "virtual"
+    assert virtual.location.id == "codman_square"
 
 
 def test_authoritative_location_filtering() -> None:
@@ -267,6 +275,7 @@ def test_authoritative_location_filtering() -> None:
     )
     unknown = _row(900, "Codman Organizer Event", "Florian Hall, 55 Hallet St, Boston")
     virtual = _row(901, "Codman Online Event", "Virtual")
+    baby = _row(902, "Virtual Baby Cafe", "Virtual")
     assert classify_event_location(codman) is EventLocationStatus.CODMAN_SQUARE
     assert classify_event_location(dorchester) is EventLocationStatus.DORCHESTER
     assert classify_event_location(unknown) is EventLocationStatus.UNKNOWN
@@ -284,21 +293,21 @@ def test_authoritative_location_filtering() -> None:
         ConversationState(),
         ConversationRelationship.STANDALONE,
     )
-    conn = _Connection([codman, dorchester, unknown, virtual])
+    conn = _Connection([codman, dorchester, unknown, virtual, baby])
     rows, candidates = retrieve_events(conn, plan)
-    assert [row["id"] for row in rows] == [436]
-    assert candidates == 4
+    assert [row["id"] for row in rows] == [436, 902]
+    assert candidates == 5
     assert conn.cursor_value.params == ("2026-07-20", "2026-07-18", 100)
     assert "%s" in conn.cursor_value.sql and "CURDATE" not in conn.cursor_value.sql
 
     answer = compose_event_answer(plan, rows, candidate_count=candidates)
-    assert "confirmed for Codman Square" in answer
+    assert "Codman Square" in answer
+    assert "Virtual Baby Cafe" in answer
     assert "Codman Organizer Event" not in answer
     assert "Codman Online Event" not in answer
-    assert "location could not be confirmed" in answer
 
     empty_answer = compose_event_answer(plan, [], candidate_count=2)
-    assert "explicitly confirmed as Codman Square" in empty_answer
+    assert "Codman Square" in empty_answer
     assert "no events exist" not in empty_answer.lower()
     assert "nothing is happening" not in empty_answer.lower()
 
@@ -327,7 +336,9 @@ def test_cache_signature_and_bounded_plan() -> None:
         "topic": "EVENTS",
         "start_date": "2026-07-18",
         "end_date_exclusive": "2026-07-20",
-        "location_id": "codman_square",
+        "location_id": "dorchester",
+        "subarea_id": "codman_square",
+        "modality": None,
         "filters": {},
     }
     assert "What events" not in json.dumps(cache["event_query_signature"])

@@ -258,7 +258,11 @@ def infer_metric(question: str) -> Optional[str]:
 
 
 def days_ahead_from_question(question: str, default: int = 14) -> int:
-    """Forward-looking window for upcoming events/calendar queries."""
+    """Forward-looking window for upcoming events/calendar queries.
+
+    Prefer calendar semantics where possible. "Next week" is the next Monday–Sunday
+    calendar week (up to 13 days ahead from a Friday), not a flat 14-day roll.
+    """
     q = (question or "").lower()
     if "today" in q:
         return 1
@@ -266,10 +270,15 @@ def days_ahead_from_question(question: str, default: int = 14) -> int:
         return 2
     if "this weekend" in q or ("weekend" in q and "next" not in q):
         return 7
+    if "next 14 days" in q or "next fourteen days" in q:
+        return 14
+    if "over the next week" in q or "next seven days" in q or "next 7 days" in q:
+        return 7
     if "this week" in q:
         return 7
     if "next week" in q:
-        return 14
+        # Conservative upper bound covering the remainder of this week + next week.
+        return 13
     if "this month" in q:
         return 30
     if "next month" in q:

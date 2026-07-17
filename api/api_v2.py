@@ -3317,6 +3317,7 @@ def _state_aware_event_agent_result(
         dimensions=dimensions,
         state=state,
         event_list_requested=True,
+        message=message,
     )
     if plan is None:
         return None, None
@@ -5317,11 +5318,20 @@ def events():
         return result
 
     limit = max(1, min(request.args.get("limit", 10, type=int), 100))
-    days_ahead = max(1, min(request.args.get("days_ahead", 7, type=int), 365))
+    days_ahead = max(1, min(request.args.get("days_ahead", 14, type=int), 365))
+    scope = str(request.args.get("scope") or "dorchester").strip().lower()
 
     conn = None
     cursor = None
     try:
+        from conversation_dimensions import resolve_app_now
+        from event_query_context import classify_event_relevance, is_default_sidebar_event
+        from event_relevance import extract_labeled_event_location
+
+        today = resolve_app_now().date()
+        # Match prior inclusive sidebar window: today .. today+days_ahead inclusive.
+        end_exclusive = today + datetime.timedelta(days=days_ahead + 1)
+
         conn = get_db_connection()
         from materialized_views import events_query_source, is_materialized_views_enabled
 
@@ -5333,16 +5343,19 @@ def events():
             SELECT id, event_name, event_date, start_date, end_date,
                    start_time, end_time, raw_text, source_pdf{url_col}
             FROM {source_table}
-            WHERE start_date >= CURDATE()
-              AND start_date <= DATE_ADD(CURDATE(), INTERVAL %s DAY)
+            WHERE start_date >= %s
+              AND start_date < %s
             ORDER BY start_date ASC, start_time ASC
             LIMIT %s
             """,
-            (days_ahead, limit),
+            (today.isoformat(), end_exclusive.isoformat(), max(limit * 5, 50)),
         )
         rows = cursor.fetchall()
         events_list = []
         for row in rows:
+            if scope in {"dorchester", "default"} and not is_default_sidebar_event(row):
+                continue
+            relevance = classify_event_relevance(row)
             event_url = row.get("event_url") if source_table == "events_materialized" else None
             if not event_url and row.get("raw_text"):
                 match = re.search(
@@ -5350,6 +5363,11 @@ def events():
                 )
                 if match:
                     event_url = match.group(1).rstrip(").,]")
+            location_label = (
+                "Virtual"
+                if relevance.is_virtual
+                else (relevance.display_location or extract_labeled_event_location(row.get("raw_text")))
+            )
             events_list.append(
                 {
                     "id": row["id"],
@@ -5362,17 +5380,24 @@ def events():
                     "description": row["raw_text"],
                     "source": row["source_pdf"],
                     "url": event_url,
+                    "location_label": location_label,
+                    "modality": "virtual" if relevance.is_virtual else "in_person",
+                    "relevance_kind": relevance.kind.value,
                 }
             )
+            if len(events_list) >= limit:
+                break
         return jsonify({
             "events": events_list,
             "total": len(events_list),
+            "scope": "dorchester",
+            "title": "Upcoming Dorchester Events",
             "source_table": source_table,
             "materialized": is_materialized_views_enabled(),
         })
     except mysql.connector.Error as exc:
         if getattr(exc, "errno", None) == 1146:
-            return jsonify({"events": [], "total": 0})
+            return jsonify({"events": [], "total": 0, "scope": "dorchester"})
         _log_exception("Error in /events", exc)
         return _json_error("Failed to fetch events.", 500, "events_failed")
     except Exception as exc:

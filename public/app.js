@@ -874,6 +874,8 @@ function renderEvents(events) {
     const start = formatTime(event.start_time);
     const end = formatTime(event.end_time);
     const timeLabel = start && end ? `${start} - ${end}` : (start || '');
+    const locationLabel = event.location_label
+      || (event.modality === 'virtual' ? 'Virtual' : '');
     const description = String(event.description || 'No description available.');
     const descriptionId = `event-description-${index}`;
 
@@ -881,6 +883,7 @@ function renderEvents(events) {
       <div class="event-date">${escapeHtml(date)}</div>
       <div class="event-title">${escapeHtml(event.event_name || 'Community Event')}</div>
       ${timeLabel ? `<div class="event-time">${escapeHtml(timeLabel)}</div>` : ''}
+      ${locationLabel ? `<div class="event-location">${escapeHtml(locationLabel)}</div>` : ''}
       <div class="event-description">
         <div class="event-description-text is-clamped" id="${descriptionId}">${escapeHtml(description)}</div>
         <button class="event-description-toggle" type="button" data-description-id="${descriptionId}" aria-expanded="false" hidden>...see more</button>
