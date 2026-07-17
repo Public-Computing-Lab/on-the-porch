@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Seed/cleanup synthetic staging fixtures. Refuses unsafe database names.
+"""Seed/cleanup synthetic staging fixtures with fail-closed identity guards.
 
-Requires --i-am-staging and staging-looking MYSQL_DB. Never prints passwords.
+Requires:
+  OTP_STAGING_MUTATION_OK=1
+  MYSQL_DB matching staging allowlist (or OTP_STAGING_MYSQL_DB contract)
+  --apply and/or --cleanup
+
+Never prints passwords. Fixture names always include OTP STAGING FIXTURE.
 """
 
 from __future__ import annotations
@@ -10,61 +15,43 @@ import argparse
 import os
 import sys
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from datetime import datetime
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Never allow these identities to be treated as staging targets.
-FORBIDDEN_DB_NAMES = {
-    "",
-    "mysql",
-    "information_schema",
-    "performance_schema",
-    "sys",
-}
+from identity import assert_staging_mutation_allowed  # noqa: E402
+
+FIXTURE_PREFIX = "OTP STAGING FIXTURE "
 
 
 def _ny_today():
     return datetime.now(ZoneInfo("America/New_York")).date()
 
 
-def _assert_safe_target(db_name: str) -> None:
-    name = (db_name or "").strip().lower()
-    if name in FORBIDDEN_DB_NAMES:
-        raise SystemExit(f"Refusing database name {db_name!r}")
-    if "prod" in name and "staging" not in name:
-        raise SystemExit(
-            f"Refusing database name {db_name!r}: looks like production. "
-            "Use an explicitly staging-named schema."
-        )
-
-
-def _connect():
+def _connect(db_name: str):
     import mysql.connector
 
-    host = os.getenv("MYSQL_HOST", "")
-    user = os.getenv("MYSQL_USER", "")
-    db = os.getenv("MYSQL_DB", "")
-    _assert_safe_target(db)
     return mysql.connector.connect(
-        host=host,
+        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
         port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=user,
+        user=os.getenv("MYSQL_USER", ""),
         password=os.getenv("MYSQL_PASSWORD", ""),
-        database=db,
+        database=db_name,
     )
 
 
-def seed(conn) -> None:
+def seed(conn) -> str:
     start = _ny_today() + timedelta(days=7)
     marker = uuid.uuid4().hex[:10]
-    name = f"OTP STAGING FIXTURE {marker}"
+    name = f"{FIXTURE_PREFIX}{marker}"
     event_date = f"{start.strftime('%A')}, {start.strftime('%B')} {start.day}"
     cur = conn.cursor()
     try:
+        # Idempotent-ish: remove any prior row with same marker pattern not needed;
+        # each seed creates a unique marker. Cleanup deletes by prefix.
         cur.execute(
             """
             INSERT INTO weekly_events (
@@ -84,7 +71,10 @@ def seed(conn) -> None:
                 start,
                 "10:00:00",
                 "11:00:00",
-                f"Synthetic staging fixture only ({name}). Not official civic data.",
+                (
+                    f"SYNTHETIC/TEST ONLY ({name}). Not official civic data. "
+                    "Do not treat as current civic truth."
+                ),
                 "community",
                 name.lower(),
             ),
@@ -97,7 +87,9 @@ def seed(conn) -> None:
                   id, event_name, event_date, start_date, end_date,
                   start_time, end_time, raw_text, source_pdf, event_url
                 ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON DUPLICATE KEY UPDATE event_name=VALUES(event_name)
+                ON DUPLICATE KEY UPDATE
+                  event_name=VALUES(event_name),
+                  raw_text=VALUES(raw_text)
                 """,
                 (
                     event_id,
@@ -107,7 +99,7 @@ def seed(conn) -> None:
                     start,
                     "10:00:00",
                     "11:00:00",
-                    f"Synthetic staging fixture only ({name}).",
+                    f"SYNTHETIC/TEST ONLY ({name}).",
                     "otp-staging-fixture.pdf",
                     None,
                 ),
@@ -118,44 +110,48 @@ def seed(conn) -> None:
         print(f"seeded_event_id={event_id}")
         print(f"seeded_event_name={name}")
         print(f"seeded_start_date={start}")
+        return name
     finally:
         cur.close()
 
 
-def cleanup(conn) -> None:
+def cleanup(conn) -> int:
     cur = conn.cursor()
     try:
+        deleted = 0
         try:
             cur.execute(
-                "DELETE FROM events_materialized WHERE event_name LIKE 'OTP STAGING FIXTURE%'"
+                "DELETE FROM events_materialized WHERE event_name LIKE %s",
+                (f"{FIXTURE_PREFIX}%",),
             )
+            deleted += cur.rowcount or 0
         except Exception:
             pass
         cur.execute(
-            "DELETE FROM weekly_events WHERE event_name LIKE 'OTP STAGING FIXTURE%'"
+            "DELETE FROM weekly_events WHERE event_name LIKE %s",
+            (f"{FIXTURE_PREFIX}%",),
         )
+        deleted += cur.rowcount or 0
         conn.commit()
-        print(f"cleanup_weekly_events_rows={cur.rowcount}")
+        print(f"cleanup_fixture_rows={deleted}")
+        return deleted
     finally:
         cur.close()
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Staging fixture seed/cleanup (fail-closed identity guards)."
+    )
     parser.add_argument("--apply", action="store_true", help="Seed fixtures")
-    parser.add_argument("--cleanup", action="store_true", help="Remove staging fixtures")
+    parser.add_argument("--cleanup", action="store_true", help="Remove fixture-owned rows only")
     parser.add_argument(
-        "--i-am-staging",
+        "--dry-run",
         action="store_true",
-        help="Required acknowledgement that MYSQL_* points at staging",
+        help="Validate identity guards and print target; do not mutate",
     )
     args = parser.parse_args()
-    if not args.i_am_staging:
-        raise SystemExit("Refusing: pass --i-am-staging after verifying MYSQL_DB is staging-only")
-    if not args.apply and not args.cleanup:
-        raise SystemExit("Specify --apply and/or --cleanup")
 
-    # Load env without printing
     try:
         from dotenv import load_dotenv
 
@@ -163,13 +159,26 @@ def main() -> int:
     except Exception:
         pass
 
-    db = os.getenv("MYSQL_DB", "")
+    try:
+        db = assert_staging_mutation_allowed()
+    except RuntimeError as exc:
+        print(f"REFUSED: {exc}")
+        return 2
+
     host = os.getenv("MYSQL_HOST", "")
     print(f"target_host={host}")
     print(f"target_db={db}")
-    _assert_safe_target(db)
+    print("mutation_ok=OTP_STAGING_MUTATION_OK")
 
-    conn = _connect()
+    if args.dry_run:
+        print("dry_run=True (no mutation)")
+        return 0
+
+    if not args.apply and not args.cleanup:
+        print("REFUSED: specify --apply and/or --cleanup (or --dry-run)")
+        return 2
+
+    conn = _connect(db)
     try:
         if args.cleanup:
             cleanup(conn)

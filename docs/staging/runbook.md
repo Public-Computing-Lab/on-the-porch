@@ -1,28 +1,45 @@
 # Staging deployment and rollback runbook
 
-## 1. Pre-deployment checks
+**Scope:** staging preparation and future staging deployment only.
+**Status:** remote staging resources are not assumed available. Do not treat this
+document as evidence that staging was validated.
 
-- [ ] Staging FQDN + TLS confirmed
-- [ ] Staging MySQL identity confirmed ≠ production and ≠ local demo
-- [ ] Secrets present on host only (mode 600)
-- [ ] `git rev-parse HEAD` matches intended commit
-- [ ] Backup location writable
-- [ ] Operator approval for staging-only mutation
+Every destructive or remote step below lists prerequisites, expected result,
+recovery, and stop condition. **Never put real secrets in commands or tickets.**
 
-## 2. Repository revision verification
+---
+
+## 1. Resource identity verification
+
+- **Prerequisites:** operator checklist filled (`operator_prerequisites.md`).
+- **Expected:** staging FQDN ≠ production; app path ≠ production path.
+- **Recovery:** stop; do not continue.
+- **Stop if:** any production identity is uncertain.
+
+## 2. Staging database verification
+
+- **Prerequisites:** staging MySQL host/db/user confirmed staging-only.
+- **Expected:** `MYSQL_DB` matches staging contract; not `sentiment_demo` / production.
+- **Recovery:** refuse mutation (`OTP_STAGING_MUTATION_OK` unset).
+- **Stop if:** DB identity uncertain.
+
+## 3. Repository commit verification
 
 ```bash
 cd "$STAGING_APP_DIR"
 git fetch origin
 git checkout <intended-sha>
 git rev-parse HEAD
-git status -sb   # must be clean of secret files
+git status -sb
 ```
 
-## 3. Backup
+- **Expected:** clean tree; SHA matches intended merge/main commit.
+- **Stop if:** unexpected secrets or uncommitted dumps present.
+
+## 4. Backup before migration
 
 ```bash
-# Example shape — substitute staging identity; never log passwords.
+# Interactive password prompt — do not embed passwords in shell history.
 mysqldump --single-transaction --routines --triggers \
   -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p \
   "$MYSQL_DB" | gzip > "$BACKUP_DIR/staging-${MYSQL_DB}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
@@ -30,93 +47,131 @@ sha256sum "$BACKUP_DIR"/staging-*.sql.gz | tee "$BACKUP_DIR/SHA256SUMS"
 chmod 600 "$BACKUP_DIR"/*
 ```
 
-Record: timestamp, DB name (not password), file size, checksum, path, retention (suggest 14 days staging).
+- **Expected:** nonzero gzip; checksum recorded; metadata without credentials.
+- **Recovery:** do not migrate until backup succeeds.
+- **Stop if:** backup path world-readable or dump fails.
 
-## 4. Dependency installation
+## 5. Dependency installation
 
 ```bash
-source venv/bin/activate   # or .venv
+source .venv/bin/activate   # or venv
 pip install -r requirements.txt
 ```
 
-## 5. Migration
+- **Expected:** install completes.
+- **Stop if:** wrong Python / missing gunicorn.
+
+## 6. Migration
 
 ```bash
 PYTHONPATH=api:. python - <<'PY'
 from api.db_migrations import run_migrations
-from api.api_v2 import get_db_connection  # or staging connection factory
+# Use the staging app's connection factory only.
+from api.api_v2 import get_db_connection
 run_migrations(get_db_connection)
 PY
 ```
 
-Verify `schema_migrations` contains through `011_conversation_turns.sql` (and peers).
+- **Expected:** `schema_migrations` includes through `011_conversation_turns.sql`.
+- **Recovery:** restore from backup; do not invent DROP scripts casually.
+- **Stop if:** migration errors or wrong DB.
 
-## 6. Environment validation
+## 7. Environment validation
 
 ```bash
 PRODUCTION_MODE=true PYTHONPATH=api python -c \
   'from launch_runtime import assert_launch_runtime; assert_launch_runtime(production_mode=True)'
 ```
 
-## 7. Process restart
+- **Expected:** exit 0; category errors only on failure (no secret values).
+- **Stop if:** validation fails.
 
-Stop previous staging Gunicorn **only** (never production). Start:
+## 8. Gunicorn startup
 
 ```bash
 PRODUCTION_MODE=true ./start_api.sh
 ```
 
-## 8. Health verification
+- **Prerequisites:** steps 1–7; TLS terminator ready.
+- **Expected:** bind behind proxy; launch-runtime ok.
+- **Recovery:** stop staging process only; fix env; restart.
+- **Stop if:** Passenger/legacy path is the only option without written exception.
+
+## 9. HTTPS health check
 
 ```bash
 curl -fsS "https://$STAGING_HOST/health"
-# expect: {"status":"ok",...} minimal fields only
 ```
 
-## 9. Smoke tests
+- **Expected:** minimal `status` (+ optional `version`); no internals.
+- **Stop if:** HTTP-only or leaked fields.
+
+## 10. Admin readiness check
 
 ```bash
-python scripts/staging/smoke_https.py --base-url "https://$STAGING_HOST"
-python scripts/staging/validate_startup_failures.py  # local synthetic; optional on host
+curl -sS -o /dev/null -w "%{http_code}\n" "https://$STAGING_HOST/admin/health/ready"
+# anonymous → 401/403
+# staging admin → success per admin contract
 ```
 
-## 10. Log verification
+- **Stop if:** publicly accessible without auth.
 
-Inspect Gunicorn error log for `request_completion` JSON lines; confirm no resident text.
+## 11. SSE validation
 
-## 11. Rollback criteria
+Exercise deterministic event + emergency + disconnect/replay with same `client_turn_id`
+through the **real** staging proxy. Confirm no buffering until completion; one message pair.
 
-Roll back if: startup fail-closed broken, health leaks internals, SSE unusable,
-duplicate turns under retry, MySQL connection budget exceeded, uncontrolled 5xx,
-secrets in logs, or staging points at production data.
+- **Stop if:** SSE unusable or duplicates.
 
-## 12. Rollback steps (application)
+## 12. Session and CSRF validation
+
+Guest + authenticated flows over HTTPS; secure cookies; CSRF functional.
+
+- **Stop if:** cookies set without Secure or CSRF bypassed.
+
+## 13. Smoke dialogues
+
+Use staging fixtures only (synthetic markers). Cover events, active event, emergency,
+freshness, idempotent replay. No production resident text.
+
+## 14. Structured log review
+
+Sample `request_completion` lines: one per request; no resident/answer/emergency text;
+no tokens/CSRF/`client_turn_id`.
+
+## 15. Connection-budget measurement
+
+Fill `connection_budget.md` from staging MySQL permissions. Prefer conservative workers/pool.
+
+- **Stop if:** limit UNKNOWN without a conservative soft cap.
+
+## 16. Cleanup dry run
 
 ```bash
-git checkout <previous-known-good-sha>
-# re-validate env
-PRODUCTION_MODE=true ./start_api.sh
-curl -fsS "https://$STAGING_HOST/health"
+python scripts/cleanup_conversation_turns.py   # dry-run default
+# Fixture cleanup:
+OTP_STAGING_MUTATION_OK=1 OTP_STAGING_MYSQL_DB="$MYSQL_DB" \
+  python scripts/staging/seed_fixtures.py --cleanup
 ```
 
-## 13. Database rollback considerations
+- **Stop if:** would touch non-fixture / non-staging data.
 
-Additive migrations (`civic_source_status`, `conversation_turns`, …) are generally
-**forward-compatible** for application rollback, but **not automatically reversible**.
-Do not DROP staging tables without an explicit restore from backup.
-Document whether the previous app revision can run against the newer schema (usually yes
-for additive columns/tables).
+## 17. Backup restore test
 
-## 14. Post-rollback verification
+Restore into disposable staging schema when permitted; verify schema + startup against copy.
 
-Health, one guest conversation JSON, one SSE deterministic path, admin readiness 401 for guest.
+- **Stop / mark BLOCKED** if restore permissions unavailable (blocks production approval).
 
-## Rollback rehearsal (required before production approval)
+## 18. Rollback rehearsal
 
-When staging host exists:
+Deploy current → smoke → prior SHA → smoke → restore current → smoke. Staging only.
 
-1. Deploy current staging revision → smoke.
-2. Roll back to prior known-good → smoke.
-3. Restore current revision → smoke.
+## 19. Promotion decision
 
-**This rehearsal is BLOCKED until staging SSH/process control is available.**
+Staging validation is successful only when blockers in `docs/staging/README.md` are cleared.
+**This preparation PR does not authorize production.**
+
+## 20. Process shutdown where required
+
+Stop staging Gunicorn when the slice is complete and the service is not needed.
+Never stop unrelated operator processes (e.g. local `:8888`).

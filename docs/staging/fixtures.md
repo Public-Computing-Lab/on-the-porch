@@ -21,18 +21,25 @@
 
 ## Cleanup
 
-```sql
--- Illustrative; run only on staging schema after verifying MYSQL_DB name.
-DELETE FROM weekly_events WHERE event_name LIKE 'OTP STAGING FIXTURE%';
-DELETE FROM events_materialized WHERE event_name LIKE 'OTP STAGING FIXTURE%';
--- users/sessions: delete by staging email domain only after confirming schema
+```bash
+OTP_STAGING_MUTATION_OK=1 OTP_STAGING_MYSQL_DB="$MYSQL_DB" \
+  python scripts/staging/seed_fixtures.py --cleanup
 ```
 
-Also: `scripts/staging/seed_fixtures.py --apply` / `--cleanup` (refuses forbidden DB names).
+Also dry-run identity only:
 
-## Reset procedure
+```bash
+OTP_STAGING_MUTATION_OK=1 OTP_STAGING_MYSQL_DB="$MYSQL_DB" \
+  python scripts/staging/seed_fixtures.py --dry-run
+```
 
-1. Confirm `MYSQL_DB` is staging.
-2. Backup.
-3. `--cleanup` then `--apply`.
-4. Re-run smoke.
+Ordinary cleanup deletes only rows whose `event_name` starts with `OTP STAGING FIXTURE `.
+
+## Local disposable prep note
+
+Creating a separate MySQL schema may be unavailable under least-privilege demo users.
+Local fixture exercises may use the dual gate
+`OTP_STAGING_ALLOW_FORBIDDEN_DB_FOR_LOCAL_PREP=1` **together with**
+`OTP_STAGING_MYSQL_DB` + `OTP_STAGING_MUTATION_OK=1` so only prefix-labeled rows are
+touched. That gate is for local preparation tests only and does **not** mean remote
+staging validation occurred.

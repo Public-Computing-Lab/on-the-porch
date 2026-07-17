@@ -13,7 +13,11 @@ from typing import Dict
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "api"))
 
-from launch_runtime import validate_launch_runtime  # noqa: E402
+from launch_runtime import (  # noqa: E402
+    legacy_chat_enabled,
+    require_client_turn_id,
+    validate_launch_runtime,
+)
 
 
 def _strong(seed: str) -> str:
@@ -59,54 +63,71 @@ CASES = [
     ("vector_writes", {"CHAT_VECTOR_WRITES_ENABLED": "true"}),
     ("fault_injection", {"OTP_TURN_IDEMPOTENCY_FAULTS": "1"}),
     ("missing_rate_limit_policy", {"RATE_LIMIT_ENABLED": ""}),
+    ("wildcard_cors", {"ALLOWED_ORIGINS": "*"}),
+    ("missing_cors", {"ALLOWED_ORIGINS": ""}),
     ("legacy_chat_enabled", {"LEGACY_CHAT_ENABLED": "true"}),
     ("missing_mysql", {"MYSQL_HOST": "", "MYSQL_DB": "", "MYSQL_USER": ""}),
 ]
 
 
+def _assert_no_secret_leak(blob: str, *secrets: str) -> None:
+    for secret in secrets:
+        if secret and len(secret) > 8 and secret in blob:
+            raise AssertionError("secret value leaked in validator output")
+
+
 def main() -> int:
     print("Staging startup-failure categories (synthetic env)")
     failed = 0
-    # Valid baseline must pass.
     ok = validate_launch_runtime(production_mode=True, env=_base())
     if not ok.ok:
-        print("FAIL baseline valid config:", ok.errors)
+        print("FAIL baseline valid config:", "; ".join(ok.errors))
         return 1
     print("PASS baseline_valid_config")
 
     for name, overrides in CASES:
         result = validate_launch_runtime(production_mode=True, env=_base(**overrides))
-        blob = " ".join(result.errors + list(getattr(result, "warnings", []) or []))
-        secret = overrides.get("FLASK_SECRET_KEY") or _strong("flask")
-        leaked = secret and secret in blob and len(secret) > 8
-        # Legacy chat is warn-only under current launch_runtime contract.
+        blob = " ".join(result.errors + list(result.warnings or []))
+        try:
+            _assert_no_secret_leak(
+                blob,
+                overrides.get("FLASK_SECRET_KEY", ""),
+                _strong("flask"),
+                _strong("pepper"),
+            )
+        except AssertionError as exc:
+            print(f"FAIL {name}: {exc}")
+            failed += 1
+            continue
+
         if name == "legacy_chat_enabled":
-            warns = " ".join(getattr(result, "warnings", []) or [])
+            warns = " ".join(result.warnings or [])
             if "LEGACY_CHAT" in warns.upper() or "legacy" in warns.lower():
                 print(f"PASS {name}: warn-only ({len(result.warnings)} warning(s))")
             else:
                 print(f"FAIL {name}: expected legacy warning")
                 failed += 1
             continue
+
         if result.ok:
             print(f"FAIL {name}: expected failure")
-            failed += 1
-        elif leaked:
-            print(f"FAIL {name}: secret value leaked in errors")
             failed += 1
         else:
             print(f"PASS {name}: fail-closed ({len(result.errors)} category error(s))")
 
-    # client_turn_id requirement helper
-    from launch_runtime import require_client_turn_id
-
     if not require_client_turn_id(production_mode=True, env=_base()):
-        print("FAIL require_client_turn_id production default")
+        print("FAIL require_client_turn_id production default/true")
         failed += 1
     else:
         print("PASS require_client_turn_id production")
 
-    from launch_runtime import legacy_chat_enabled
+    if require_client_turn_id(
+        production_mode=True, env=_base(REQUIRE_CLIENT_TURN_ID="false")
+    ):
+        print("FAIL require_client_turn_id=false should disable requirement")
+        failed += 1
+    else:
+        print("PASS require_client_turn_id can be explicitly false (policy surface)")
 
     if legacy_chat_enabled(production_mode=True, env=_base(LEGACY_CHAT_ENABLED="false")):
         print("FAIL legacy chat should be off")
@@ -114,7 +135,8 @@ def main() -> int:
     else:
         print("PASS legacy_chat_default_off")
 
-    print(f"\nSummary: {len(CASES) + 3 - failed} checks, {failed} failed")
+    total = len(CASES) + 4
+    print(f"\nSummary: {total - failed}/{total} checks, {failed} failed")
     return 1 if failed else 0
 
 

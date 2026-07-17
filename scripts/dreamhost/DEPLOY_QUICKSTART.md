@@ -1,5 +1,9 @@
 # DreamHost Quick Deploy Guide
 
+> **LEGACY / UNVALIDATED.** Preferred path: `PRODUCTION_MODE=true ./start_api.sh`
+> (Gunicorn + launch-runtime). See `docs/staging/hosting_audit.md`.
+> Passenger steps below must not be treated as the preferred staging or production path.
+
 **Just the commands. No extra info.**
 
 ## 1. SSH into DreamHost

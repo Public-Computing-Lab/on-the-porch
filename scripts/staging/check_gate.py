@@ -21,6 +21,7 @@ def main() -> int:
         "runbook.md",
         "connection_budget.md",
         "fixtures.md",
+        "operator_prerequisites.md",
     ):
         path = docs / name
         print(f"doc_{'ok' if path.is_file() else 'MISSING'} {name}")

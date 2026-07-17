@@ -1,7 +1,9 @@
 # Staging environment contract (categories only)
 
-Copy categories into a **host-local** secret file (e.g. `/path/to/staging/.env`)
-with mode `600`. **Never commit real values.**
+Copy categories into a **host-local staging** secret file (e.g. `/path/to/staging/.env`)
+with mode `600`. **Never commit real values.** This contract describes a **staging**
+environment that uses production-mode hardening; it does **not** claim staging has been
+validated or that DreamHost limits are known.
 
 ## Required (fail closed when `PRODUCTION_MODE=true`)
 

@@ -1,54 +1,56 @@
 # Staging hosting and deployment audit
 
-## Single supported staging startup path
+## SUPPORTED application startup (preferred for staging and production-mode hosts)
 
-**Supported:** `./start_api.sh` → Gunicorn (`api/gunicorn.conf.py`) → `api_v2:app`
+```text
+PRODUCTION_MODE=true ./start_api.sh
+  → Gunicorn (api/gunicorn.conf.py)
+  → launch-runtime validation before bind (+ when_ready)
+  → api_v2:app
+```
 
-Why valid:
+Why this is the supported path:
 
-1. Loads `.env` then rejects Redis backends.
-2. When `PRODUCTION_MODE=true`, runs `assert_launch_runtime(production_mode=True)` **before** bind.
-3. Gunicorn `when_ready` re-validates the same contract.
-4. Flask import path also validates under `PRODUCTION_MODE=true`.
-5. Aligns with PR #18 fail-closed launch hardening.
+1. Rejects Redis backends at shell and validator layers.
+2. Fail-closed `assert_launch_runtime(production_mode=True)` before accepting traffic.
+3. Matches PR #18 launch-runtime hardening.
+4. Compatible with reverse-proxy SSE headers emitted by the app.
 
-**Not supported as primary staging path:** DreamHost Passenger via
-`scripts/dreamhost/deploy.sh` generating `passenger_wsgi.py` + `.htaccess`.
+**Operators must not treat any other path as preferred for staging or production.**
 
-## Stale / conflicting DreamHost materials
+## LEGACY / UNVALIDATED — DreamHost Passenger materials
 
-| Artifact | Issue | Staging guidance |
+The following remain in-tree for historical reference. They are **not** the preferred
+staging or production startup path. Compatibility with current Gunicorn + launch-runtime
+validation is **unverified** and must be validated before any use.
+
+| Artifact | Label | Guidance |
 |---|---|---|
-| `scripts/dreamhost/deploy.sh` | Generates Passenger WSGI; does not run launch-runtime validator; uses `pymysql` ad-hoc connect; hard-codes project dir name | Do **not** use for staging until rewritten for Gunicorn |
-| `scripts/dreamhost/DEPLOY_QUICKSTART.md` | Mentions Passenger panel, `python api_v2.py` for test, PostgreSQL `DATABASE_URL` | Stale relative to MySQL-only + Gunicorn contract |
-| `scripts/dreamhost/README.md` | Passenger-centric | Treat as historical |
-| `scripts/dreamhost/setup.sh` / `database_setup.sh` | Useful patterns for venv/DB bootstrap but not PR #18-aware | Review before reuse; prefer `api/db_migrations.py` |
-| Generated `passenger_wsgi.py` (on host) | Would bypass `start_api.sh` pre-bind validation unless duplicated | Prefer Gunicorn under a process supervisor |
+| `scripts/dreamhost/deploy.sh` | **LEGACY** | Generates Passenger WSGI; **refuses to run** unless `OTP_ALLOW_LEGACY_PASSENGER_DEPLOY=1` |
+| `scripts/dreamhost/DEPLOY_QUICKSTART.md` | **LEGACY** | Passenger panel / stale DB notes |
+| `scripts/dreamhost/README.md` | **LEGACY** (banner) | Points here for supported path |
+| `scripts/dreamhost/setup.sh` / `database_setup.sh` | **LEGACY / REVIEW** | Venv/DB helpers only; prefer `api/db_migrations.py` |
+| Host `passenger_wsgi.py` if generated | **LEGACY** | Bypasses `start_api.sh` pre-bind gate unless duplicated |
 
-## Reverse-proxy assumptions
+Do **not** delete these scripts merely to hide deployment history.
 
-Staging must terminate TLS at the edge and forward to Gunicorn with:
+## Host capabilities required by the supported path (do not assume)
 
-- Correct `X-Forwarded-Proto` / scheme trust **only** from the approved proxy hop
-- SSE-friendly buffering disabled (`X-Accel-Buffering: no` already set by the app for SSE)
-- Idle timeouts ≥ Gunicorn timeout (default 75s) with headroom
+Until operators confirm, treat each as **UNKNOWN**:
 
-Exact proxy product (nginx, Apache+Passenger, DreamHost panel) is **UNKNOWN** until operators confirm the staging host.
+- Persistent Gunicorn (or equivalent) process
+- Reverse-proxy SSE without full-buffering
+- Process restart mechanism
+- Environment variables / secret file
+- Staging-only MySQL
 
-## Scripts that could accidentally target production
+## Reverse-proxy notes (when host exists)
 
-- Any deploy using `$HOME/ml-misi-community-sentiment` without a **staging-specific** directory name
-- Copying production `.env` into staging
-- Running migrations against production `MYSQL_*` values
-- Enabling Passenger on the production domain while testing staging scripts
+- Trust forwarded scheme/client IP only from the approved hop
+- Disable SSE response buffering
+- Idle timeouts ≥ Gunicorn timeout with headroom
 
-**Mitigation:** require distinct staging directory, hostname, and MySQL schema; refuse known production DB names in `scripts/staging/*`.
+## Accidental production targeting
 
-## Smallest safe strategy (when host exists)
-
-1. Separate staging directory + git checkout of validated commit.
-2. Staging-only `.env` (mode 600) per `environment_contract.md`.
-3. `python -m` / `api/db_migrations.py` against staging MySQL after backup.
-4. Start with `PRODUCTION_MODE=true ./start_api.sh` behind HTTPS terminator.
-5. Smoke via `scripts/staging/smoke_https.py --base-url https://<staging>`.
-6. Do not enable Passenger for this slice unless Gunicorn cannot run and a written exception is approved.
+Refuse deploys that reuse production directory names, production `.env`, or production
+`MYSQL_*` without an explicit staging identity contract (`scripts/staging/identity.py`).

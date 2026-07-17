@@ -62,11 +62,14 @@ Until every item above is **AVAILABLE**, staging validation remains **not succes
 ## What this branch provides locally
 
 - Environment **category** contract (no secret values): `docs/staging/environment_contract.md`
+- Operator prerequisite checklist: `docs/staging/operator_prerequisites.md`
 - Deployment / rollback runbook: `docs/staging/runbook.md`
 - Hosting audit vs Passenger: `docs/staging/hosting_audit.md`
 - Connection-budget worksheet template: `docs/staging/connection_budget.md`
 - Fixture + cleanup procedure: `docs/staging/fixtures.md`
-- Local/CI-safe validators and smoke harnesses under `scripts/staging/` (require `--base-url` for remote; refuse production DB names)
+- Local/CI-safe validators and smoke harnesses under `scripts/staging/` (require `--base-url` for remote; fail-closed staging identity guards)
+
+**This documentation does not claim that remote staging has been validated, deployed, or measured for DreamHost connection limits.**
 
 ## Explicit non-actions in this slice
 
