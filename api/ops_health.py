@@ -139,33 +139,39 @@ def validate_production_config(
     embed_provider: str = "gemini",
     vectordb_dir: Optional[Path] = None,
     vector_db_provider: str = "chroma",
+    semantic_cache_backend: Optional[str] = None,
 ) -> Tuple[bool, list[str]]:
-    """Return (ok, warnings/errors) for production deployment settings."""
+    """Return (ok, issues) for production deployment settings.
+
+    Critical fail-closed rules live in ``launch_runtime.validate_launch_runtime``.
+    This helper overlays caller kwargs onto the environment and appends
+    advisory (non-blocking) cost/ops warnings.
+    """
     issues: list[str] = []
     if not production_mode:
         return True, issues
 
-    default_secrets = {
-        "FLASK_SECRET_KEY": "agent-api-secret-2025",
-        "TOKEN_PEPPER": "agent-api-secret-2025",
-    }
-    for env_key, default_val in default_secrets.items():
-        if os.getenv(env_key, default_val) == default_val:
-            issues.append(
-                f"{env_key} is still the default value; set a strong secret in production"
-            )
+    from launch_runtime import validate_launch_runtime
 
-    if cache_backend != "mysql":
-        issues.append(
-            "CACHE_BACKEND must be 'mysql' when PRODUCTION_MODE=true "
-            "(Redis is not supported; MySQL is the only shared cache)"
-        )
+    overlay = dict(os.environ)
+    overlay["PRODUCTION_MODE"] = "true"
+    overlay["CACHE_BACKEND"] = (cache_backend or "").strip().lower()
+    overlay["SEMANTIC_CACHE_BACKEND"] = (
+        (semantic_cache_backend or cache_backend or "").strip().lower()
+    )
+    if semantic_cache_enabled:
+        overlay["SEMANTIC_CACHE_ENABLED"] = "true"
+    else:
+        overlay["SEMANTIC_CACHE_ENABLED"] = "false"
+    # Ensure rate-limit / origins are treated as explicit when already in Config env.
+    if "RATE_LIMIT_ENABLED" not in overlay or not str(
+        overlay.get("RATE_LIMIT_ENABLED") or ""
+    ).strip():
+        overlay["RATE_LIMIT_ENABLED"] = "true"
 
-    if not semantic_cache_enabled:
-        issues.append(
-            "SEMANTIC_CACHE_ENABLED is false; enable in production "
-            "to cut repeat LLM cost"
-        )
+    result = validate_launch_runtime(production_mode=True, env=overlay)
+    issues.extend(result.errors)
+    issues.extend(result.warnings)
 
     if embed_provider == "gemini":
         issues.append(
@@ -205,8 +211,7 @@ def validate_production_config(
                 "prefer gemini-2.5-flash-lite"
             )
 
-    ok = not any("must be" in msg or "missing" in msg for msg in issues)
-    return ok, issues
+    return result.ok, issues
 
 
 def check_311_feed_balance(get_db_connection) -> Dict[str, Any]:

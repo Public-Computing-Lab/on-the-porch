@@ -338,6 +338,122 @@ def _live_db_connection():
     )
 
 
+def _ny_today():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
+def _seed_live_event_fixture(db, *, days_ahead: int = 7, today=None):
+    """Insert a disposable future weekly_events row relative to NY 'today'."""
+    from datetime import timedelta
+
+    anchor = today or _ny_today()
+    start = anchor + timedelta(days=days_ahead)
+    marker = uuid.uuid4().hex[:12]
+    event_name = f"OTP UI LIVE FIXTURE {marker}"
+    event_date = f"{start.strftime('%A')}, {start.strftime('%B')} {start.day}"
+    cursor = db.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO weekly_events (
+              source_pdf, page_number, event_name, event_date,
+              start_date, end_date, start_time, end_time, raw_text,
+              category, normalized_name
+            ) VALUES (
+              %s, %s, %s, %s,
+              %s, %s, %s, %s, %s,
+              %s, %s
+            )
+            """,
+            (
+                "otp-ui-live-fixture.pdf",
+                1,
+                event_name,
+                event_date,
+                start,
+                start,
+                "10:00:00",
+                "11:00:00",
+                f"Test fixture event for UI live tests ({event_name})",
+                "community",
+                event_name.lower(),
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+        # /events may read events_materialized when MVs are enabled — mirror row.
+        try:
+            cursor.execute(
+                """
+                INSERT INTO events_materialized (
+                  id, event_name, event_date, start_date, end_date,
+                  start_time, end_time, raw_text, source_pdf, event_url
+                ) VALUES (
+                  %s, %s, %s, %s, %s,
+                  %s, %s, %s, %s, %s
+                )
+                ON DUPLICATE KEY UPDATE
+                  event_name=VALUES(event_name),
+                  event_date=VALUES(event_date),
+                  start_date=VALUES(start_date),
+                  end_date=VALUES(end_date),
+                  start_time=VALUES(start_time),
+                  end_time=VALUES(end_time),
+                  raw_text=VALUES(raw_text),
+                  source_pdf=VALUES(source_pdf)
+                """,
+                (
+                    event_id,
+                    event_name,
+                    event_date,
+                    start,
+                    start,
+                    "10:00:00",
+                    "11:00:00",
+                    f"Test fixture event for UI live tests ({event_name})",
+                    "otp-ui-live-fixture.pdf",
+                    None,
+                ),
+            )
+        except Exception:
+            # MV table may be absent in some local demos; weekly_events is authoritative
+            # for selected-event resolution.
+            pass
+        db.commit()
+    finally:
+        cursor.close()
+    return {
+        "id": event_id,
+        "event_name": event_name,
+        "start_date": start,
+        "event_date": event_date,
+    }
+
+
+def _cleanup_live_event_fixture(db, event_id: int, event_name: str) -> None:
+    """Delete only the disposable fixture row; never touch real demo records."""
+    if not event_name.startswith("OTP UI LIVE FIXTURE "):
+        return
+    cursor = db.cursor()
+    try:
+        try:
+            cursor.execute(
+                "DELETE FROM events_materialized WHERE id = %s AND event_name = %s",
+                (event_id, event_name),
+            )
+        except Exception:
+            pass
+        cursor.execute(
+            "DELETE FROM weekly_events WHERE id = %s AND event_name = %s",
+            (event_id, event_name),
+        )
+        db.commit()
+    finally:
+        cursor.close()
+
+
 def _scan_internal_terms(answer: str) -> List[str]:
     terms = (
         "event_by_name",
@@ -385,12 +501,20 @@ def _create_authenticated_client(base_url: str, label: str):
     import requests
 
     session_client = requests.Session()
-    session_client.get(f"{base_url}/auth/me", timeout=15).raise_for_status()
-    csrf = session_client.cookies.get("otp_csrf")
+    # Local HTTP test servers set Secure cookies; requests will not auto-send them
+    # on http://. Bootstrap CSRF via guest Bearer, then signup, then continue with
+    # Bearer auth using the new session token from Set-Cookie.
+    guest = session_client.post(f"{base_url}/auth/guest", timeout=15)
+    guest.raise_for_status()
+    guest_payload = guest.json()
     unique = uuid.uuid4().hex[:12]
     response = session_client.post(
         f"{base_url}/auth/signup",
-        headers={"X-CSRF-Token": csrf, "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {guest_payload['session_token']}",
+            "X-CSRF-Token": guest_payload["csrf_token"],
+            "Content-Type": "application/json",
+        },
         json={
             "email": f"ui-context-{label}-{unique}@example.test",
             "username": f"ctx_{label}_{unique}",
@@ -399,310 +523,362 @@ def _create_authenticated_client(base_url: str, label: str):
         timeout=15,
     )
     response.raise_for_status()
-    return session_client, session_client.cookies.get("otp_csrf")
+    session_token = session_client.cookies.get("otp_session")
+    csrf = session_client.cookies.get("otp_csrf") or guest_payload["csrf_token"]
+    if not session_token:
+        # Parse Set-Cookie if the jar dropped Secure cookies on http.
+        raw = response.headers.get("Set-Cookie") or ""
+        match = re.search(r"otp_session=([^;]+)", raw)
+        assert match, "signup must return otp_session"
+        session_token = match.group(1)
+        csrf_match = re.search(r"otp_csrf=([^;]+)", raw)
+        if csrf_match:
+            csrf = csrf_match.group(1)
+
+    class _AuthClient:
+        def __init__(self):
+            self.session = session_client
+            self._headers = {
+                "Authorization": f"Bearer {session_token}",
+                "X-CSRF-Token": csrf,
+                "Content-Type": "application/json",
+            }
+
+        def post(self, url, headers=None, **kwargs):
+            merged = dict(self._headers)
+            if headers:
+                merged.update(headers)
+            return self.session.post(url, headers=merged, **kwargs)
+
+        def get(self, url, headers=None, **kwargs):
+            merged = dict(self._headers)
+            if headers:
+                merged.update(headers)
+            return self.session.get(url, headers=merged, **kwargs)
+
+    return _AuthClient(), csrf
 
 
-def run_live_api_tests(base_url: str) -> None:
-    """Exercise modern JSON/SSE and legacy contracts against local demo MySQL."""
+def run_live_api_tests(base_url: str, *, simulated_today=None) -> None:
+    """Exercise modern JSON/SSE against local demo MySQL with a date-stable fixture.
+
+    Seeds a disposable future weekly_events row relative to America/New_York today
+    (or simulated_today) so the suite does not depend on a hard-coded real event.
+    """
     import requests
 
     base_url = base_url.rstrip("/")
     db = _live_db_connection()
-    cursor = db.cursor(dictionary=True)
-    try:
-        cursor.execute(
-            "SELECT id, event_name, start_date FROM weekly_events WHERE id = %s LIMIT 1",
-            (435,),
-        )
-        event = cursor.fetchone()
-    finally:
-        cursor.close()
-        db.close()
-    assert event, "local demo DB must contain weekly_events.id=435"
-
+    fixture = _seed_live_event_fixture(db, days_ahead=7, today=simulated_today)
+    event = {
+        "id": fixture["id"],
+        "event_name": fixture["event_name"],
+        "start_date": fixture["start_date"],
+    }
+    event_id = int(event["id"])
     context = {
         "entity_type": "event",
-        "entity_id": "435",
+        "entity_id": str(event_id),
         "entity_title": "FAKE CLIENT TITLE",
         "entity_date": "2026-07-14",
         "source": "events_sidebar",
     }
     message = "Tell me more about this event"
-    client_a = LiveGuestClient(base_url)
-    client_b = LiveGuestClient(base_url)
-    client_a.bootstrap()
-    client_b.bootstrap()
-    events_response = client_a.session.get(
-        f"{base_url}/events?days_ahead=365&limit=100",
-        headers=client_a.headers(),
-        timeout=15,
-    )
-    events_response.raise_for_status()
-    sidebar_event = next(
-        (item for item in events_response.json().get("events", []) if item.get("id") == 435),
-        None,
-    )
-    assert sidebar_event is not None
-    assert sidebar_event["event_name"] == event["event_name"]
-    assert sidebar_event["start_date"] == str(event["start_date"])
-    json_thread = client_a.create_thread("UI event JSON")
-    stream_thread = client_a.create_thread("UI event stream")
-
-    started = time_module.perf_counter()
-    response = client_a.send_json(json_thread, {"message": message, "ui_context": context})
-    latency = round((time_module.perf_counter() - started) * 1000)
-    assert response.status_code == 201, response.text
-    json_payload = response.json()
-    json_answer = json_payload["assistant_message"]["content"]
-    json_summary = {
-        **json_payload,
-        "answer": json_answer,
-        "sources": json_payload["assistant_message"]["sources"],
-        "mode": json_payload["assistant_message"]["response_mode"],
-    }
-    record = _live_record(
-        "selected_event_nonstream",
-        status=response.status_code,
-        answer=json_answer,
-        payload=json_summary,
-        latency_ms=latency,
-        deterministic=True,
-    )
-    assert event["event_name"] in json_answer
-    assert "FAKE CLIENT TITLE" not in json_answer
-    assert record["resolution"] == "exact_id"
-    assert record["mode"] == "sql"
-    assert record["internal_terms"] == []
-    assert record["sources"][0]["entity_ref"] == "event:435"
-    assert json_payload["assistant_message"]["model_name"] is None
-
-    started = time_module.perf_counter()
-    stream_response, stream_payload = client_a.send_stream(
-        stream_thread,
-        {"message": message, "ui_context": context},
-    )
-    latency = round((time_module.perf_counter() - started) * 1000)
-    assert stream_response.status_code == 200
-    assert stream_payload is not None
-    stream_record = _live_record(
-        "selected_event_stream",
-        status=stream_response.status_code,
-        answer=stream_payload["answer"],
-        payload=stream_payload,
-        latency_ms=latency,
-        deterministic=True,
-    )
-    assert stream_payload["answer"] == json_answer
-    assert stream_payload["resolved_entity"] == json_payload["resolved_entity"]
-    assert stream_payload["assistant_message"]["model_name"] is None
-    assert stream_record["sources"] == record["sources"]
-    assert stream_record["internal_terms"] == []
-
-    stale_context = {
-        **VALID_CONTEXT,
-        "entity_id": "2147483647",
-        "entity_title": "Definitely Missing Event 2147483647",
-    }
-    started = time_module.perf_counter()
-    stale_response = client_a.send_json(
-        json_thread,
-        {"message": message, "ui_context": stale_context},
-    )
-    latency = round((time_module.perf_counter() - started) * 1000)
-    assert stale_response.status_code == 201
-    stale_payload = stale_response.json()
-    stale_answer = stale_payload["assistant_message"]["content"]
-    stale_record = _live_record(
-        "stale_event",
-        status=stale_response.status_code,
-        answer=stale_answer,
-        payload={
-            **stale_payload,
-            "answer": stale_answer,
-            "sources": stale_payload["assistant_message"]["sources"],
-            "mode": stale_payload["assistant_message"]["response_mode"],
-        },
-        latency_ms=latency,
-        deterministic=True,
-    )
-    assert stale_record["resolution"] == "stale"
-    assert stale_record["internal_terms"] == []
-
-    invalid_response = client_a.send_json(
-        json_thread,
-        {"message": message, "ui_context": {**context, "url": "https://client.invalid"}},
-    )
-    assert invalid_response.status_code == 400
-    assert invalid_response.json() == {
-        "error": "Invalid UI context.",
-        "code": "invalid_ui_context",
-    }
-    invalid_stream_response, invalid_stream_payload = client_a.send_stream(
-        stream_thread,
-        {"message": message, "ui_context": {**context, "description": "client fact"}},
-    )
-    assert invalid_stream_response.status_code == 400
-    assert invalid_stream_payload is None
-    assert invalid_stream_response.json()["code"] == "invalid_ui_context"
-
-    started = time_module.perf_counter()
-    typed_message = "Tell me more about the 'Virtual Baby Cafe' event happening on Jul 15."
-    typed_response = client_a.send_json(
-        json_thread,
-        {"message": typed_message},
-    )
-    typed_latency = round((time_module.perf_counter() - started) * 1000)
-    assert typed_response.status_code == 201
-    typed_payload = typed_response.json()
-    typed_answer = typed_payload["assistant_message"]["content"]
-    typed_record = _live_record(
-        "typed_event_without_context",
-        status=typed_response.status_code,
-        answer=typed_answer,
-        payload={
-            **typed_payload,
-            "answer": typed_answer,
-            "sources": typed_payload["assistant_message"]["sources"],
-            "mode": typed_payload["assistant_message"]["response_mode"],
-        },
-        latency_ms=typed_latency,
-        deterministic=True,
-    )
-    assert typed_payload.get("resolved_entity") is None
-    assert typed_payload["assistant_message"].get("resolved_entity") is None
-    assert typed_payload["assistant_message"]["model_name"] is None
-    assert typed_record["internal_terms"] == []
-
-    typed_stream_thread = client_a.create_thread("Typed event stream")
-    typed_stream_response, typed_stream_payload = client_a.send_stream(
-        typed_stream_thread,
-        {"message": typed_message},
-    )
-    assert typed_stream_response.status_code == 200
-    assert typed_stream_payload is not None
-    assert typed_stream_payload["answer"] == typed_answer
-    assert typed_stream_payload["assistant_message"]["model_name"] is None
-    assert (
-        typed_stream_payload["assistant_message"]["model_name"]
-        == typed_payload["assistant_message"]["model_name"]
-    )
-
-    history_response = client_a.session.get(
-        f"{base_url}/conversations/{json_thread}/messages",
-        headers=client_a.headers(),
-        timeout=15,
-    )
-    history_response.raise_for_status()
-    persisted_assistant = {
-        item["id"]: item
-        for item in history_response.json()["messages"]
-        if item["role"] == "assistant"
-    }
-    assert persisted_assistant[json_payload["assistant_message"]["id"]]["model_name"] is None
-    assert persisted_assistant[typed_payload["assistant_message"]["id"]]["model_name"] is None
-
-    legacy_response = client_a.session.post(
-        f"{base_url}/chat",
-        headers=client_a.headers(),
-        json={"message": message, "ui_context": context},
-        timeout=45,
-    )
-    assert legacy_response.status_code == 200, legacy_response.text
-    legacy_payload = legacy_response.json()
-    legacy_record = _live_record(
-        "selected_event_legacy",
-        status=legacy_response.status_code,
-        answer=legacy_payload["response"],
-        payload={**legacy_payload, "answer": legacy_payload["response"]},
-        latency_ms=0,
-        deterministic=True,
-    )
-    assert legacy_payload["response"] == json_answer
-    assert legacy_payload["resolved_entity"] == json_payload["resolved_entity"]
-    assert legacy_record["internal_terms"] == []
-
-    # Guest and authenticated ownership checks remain enforced by thread lookup.
-    cross_guest = client_b.session.get(
-        f"{base_url}/conversations/{json_thread}/messages",
-        headers=client_b.headers(),
-        timeout=15,
-    )
-    assert cross_guest.status_code == 404
-
-    auth_a, csrf_a = _create_authenticated_client(base_url, "a")
-    auth_b, csrf_b = _create_authenticated_client(base_url, "b")
-    thread_response = auth_a.post(
-        f"{base_url}/conversations",
-        headers={"X-CSRF-Token": csrf_a, "Content-Type": "application/json"},
-        json={"title": "Owned context"},
-        timeout=15,
-    )
-    thread_response.raise_for_status()
-    auth_thread = thread_response.json()["thread"]["id"]
-    auth_send = auth_a.post(
-        f"{base_url}/conversations/{auth_thread}/messages",
-        headers={"X-CSRF-Token": csrf_a, "Content-Type": "application/json"},
-        json={"message": message, "ui_context": context},
-        timeout=45,
-    )
-    assert auth_send.status_code == 201, auth_send.text
-    assert auth_send.json()["assistant_message"]["resolved_entity"]["id"] == "435"
-    cross_auth = auth_b.get(
-        f"{base_url}/conversations/{auth_thread}/messages",
-        headers={"X-CSRF-Token": csrf_b},
-        timeout=15,
-    )
-    assert cross_auth.status_code == 404
-
-    # Verify bounded persistence and no ui_context contamination of thread state.
-    db = _live_db_connection()
-    cursor = db.cursor(dictionary=True)
+    cleanup_db = db
+    cleanup_fixture = fixture
     try:
-        user_id = json_payload["user_message"]["id"]
-        assistant_id = json_payload["assistant_message"]["id"]
-        cursor.execute(
-            "SELECT id, message_meta_json, sources_json, model_name "
-            "FROM conversation_messages WHERE id IN (%s, %s)",
-            (user_id, assistant_id),
+        client_a = LiveGuestClient(base_url)
+        client_b = LiveGuestClient(base_url)
+        client_a.bootstrap()
+        client_b.bootstrap()
+        events_response = client_a.session.get(
+            f"{base_url}/events?days_ahead=365&limit=100",
+            headers=client_a.headers(),
+            timeout=15,
         )
-        rows = {row["id"]: row for row in cursor.fetchall()}
-        user_meta = json.loads(rows[user_id]["message_meta_json"])
-        assistant_meta = json.loads(rows[assistant_id]["message_meta_json"])
-        sources = json.loads(rows[assistant_id]["sources_json"])
-        expected_ui_meta = validate_event_ui_context(context).user_message_metadata()
-        assert user_meta["ui_context"] == expected_ui_meta["ui_context"]
-        relationship = user_meta["conversation_relationship"]
-        assert relationship["relationship"] == "STANDALONE"
-        assert relationship["decision_source"] == "rule"
-        assert relationship["shadow"] is True
-        assert set(relationship) == {
-            "relationship",
-            "confidence",
-            "reason_code",
-            "retained",
-            "cleared",
-            "requires_clarification",
-            "decision_source",
-            "shadow",
-        }
-        assert "entity_title" not in json.dumps(user_meta)
-        assert "entity_date" not in json.dumps(user_meta)
-        assert len(json.dumps(user_meta).encode("utf-8")) < 2048
-        assert assistant_meta["resolved_entity"] == json_payload["resolved_entity"]
-        assert sources[0]["entity_ref"] == "event:435"
-        assert rows[assistant_id]["model_name"] is None
-        cursor.execute(
-            "SELECT thread_state_json FROM conversation_threads WHERE id = %s",
-            (json_thread,),
+        events_response.raise_for_status()
+        sidebar_event = next(
+            (item for item in events_response.json().get("events", []) if item.get("id") == event_id),
+            None,
         )
-        thread_state = cursor.fetchone()["thread_state_json"] or "{}"
-        assert "ui_context" not in thread_state
-        assert "resolved_entity" not in thread_state
-    finally:
-        cursor.close()
-        db.close()
+        assert sidebar_event is not None
+        assert sidebar_event["event_name"] == event["event_name"]
+        assert sidebar_event["start_date"] == str(event["start_date"])
+        json_thread = client_a.create_thread("UI event JSON")
+        stream_thread = client_a.create_thread("UI event stream")
 
-    print("OK  live API parity, persistence, isolation, and no-context leakage")
+        started = time_module.perf_counter()
+        response = client_a.send_json(json_thread, {"message": message, "ui_context": context})
+        latency = round((time_module.perf_counter() - started) * 1000)
+        assert response.status_code == 201, response.text
+        json_payload = response.json()
+        json_answer = json_payload["assistant_message"]["content"]
+        json_summary = {
+            **json_payload,
+            "answer": json_answer,
+            "sources": json_payload["assistant_message"]["sources"],
+            "mode": json_payload["assistant_message"]["response_mode"],
+        }
+        record = _live_record(
+            "selected_event_nonstream",
+            status=response.status_code,
+            answer=json_answer,
+            payload=json_summary,
+            latency_ms=latency,
+            deterministic=True,
+        )
+        assert event["event_name"] in json_answer
+        assert "FAKE CLIENT TITLE" not in json_answer
+        assert record["resolution"] == "exact_id"
+        assert record["mode"] == "sql"
+        assert record["internal_terms"] == []
+        assert record["sources"][0]["entity_ref"] == f"event:{event_id}"
+        assert json_payload["assistant_message"]["model_name"] is None
+
+        started = time_module.perf_counter()
+        stream_response, stream_payload = client_a.send_stream(
+            stream_thread,
+            {"message": message, "ui_context": context},
+        )
+        latency = round((time_module.perf_counter() - started) * 1000)
+        assert stream_response.status_code == 200
+        assert stream_payload is not None
+        stream_record = _live_record(
+            "selected_event_stream",
+            status=stream_response.status_code,
+            answer=stream_payload["answer"],
+            payload=stream_payload,
+            latency_ms=latency,
+            deterministic=True,
+        )
+        assert stream_payload["answer"] == json_answer
+        assert stream_payload["resolved_entity"] == json_payload["resolved_entity"]
+        assert stream_payload["assistant_message"]["model_name"] is None
+        assert stream_record["sources"] == record["sources"]
+        assert stream_record["internal_terms"] == []
+
+        stale_context = {
+            **VALID_CONTEXT,
+            "entity_id": "2147483647",
+            "entity_title": "Definitely Missing Event 2147483647",
+        }
+        started = time_module.perf_counter()
+        stale_response = client_a.send_json(
+            json_thread,
+            {"message": message, "ui_context": stale_context},
+        )
+        latency = round((time_module.perf_counter() - started) * 1000)
+        assert stale_response.status_code == 201
+        stale_payload = stale_response.json()
+        stale_answer = stale_payload["assistant_message"]["content"]
+        stale_record = _live_record(
+            "stale_event",
+            status=stale_response.status_code,
+            answer=stale_answer,
+            payload={
+                **stale_payload,
+                "answer": stale_answer,
+                "sources": stale_payload["assistant_message"]["sources"],
+                "mode": stale_payload["assistant_message"]["response_mode"],
+            },
+            latency_ms=latency,
+            deterministic=True,
+        )
+        assert stale_record["resolution"] == "stale"
+        assert stale_record["internal_terms"] == []
+
+        invalid_response = client_a.send_json(
+            json_thread,
+            {"message": message, "ui_context": {**context, "url": "https://client.invalid"}},
+        )
+        assert invalid_response.status_code == 400
+        assert invalid_response.json() == {
+            "error": "Invalid UI context.",
+            "code": "invalid_ui_context",
+        }
+        invalid_stream_response, invalid_stream_payload = client_a.send_stream(
+            stream_thread,
+            {"message": message, "ui_context": {**context, "description": "client fact"}},
+        )
+        assert invalid_stream_response.status_code == 400
+        assert invalid_stream_payload is None
+        assert invalid_stream_response.json()["code"] == "invalid_ui_context"
+
+        started = time_module.perf_counter()
+        typed_message = "Tell me more about the 'Virtual Baby Cafe' event happening on Jul 15."
+        typed_response = client_a.send_json(
+            json_thread,
+            {"message": typed_message},
+        )
+        typed_latency = round((time_module.perf_counter() - started) * 1000)
+        assert typed_response.status_code == 201
+        typed_payload = typed_response.json()
+        typed_answer = typed_payload["assistant_message"]["content"]
+        typed_record = _live_record(
+            "typed_event_without_context",
+            status=typed_response.status_code,
+            answer=typed_answer,
+            payload={
+                **typed_payload,
+                "answer": typed_answer,
+                "sources": typed_payload["assistant_message"]["sources"],
+                "mode": typed_payload["assistant_message"]["response_mode"],
+            },
+            latency_ms=typed_latency,
+            deterministic=True,
+        )
+        assert typed_payload.get("resolved_entity") is None
+        assert typed_payload["assistant_message"].get("resolved_entity") is None
+        assert typed_payload["assistant_message"]["model_name"] is None
+        assert typed_record["internal_terms"] == []
+
+        typed_stream_thread = client_a.create_thread("Typed event stream")
+        typed_stream_response, typed_stream_payload = client_a.send_stream(
+            typed_stream_thread,
+            {"message": typed_message},
+        )
+        assert typed_stream_response.status_code == 200
+        assert typed_stream_payload is not None
+        assert typed_stream_payload["answer"] == typed_answer
+        assert typed_stream_payload["assistant_message"]["model_name"] is None
+        assert (
+            typed_stream_payload["assistant_message"]["model_name"]
+            == typed_payload["assistant_message"]["model_name"]
+        )
+
+        history_response = client_a.session.get(
+            f"{base_url}/conversations/{json_thread}/messages",
+            headers=client_a.headers(),
+            timeout=15,
+        )
+        history_response.raise_for_status()
+        persisted_assistant = {
+            item["id"]: item
+            for item in history_response.json()["messages"]
+            if item["role"] == "assistant"
+        }
+        assert persisted_assistant[json_payload["assistant_message"]["id"]]["model_name"] is None
+        assert persisted_assistant[typed_payload["assistant_message"]["id"]]["model_name"] is None
+
+        legacy_response = client_a.session.post(
+            f"{base_url}/chat",
+            headers=client_a.headers(),
+            json={"message": message, "ui_context": context},
+            timeout=45,
+        )
+        assert legacy_response.status_code == 200, legacy_response.text
+        legacy_payload = legacy_response.json()
+        legacy_record = _live_record(
+            "selected_event_legacy",
+            status=legacy_response.status_code,
+            answer=legacy_payload["response"],
+            payload={**legacy_payload, "answer": legacy_payload["response"]},
+            latency_ms=0,
+            deterministic=True,
+        )
+        assert legacy_payload["response"] == json_answer
+        assert legacy_payload["resolved_entity"] == json_payload["resolved_entity"]
+        assert legacy_record["internal_terms"] == []
+
+        # Guest and authenticated ownership checks remain enforced by thread lookup.
+        cross_guest = client_b.session.get(
+            f"{base_url}/conversations/{json_thread}/messages",
+            headers=client_b.headers(),
+            timeout=15,
+        )
+        assert cross_guest.status_code == 404
+
+        auth_a, csrf_a = _create_authenticated_client(base_url, "a")
+        auth_b, csrf_b = _create_authenticated_client(base_url, "b")
+        thread_response = auth_a.post(
+            f"{base_url}/conversations",
+            headers={"X-CSRF-Token": csrf_a, "Content-Type": "application/json"},
+            json={"title": "Owned context"},
+            timeout=15,
+        )
+        thread_response.raise_for_status()
+        auth_thread = thread_response.json()["thread"]["id"]
+        auth_send = auth_a.post(
+            f"{base_url}/conversations/{auth_thread}/messages",
+            headers={"X-CSRF-Token": csrf_a, "Content-Type": "application/json"},
+            json={"message": message, "ui_context": context},
+            timeout=45,
+        )
+        assert auth_send.status_code == 201, auth_send.text
+        assert auth_send.json()["assistant_message"]["resolved_entity"]["id"] == str(event_id)
+        cross_auth = auth_b.get(
+            f"{base_url}/conversations/{auth_thread}/messages",
+            headers={"X-CSRF-Token": csrf_b},
+            timeout=15,
+        )
+        assert cross_auth.status_code == 404
+
+        # Verify bounded persistence and no ui_context contamination of thread state.
+        db = _live_db_connection()
+        cursor = db.cursor(dictionary=True)
+        try:
+            user_id = json_payload["user_message"]["id"]
+            assistant_id = json_payload["assistant_message"]["id"]
+            cursor.execute(
+                "SELECT id, message_meta_json, sources_json, model_name "
+                "FROM conversation_messages WHERE id IN (%s, %s)",
+                (user_id, assistant_id),
+            )
+            rows = {row["id"]: row for row in cursor.fetchall()}
+            user_meta = json.loads(rows[user_id]["message_meta_json"])
+            assistant_meta = json.loads(rows[assistant_id]["message_meta_json"])
+            sources = json.loads(rows[assistant_id]["sources_json"])
+            expected_ui_meta = validate_event_ui_context(context).user_message_metadata()
+            assert user_meta["ui_context"] == expected_ui_meta["ui_context"]
+            relationship = user_meta["conversation_relationship"]
+            assert relationship["relationship"] == "STANDALONE"
+            assert relationship["decision_source"] == "rule"
+            assert relationship["shadow"] is True
+            assert set(relationship) == {
+                "relationship",
+                "confidence",
+                "reason_code",
+                "retained",
+                "cleared",
+                "requires_clarification",
+                "decision_source",
+                "shadow",
+            }
+            assert "entity_title" not in json.dumps(user_meta)
+            assert "entity_date" not in json.dumps(user_meta)
+            assert len(json.dumps(user_meta).encode("utf-8")) < 2048
+            assert assistant_meta["resolved_entity"] == json_payload["resolved_entity"]
+            assert sources[0]["entity_ref"] == f"event:{event_id}"
+            assert rows[assistant_id]["model_name"] is None
+            cursor.execute(
+                "SELECT thread_state_json FROM conversation_threads WHERE id = %s",
+                (json_thread,),
+            )
+            thread_state = cursor.fetchone()["thread_state_json"] or "{}"
+            assert "ui_context" not in thread_state
+            assert "resolved_entity" not in thread_state
+        finally:
+            cursor.close()
+            db.close()
+
+        print(
+            f"OK  live API parity with fixture event:{event_id} "
+            f"start_date={event['start_date']} "
+            f"(anchor={simulated_today or _ny_today()})"
+        )
+
+
+    finally:
+        try:
+            _cleanup_live_event_fixture(
+                cleanup_db, cleanup_fixture["id"], cleanup_fixture["event_name"]
+            )
+        except Exception as cleanup_exc:  # noqa: BLE001
+            print(f"WARN fixture cleanup failed: {cleanup_exc}", file=sys.stderr)
+        try:
+            cleanup_db.close()
+        except Exception:
+            pass
 
 
 def main() -> int:
@@ -731,11 +907,16 @@ def main() -> int:
             print(f"FAIL {test.__name__}: {exc}")
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     if not failed and args.base_url:
-        try:
-            run_live_api_tests(args.base_url)
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            print(f"FAIL live API tests: {exc}")
+        from datetime import timedelta
+
+        anchors = [_ny_today(), _ny_today() - timedelta(days=1)]
+        for anchor in anchors:
+            try:
+                print(f"\n--- live API tests (NY anchor={anchor}) ---")
+                run_live_api_tests(args.base_url, simulated_today=anchor)
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                print(f"FAIL live API tests (anchor={anchor}): {exc}")
     return 1 if failed else 0
 
 

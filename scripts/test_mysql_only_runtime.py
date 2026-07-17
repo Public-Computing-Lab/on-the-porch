@@ -367,15 +367,19 @@ def _read_state(thread_id: str) -> Dict[str, Any]:
 def run_live_cases(base_url: str) -> None:
     import requests
 
-    # 19 health has no redis dependency status
+    # 19 health has no redis dependency status (public payload is minimal)
     def case_19() -> None:
         r = requests.get(f"{base_url.rstrip('/')}/health", timeout=15)
         r.raise_for_status()
         payload = r.json()
+        assert payload.get("status") == "ok"
         assert "redis" not in payload
         blob = json.dumps(payload).lower()
         assert "redis://" not in blob
-        assert payload.get("cache_backend") == "mysql"
+        # Public health must not expose cache/backend internals.
+        assert "cache_backend" not in payload
+        assert "vectordb_dir" not in payload
+        assert "gemini_model" not in payload
 
     _run("19_health_no_redis_field", case_19)
 
