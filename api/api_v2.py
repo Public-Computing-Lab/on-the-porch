@@ -150,6 +150,13 @@ from conversation_state import (  # noqa: E402
     merge_for_commit,
     serialize_thread_state,
 )
+from request_budget import use_request_deadline  # noqa: E402
+from civic_311 import (  # noqa: E402
+    Civic311Result,
+    is_311_candidate,
+    process_311_question,
+)
+from answering_kernel import GlobalDeadline  # noqa: E402
 from conversation_transitions import (  # noqa: E402
     CacheAction,
     CompletionStatus,
@@ -2141,6 +2148,8 @@ def _merge_locked_thread_state(
     transition: ProposedTransition,
     last_substantive_message_id: str,
     invalidate_retrieval_cache: bool = False,
+    next_civic_311_context: Optional[Mapping[str, Any]] = None,
+    update_civic_311_context: bool = False,
 ) -> Dict[str, Any]:
     """Merge cache/state after the caller has locked the parent thread row."""
     cursor = conn.cursor(dictionary=True)
@@ -2168,6 +2177,8 @@ def _merge_locked_thread_state(
             transition=transition,
             last_substantive_message_id=last_substantive_message_id,
             force_cache_update=invalidate_retrieval_cache,
+            next_civic_311_context=next_civic_311_context,
+            update_civic_311_context=update_civic_311_context,
         )
         if not merged.cache_update_applied:
             print(
@@ -2216,11 +2227,14 @@ def _persist_conversation_turn(
     assistant_model_name: Optional[str],
     resolved_entity: Optional[Dict[str, str]],
     set_initial_title: bool,
+    next_civic_311_context: Optional[Mapping[str, Any]] = None,
+    update_civic_311_context: bool = False,
     interaction_log_enabled: bool = True,
     expected_last_message_at: Optional[datetime.datetime] = None,
     turn_reservation: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Persist one complete turn using a single lock-first transaction."""
+    persistence_started = time.perf_counter()
     conn = None
     refreshed_thread = None
     user_message_row = None
@@ -2282,6 +2296,8 @@ def _persist_conversation_turn(
             transition=transition,
             last_substantive_message_id=assistant_message_row["id"],
             invalidate_retrieval_cache=invalidate_retrieval_cache,
+            next_civic_311_context=next_civic_311_context,
+            update_civic_311_context=update_civic_311_context,
         )
         refreshed_thread = _fetch_thread(conn, user_id, thread_id)
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
@@ -2326,6 +2342,7 @@ def _persist_conversation_turn(
             "user_message": user_message_row,
             "assistant_message": assistant_message_row,
             "transition": transition_result,
+            "persistence_ms": int((time.perf_counter() - persistence_started) * 1000),
         }
 
     # Interaction logging is intentionally best-effort and starts only after the
@@ -2373,6 +2390,7 @@ def _persist_conversation_turn(
         "user_message": user_message_row,
         "assistant_message": assistant_message_row,
         "transition": transition_result,
+        "persistence_ms": int((time.perf_counter() - persistence_started) * 1000),
     }
 
 
@@ -3454,6 +3472,133 @@ def _execute_agent_response_with_event_context(
     return result
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _civic_311_model_call(prompt: str, timeout_seconds: float) -> str:
+    """One optional bounded structured-model call for the new civic path."""
+    client = _get_llm_client()
+    model_name = os.getenv(
+        "GEMINI_FAST_MODEL",
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+    )
+    model = client.GenerativeModel(model_name)
+    increment_llm_call_counter()
+    response = model.generate_content(
+        prompt,
+        generation_config={"temperature": 0},
+        request_options={"timeout": max(0.25, float(timeout_seconds))},
+    )
+    return str(getattr(response, "text", "") or "")
+
+
+def _run_civic_311_answer(
+    message: str,
+    *,
+    state_envelope: ThreadStateEnvelope,
+    conversation_state: ConversationState,
+    thread_id: str,
+    streaming: bool,
+    request_started_at: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Run the bounded deterministic 311 path without retaining a DB lock.
+
+    The 15-second deadline is shared across optional planning, all database
+    tools, synthesis, validation, and the caller's persistence reserve.  This
+    is intentionally independent from the legacy general-agent deadline.
+    """
+    started_at = request_started_at or getattr(g, "request_started_at", time.perf_counter())
+    deadline = GlobalDeadline.from_started_at(started_at, hard_ceiling_seconds=15.0)
+    state_location = (
+        conversation_state.location.to_dict()
+        if conversation_state.location is not None
+        else None
+    )
+    planner = _civic_311_model_call if _env_flag("CIVIC_311_PLANNER_ENABLED") else None
+    synthesis = _civic_311_model_call if _env_flag("CIVIC_311_SYNTHESIS_ENABLED") else None
+    with use_request_deadline(deadline.deadline):
+        civic_result: Civic311Result = process_311_question(
+            message,
+            connection_factory=get_db_connection,
+            active_context=state_envelope.civic_311_context,
+            state_location=state_location,
+            request_started_at=started_at,
+            planner_llm=planner,
+            synthesis_llm=synthesis,
+        )
+    result = civic_result.to_agent_result()
+    diagnostics = result.get("civic_311_diagnostics") or {}
+    _log_agent_metrics(
+        mode="structured_311",
+        thread_id=thread_id,
+        streaming=streaming,
+        extra={
+            "civic_311": True,
+            "planner_source": diagnostics.get("planner_source"),
+            "planner_ms": diagnostics.get("planner_ms", 0),
+            "tool_execution_ms": diagnostics.get("tool_execution_ms", 0),
+            "evidence_status": diagnostics.get("evidence_status"),
+            "answer_mode": diagnostics.get("answer_mode"),
+            "tool_count": diagnostics.get("tool_count", 0),
+            "synthesis_ms": diagnostics.get("synthesis_ms", 0),
+            "validation_ms": diagnostics.get("validation_ms", 0),
+            "persistence_ms": diagnostics.get("persistence_ms", 0),
+            "total_latency_ms": diagnostics.get("total_latency_ms", 0),
+            "llm_call_count": diagnostics.get("llm_call_count", 0),
+            "embedding_call_count": 0,
+            "fallback_used": bool(diagnostics.get("fallback_used")),
+            "timeout_stage": diagnostics.get("timeout_stage"),
+        },
+    )
+    return result
+
+
+def _log_civic_311_persistence(
+    diagnostics: Optional[Mapping[str, Any]],
+    *,
+    request_started_at: float,
+    persistence_ms: int,
+    thread_id: str,
+    streaming: bool,
+) -> None:
+    """Record completion telemetry without including resident content or SQL details."""
+    if not diagnostics:
+        return
+    payload = {
+        "event": "civic_311_completion",
+        "thread_id": thread_id,
+        "streaming": streaming,
+        "planner_source": diagnostics.get("planner_source"),
+        "planner_ms": diagnostics.get("planner_ms", 0),
+        "tool_execution_ms": diagnostics.get("tool_execution_ms", 0),
+        "tool_count": diagnostics.get("tool_count", 0),
+        "synthesis_ms": diagnostics.get("synthesis_ms", 0),
+        "validation_ms": diagnostics.get("validation_ms", 0),
+        "persistence_ms": max(0, int(persistence_ms)),
+        "total_latency_ms": max(0, int((time.perf_counter() - request_started_at) * 1000)),
+        "evidence_status": diagnostics.get("evidence_status"),
+        "answer_mode": diagnostics.get("answer_mode"),
+        "fallback_used": bool(diagnostics.get("fallback_used")),
+        "timeout_stage": diagnostics.get("timeout_stage"),
+    }
+    print(json_dumps(payload), file=sys.stderr, flush=True)
+
+
+def _clear_civic_311_context_for_message(
+    message: str,
+    *,
+    active_context: Optional[Mapping[str, Any]],
+) -> bool:
+    """Clear trusted 311 state after a substantive non-311 topic switch."""
+    if not active_context or is_311_candidate(message, active_context):
+        return False
+    return not is_small_talk(message)
+
+
 def _assistant_message_metadata(
     *,
     log_id: Optional[int] = None,
@@ -3597,6 +3742,7 @@ def _user_message_metadata(
     active_event_behavior_applied: bool = False,
     emergency_decision: Optional[EmergencyDecision] = None,
     event_query_plan: Optional[EventQueryPlan] = None,
+    civic_311_diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
@@ -3613,6 +3759,27 @@ def _user_message_metadata(
         metadata["active_event_followup_applied"] = True
     if emergency_decision is not None and emergency_decision.is_active_emergency:
         metadata["emergency_decision"] = emergency_decision.to_dict()
+    if civic_311_diagnostics is not None:
+        allowed = {
+            "planner_source",
+            "planner_ms",
+            "tool_execution_ms",
+            "evidence_status",
+            "answer_mode",
+            "tool_count",
+            "synthesis_ms",
+            "validation_ms",
+            "total_latency_ms",
+            "llm_call_count",
+            "embedding_call_count",
+            "fallback_used",
+            "timeout_stage",
+        }
+        metadata["civic_311"] = {
+            key: civic_311_diagnostics[key]
+            for key in allowed
+            if key in civic_311_diagnostics
+        }
     return metadata or None
 
 
@@ -4317,6 +4484,7 @@ def post_conversation_message(thread_id: str):
         dimensions = None
         active_event_result = None
         state_aware_event_result = None
+        civic_311_request = False
         event_query_plan = None
         stale_active_event = False
         # Emergency detection uses only the current message. Skip history load so
@@ -4370,6 +4538,12 @@ def post_conversation_message(thread_id: str):
                         dimensions=dimensions,
                         retrieval_cache=retrieval_cache,
                     )
+            civic_311_request = bool(
+                event_resolution is None
+                and active_event_result is None
+                and state_aware_event_result is None
+                and is_311_candidate(message, state_envelope.civic_311_context)
+            )
         conn.close()
         conn = None
 
@@ -4393,6 +4567,15 @@ def post_conversation_message(thread_id: str):
                     "state_aware_event_query": state_aware_event_result is not None,
                     "llm_calls": 0,
                 },
+            )
+        elif civic_311_request:
+            agent_result = _run_civic_311_answer(
+                message,
+                state_envelope=state_envelope,
+                conversation_state=conversation_state,
+                thread_id=thread_id,
+                streaming=False,
+                request_started_at=getattr(g, "request_started_at", None),
             )
         else:
             agent_result = _execute_agent_response_with_event_context(
@@ -4437,6 +4620,17 @@ def post_conversation_message(thread_id: str):
                 agent_result.get("event_cache_replacement_valid")
             ),
         )
+        civic_311_context_update = bool(agent_result.get("civic_311_context_update"))
+        civic_311_next_context = agent_result.get("civic_311_context")
+        if (
+            not civic_311_request
+            and _clear_civic_311_context_for_message(
+                message,
+                active_context=state_envelope.civic_311_context,
+            )
+        ):
+            civic_311_context_update = True
+            civic_311_next_context = None
 
         persisted = _persist_conversation_turn(
             thread_id=thread_id,
@@ -4446,6 +4640,8 @@ def post_conversation_message(thread_id: str):
             next_retrieval_cache=persisted_cache,
             transition=transition,
             invalidate_retrieval_cache=invalidate_retrieval_cache,
+            next_civic_311_context=civic_311_next_context,
+            update_civic_311_context=civic_311_context_update,
             user_content=message,
             user_meta=_user_message_metadata(
                 event_context=event_context,
@@ -4455,6 +4651,7 @@ def post_conversation_message(thread_id: str):
                 active_event_behavior_applied=active_event_result is not None,
                 emergency_decision=emergency_decision,
                 event_query_plan=event_query_plan,
+                civic_311_diagnostics=agent_result.get("civic_311_diagnostics"),
             ),
             assistant_content=answer,
             assistant_mode=mode,
@@ -4477,6 +4674,14 @@ def post_conversation_message(thread_id: str):
             ),
             turn_reservation=turn_reservation,
         )
+        if civic_311_request:
+            _log_civic_311_persistence(
+                agent_result.get("civic_311_diagnostics"),
+                request_started_at=float(getattr(g, "request_started_at", time.perf_counter())),
+                persistence_ms=int(persisted.get("persistence_ms", 0)),
+                thread_id=thread_id,
+                streaming=False,
+            )
         if emergency_decision.is_active_emergency:
             _log_emergency_metrics(
                 emergency_decision,
@@ -4663,6 +4868,7 @@ def post_conversation_message_stream(thread_id: str):
         dimensions = None
         active_event_result = None
         state_aware_event_result = None
+        civic_311_request = False
         event_query_plan = None
         stale_active_event = False
         # Emergency detection uses only the current message. Skip history load so
@@ -4716,6 +4922,12 @@ def post_conversation_message_stream(thread_id: str):
                         dimensions=dimensions,
                         retrieval_cache=retrieval_cache,
                     )
+            civic_311_request = bool(
+                event_resolution is None
+                and active_event_result is None
+                and state_aware_event_result is None
+                and is_311_candidate(message, state_envelope.civic_311_context)
+            )
     except Exception as exc:
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
             fail_turn(
@@ -4753,11 +4965,13 @@ def post_conversation_message_stream(thread_id: str):
         selected_request = event_resolution is not None
         active_event_request = active_event_result is not None
         state_aware_event_request = state_aware_event_result is not None
+        civic_311_structured_request = civic_311_request
         deterministic_request = (
             emergency_request
             or selected_request
             or active_event_request
             or state_aware_event_request
+            or civic_311_structured_request
         )
         semantic_eligible = (
             False
@@ -4806,6 +5020,15 @@ def post_conversation_message_stream(thread_id: str):
                     message,
                     event_resolution,
                     retrieval_cache,
+                )
+            elif civic_311_structured_request:
+                deterministic_result = _run_civic_311_answer(
+                    message,
+                    state_envelope=state_envelope,
+                    conversation_state=conversation_state,
+                    thread_id=thread_id,
+                    streaming=True,
+                    request_started_at=getattr(g, "request_started_at", None),
                 )
             if deterministic_result is not None:
                 full_answer = deterministic_result["answer"]
@@ -4991,6 +5214,17 @@ def post_conversation_message_stream(thread_id: str):
                     transition_result.get("event_cache_replacement_valid")
                 ),
             )
+            civic_311_context_update = bool(transition_result.get("civic_311_context_update"))
+            civic_311_next_context = transition_result.get("civic_311_context")
+            if (
+                not civic_311_structured_request
+                and _clear_civic_311_context_for_message(
+                    message,
+                    active_context=state_envelope.civic_311_context,
+                )
+            ):
+                civic_311_context_update = True
+                civic_311_next_context = None
             persisted = _persist_conversation_turn(
                 thread_id=thread_id,
                 user_id=user_id,
@@ -4999,6 +5233,8 @@ def post_conversation_message_stream(thread_id: str):
                 next_retrieval_cache=persisted_cache,
                 transition=transition,
                 invalidate_retrieval_cache=invalidate_retrieval_cache,
+                next_civic_311_context=civic_311_next_context,
+                update_civic_311_context=civic_311_context_update,
                 user_content=message,
                 user_meta=_user_message_metadata(
                     event_context=event_context,
@@ -5008,6 +5244,7 @@ def post_conversation_message_stream(thread_id: str):
                     active_event_behavior_applied=active_event_request,
                     emergency_decision=emergency_decision,
                     event_query_plan=event_query_plan,
+                    civic_311_diagnostics=transition_result.get("civic_311_diagnostics"),
                 ),
                 assistant_content=full_answer,
                 assistant_mode=mode,
@@ -5039,6 +5276,14 @@ def post_conversation_message_stream(thread_id: str):
                 ),
                 turn_reservation=turn_reservation,
             )
+            if civic_311_structured_request:
+                _log_civic_311_persistence(
+                    transition_result.get("civic_311_diagnostics"),
+                    request_started_at=float(getattr(g, "request_started_at", time.perf_counter())),
+                    persistence_ms=int(persisted.get("persistence_ms", 0)),
+                    thread_id=thread_id,
+                    streaming=True,
+                )
             final_payload = {
                 "type": "final",
                 "answer": full_answer,
@@ -5060,7 +5305,7 @@ def post_conversation_message_stream(thread_id: str):
                 )
             maybe_fault("before_sse_final")
             yield _sse(final_payload)
-            if not emergency_request:
+            if not emergency_request and not civic_311_structured_request:
                 _log_agent_metrics(
                     mode=mode,
                     cache_hit=cache_hit,

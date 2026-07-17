@@ -175,7 +175,7 @@ _TOPIC_BY_ROUTER_VALUE = {
 }
 _ROUTE_COMPATIBILITY = {
     CanonicalTopic.EVENTS: frozenset({"sql", "rag", "hybrid", "structured_events"}),
-    CanonicalTopic.CITY_SERVICES: frozenset({"sql", "rag", "hybrid"}),
+    CanonicalTopic.CITY_SERVICES: frozenset({"sql", "rag", "hybrid", "structured_311"}),
     CanonicalTopic.CRIME_FACTS: frozenset({"sql", "hybrid"}),
     CanonicalTopic.PUBLIC_SAFETY: frozenset({"hybrid"}),
     CanonicalTopic.COMMUNITY_OPINION: frozenset({"rag", "hybrid"}),
