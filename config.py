@@ -185,6 +185,12 @@ REDIS_URL = _env("REDIS_URL", "")
 CACHE_TTL_MINUTES = _int("CACHE_TTL_MINUTES", 60)
 CACHE_MAX_SESSIONS = _int("CACHE_MAX_SESSIONS", 100)
 CACHE_KEY_PREFIX = _env("CACHE_KEY_PREFIX", "rethinkai:chatcache:")
+# Explicit single-process development opt-in for CACHE_BACKEND=memory.
+# Never silently selected when CACHE_BACKEND=mysql. Rejected in PRODUCTION_MODE
+# and when GUNICORN_WORKERS > 1.
+ALLOW_SINGLE_PROCESS_MEMORY_BACKEND = _truthy(
+    "ALLOW_SINGLE_PROCESS_MEMORY_BACKEND", "false"
+)
 
 SEMANTIC_CACHE_ENABLED = _truthy("SEMANTIC_CACHE_ENABLED", "false")
 _semantic_default_backend = "mysql" if CACHE_BACKEND == "mysql" else "memory"
@@ -222,6 +228,24 @@ def validate_cache_backend_contract() -> list[str]:
             f"SEMANTIC_CACHE_BACKEND={SEMANTIC_CACHE_BACKEND!r} is not supported. "
             "Use 'mysql' or 'memory'."
         )
+    workers = max(1, _int("GUNICORN_WORKERS", "1"))
+    production = _truthy("PRODUCTION_MODE", "false")
+    if CACHE_BACKEND == "memory" or SEMANTIC_CACHE_BACKEND == "memory":
+        if production:
+            errors.append(
+                "CACHE_BACKEND/SEMANTIC_CACHE_BACKEND=memory is not allowed "
+                "when PRODUCTION_MODE=true"
+            )
+        elif not ALLOW_SINGLE_PROCESS_MEMORY_BACKEND:
+            errors.append(
+                "memory backend requires ALLOW_SINGLE_PROCESS_MEMORY_BACKEND=true "
+                "(single-process, non-authoritative development only)"
+            )
+        elif workers > 1:
+            errors.append(
+                "memory backend is single-process only; "
+                "GUNICORN_WORKERS must be 1 (or use CACHE_BACKEND=mysql)"
+            )
     return errors
 
 
@@ -668,6 +692,7 @@ class Config:
     PORT = PORT
     DEBUG = DEBUG
     CACHE_BACKEND = CACHE_BACKEND
+    ALLOW_SINGLE_PROCESS_MEMORY_BACKEND = ALLOW_SINGLE_PROCESS_MEMORY_BACKEND
     REDIS_URL = REDIS_URL
     CACHE_TTL_MINUTES = CACHE_TTL_MINUTES
     CACHE_MAX_SESSIONS = CACHE_MAX_SESSIONS

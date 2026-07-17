@@ -49,7 +49,7 @@ from request_metrics import (
     reset_request_metrics,
     resolve_execution_model_name,
 )
-from rate_limit import RateLimiter
+from rate_limit import RateLimitBackendError, RateLimiter
 from security import (
     generate_token,
     get_client_ip,
@@ -647,7 +647,11 @@ class _MySQLSessionCache(_BaseSessionCache):
 
 
 def _build_session_cache() -> _BaseSessionCache:
-    """Construct the configured cache backend, falling back to memory on error."""
+    """Construct the configured cache backend.
+
+    CACHE_BACKEND=mysql fails closed if MySQL is unavailable (no silent memory
+    fallback). CACHE_BACKEND=memory requires explicit single-process opt-in.
+    """
     if Config.CACHE_BACKEND == "redis":
         raise RuntimeError(
             "CACHE_BACKEND=redis is not supported. Use CACHE_BACKEND=mysql."
@@ -655,47 +659,83 @@ def _build_session_cache() -> _BaseSessionCache:
     if Config.CACHE_BACKEND == "mysql":
         try:
             store = _get_mysql_cache_store()
-            if store.ping():
-                print("Session cache backend: mysql")
-                return _MySQLSessionCache(
-                    store, Config.CACHE_TTL_MINUTES, Config.CACHE_KEY_PREFIX,
-                )
+            if not store.ping():
+                raise RuntimeError("mysql cache ping failed")
         except Exception as exc:  # noqa: BLE001
-            print(
-                f"WARNING: mysql cache backend unavailable ({exc.__class__.__name__}); "
-                "falling back to in-memory cache.",
-                file=sys.stderr,
-            )
-    return _MemorySessionCache(Config.CACHE_TTL_MINUTES, Config.CACHE_MAX_SESSIONS)
-
-
-_session_cache = _build_session_cache()
-
-
-def _build_rate_limiter() -> RateLimiter:
-    mysql_store = None
-    if Config.CACHE_BACKEND == "redis":
-        raise RuntimeError(
-            "CACHE_BACKEND=redis is not supported. Use CACHE_BACKEND=mysql."
+            _log_exception("MySQL session cache unavailable", exc)
+            raise RuntimeError(
+                "CACHE_BACKEND=mysql but MySQL is unavailable "
+                "(no silent memory fallback)"
+            ) from None
+        print("Session cache backend: mysql")
+        return _MySQLSessionCache(
+            store, Config.CACHE_TTL_MINUTES, Config.CACHE_KEY_PREFIX,
         )
-    if Config.CACHE_BACKEND == "mysql":
-        try:
-            store = _get_mysql_cache_store()
-            if store.ping():
-                mysql_store = store
-            else:
-                _log_exception(
-                    "Rate limiter mysql unavailable; using in-memory fallback",
-                    RuntimeError("ping failed"),
-                )
-        except Exception as exc:  # noqa: BLE001
-            _log_exception("Rate limiter mysql unavailable; using in-memory fallback", exc)
-    return RateLimiter(
-        mysql_store=mysql_store,
-        key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
+    if Config.CACHE_BACKEND == "memory":
+        _assert_single_process_memory_allowed("CACHE_BACKEND")
+        print(
+            "Session cache backend: memory "
+            "(single-process non-authoritative development only)"
+        )
+        return _MemorySessionCache(Config.CACHE_TTL_MINUTES, Config.CACHE_MAX_SESSIONS)
+    raise RuntimeError(
+        f"CACHE_BACKEND={Config.CACHE_BACKEND!r} is not supported. "
+        "Use 'mysql' or 'memory'."
     )
 
 
+def _assert_single_process_memory_allowed(setting_name: str) -> None:
+    if Config.PRODUCTION_MODE:
+        raise RuntimeError(
+            f"{setting_name}=memory is not allowed when PRODUCTION_MODE=true"
+        )
+    if not Config.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND:
+        raise RuntimeError(
+            f"{setting_name}=memory requires ALLOW_SINGLE_PROCESS_MEMORY_BACKEND=true "
+            "(explicit single-process, non-authoritative development opt-in)"
+        )
+    workers = max(1, int(os.getenv("GUNICORN_WORKERS", "1") or "1"))
+    if workers > 1:
+        raise RuntimeError(
+            f"{setting_name}=memory is single-process only; "
+            "set GUNICORN_WORKERS=1 or use mysql"
+        )
+
+
+def _build_rate_limiter() -> RateLimiter:
+    if Config.CACHE_BACKEND == "redis":
+        raise RuntimeError(
+            "CACHE_BACKEND=redis is not supported. Use CACHE_BACKEND=mysql."
+        )
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if not store.ping():
+                raise RuntimeError("mysql cache ping failed")
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("MySQL rate limiter unavailable", exc)
+            raise RuntimeError(
+                "CACHE_BACKEND=mysql but MySQL is unavailable for rate limiting "
+                "(no silent memory fallback)"
+            ) from None
+        return RateLimiter(
+            mysql_store=store,
+            key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
+            require_mysql=True,
+        )
+    if Config.CACHE_BACKEND == "memory":
+        _assert_single_process_memory_allowed("CACHE_BACKEND")
+        return RateLimiter(
+            mysql_store=None,
+            key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
+            require_mysql=False,
+        )
+    raise RuntimeError(
+        f"CACHE_BACKEND={Config.CACHE_BACKEND!r} is not supported for rate limiting"
+    )
+
+
+_session_cache = _build_session_cache()
 _rate_limiter = _build_rate_limiter()
 
 
@@ -720,13 +760,18 @@ def _build_semantic_cache() -> SemanticResponseCache:
             if not store.ping():
                 raise RuntimeError("mysql cache ping failed")
         except Exception as exc:  # noqa: BLE001
-            _log_exception(
-                "Semantic cache mysql unavailable; using in-memory backend",
-                exc,
-            )
-            backend_name = "memory"
-        else:
-            mysql_store = store
+            _log_exception("MySQL semantic cache unavailable", exc)
+            raise RuntimeError(
+                "SEMANTIC_CACHE_BACKEND=mysql but MySQL is unavailable "
+                "(no silent memory fallback)"
+            ) from None
+        mysql_store = store
+    elif backend_name == "memory":
+        _assert_single_process_memory_allowed("SEMANTIC_CACHE_BACKEND")
+    else:
+        raise RuntimeError(
+            f"SEMANTIC_CACHE_BACKEND={backend_name!r} is not supported"
+        )
 
     backend = build_semantic_cache_backend(
         backend_name=backend_name,
@@ -787,6 +832,9 @@ def _production_env_overlay() -> Dict[str, str]:
             ),
             "CACHE_BACKEND": str(Config.CACHE_BACKEND or ""),
             "SEMANTIC_CACHE_BACKEND": str(Config.SEMANTIC_CACHE_BACKEND or ""),
+            "ALLOW_SINGLE_PROCESS_MEMORY_BACKEND": (
+                "true" if Config.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND else "false"
+            ),
             "SEMANTIC_CACHE_ENABLED": (
                 "true" if Config.SEMANTIC_CACHE_ENABLED else "false"
             ),
@@ -1593,7 +1641,16 @@ def _check_qdrant_health() -> str:
 def _rate_limit_or_none(bucket: str, identifier: str, limit: int, window_seconds: int):
     if not Config.RATE_LIMIT_ENABLED:
         return None
-    allowed, retry_after = _rate_limiter.check(bucket, identifier, limit, window_seconds)
+    try:
+        allowed, retry_after = _rate_limiter.check(
+            bucket, identifier, limit, window_seconds
+        )
+    except RateLimitBackendError:
+        return _json_error(
+            "Rate limiting temporarily unavailable. Please try again shortly.",
+            503,
+            "rate_limit_backend_unavailable",
+        )
     if allowed:
         return None
     response = jsonify(
@@ -3634,6 +3691,10 @@ def after_request_handler(response):
     except Exception:
         pass
     if getattr(g, "emit_request_completion", False):
+        # SSE bodies emit once from the generator finally; skip premature emit here.
+        mimetype = (response.mimetype or "").lower()
+        if getattr(g, "streaming_request", False) and "text/event-stream" in mimetype:
+            return response
         auth_label = "guest" if g.get("is_guest") else (
             "authenticated" if g.get("current_user_row") else "anonymous"
         )
@@ -3671,6 +3732,54 @@ def after_request_handler(response):
             streaming=bool(g.get("streaming_request")),
         )
     return response
+
+
+def _capture_sse_completion_meta() -> Dict[str, Any]:
+    """Snapshot request-scoped completion fields before the SSE generator runs."""
+    auth_label = "guest" if g.get("is_guest") else (
+        "authenticated" if g.get("current_user_row") else "anonymous"
+    )
+    return {
+        "request_id": g.get("request_id"),
+        "endpoint_family": str(g.get("endpoint_family") or "unknown"),
+        "route_or_mode": str(g.get("route_or_mode") or request.path),
+        "started_at": float(g.get("request_started_at") or time.perf_counter()),
+        "authenticated_or_guest": auth_label,
+        "source_freshness_status": g.get("source_freshness_status"),
+    }
+
+
+def _emit_sse_request_completion(
+    meta: Dict[str, Any],
+    *,
+    completion_status: str,
+    error_code: Optional[str] = None,
+    http_status: int = 200,
+) -> None:
+    timings = {}
+    try:
+        from launch_runtime import get_timings
+
+        timings = get_timings()
+    except Exception:
+        timings = {}
+    emit_request_completion(
+        enabled=Config.REQUEST_METRICS_ENABLED,
+        request_id=meta.get("request_id"),
+        endpoint_family=str(meta.get("endpoint_family") or "unknown"),
+        route_or_mode=str(meta.get("route_or_mode") or "messages_sse"),
+        http_status=int(http_status),
+        completion_status=str(completion_status),
+        latency_ms=int((time.perf_counter() - float(meta.get("started_at") or time.perf_counter())) * 1000),
+        worker_pid=os.getpid(),
+        authenticated_or_guest=str(meta.get("authenticated_or_guest") or "anonymous"),
+        mysql_pool_wait_ms=timings.get("mysql_checkout_ms"),
+        llm_calls=get_llm_calls(),
+        embedding_calls=0,
+        source_freshness_status=meta.get("source_freshness_status"),
+        error_code=error_code,
+        streaming=True,
+    )
 
 
 # =============================================================================
@@ -4519,8 +4628,15 @@ def post_conversation_message_stream(thread_id: str):
                 "assistant_message": serialized_assistant,
             }
 
+            _sse_meta = _capture_sse_completion_meta()
+
             def _replay_generate():
-                yield f"data: {json_dumps(replay_payload)}\n\n"
+                try:
+                    yield f"data: {json_dumps(replay_payload)}\n\n"
+                except GeneratorExit:
+                    raise
+                finally:
+                    _emit_sse_request_completion(_sse_meta, completion_status="ok")
 
             return Response(
                 stream_with_context(_replay_generate()),
@@ -4623,6 +4739,8 @@ def post_conversation_message_stream(thread_id: str):
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
 
+    _sse_meta = _capture_sse_completion_meta()
+
     def _generate():
         reset_request_metrics()
         full_answer = ""
@@ -4650,6 +4768,22 @@ def post_conversation_message_stream(thread_id: str):
         execution_metadata: Dict[str, Any] = {}
         deterministic_result: Optional[Dict[str, Any]] = None
         generation_degraded = False
+        completion_status = "ok"
+        error_code: Optional[str] = None
+        turn_failed = False
+
+        def _fail_active_turn() -> None:
+            nonlocal turn_failed
+            if turn_failed:
+                return
+            if turn_reservation is None or getattr(turn_reservation, "replay", False):
+                return
+            fail_turn(
+                get_db_connection,
+                turn_row_id=turn_reservation.turn_row_id,
+                lease_owner=turn_reservation.lease_owner,
+            )
+            turn_failed = True
 
         try:
             yield ": keepalive\n\n"
@@ -4726,26 +4860,41 @@ def post_conversation_message_stream(thread_id: str):
                     full_answer = streamed_text
             if not full_answer and not cache_hit:
                 if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
-                    fail_turn(
-                        get_db_connection,
-                        turn_row_id=turn_reservation.turn_row_id,
-                        lease_owner=turn_reservation.lease_owner,
-                    )
+                    _fail_active_turn()
+                completion_status = "error"
+                error_code = "generation_failed"
                 yield _sse({"type": "error", "error": "Generation failed."})
+                _emit_sse_request_completion(
+                    _sse_meta,
+                    completion_status=completion_status,
+                    error_code=error_code,
+                )
                 return
+        except GeneratorExit:
+            _fail_active_turn()
+            completion_status = "client_disconnected"
+            error_code = "client_disconnected"
+            _emit_sse_request_completion(
+                _sse_meta,
+                completion_status=completion_status,
+                error_code=error_code,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001
             if full_answer.strip():
                 _log_exception("Stream ended with partial answer after error", exc)
                 generation_degraded = True
             else:
-                if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
-                    fail_turn(
-                        get_db_connection,
-                        turn_row_id=turn_reservation.turn_row_id,
-                        lease_owner=turn_reservation.lease_owner,
-                    )
+                _fail_active_turn()
+                completion_status = "error"
+                error_code = "generation_failed"
                 _log_exception("Error during streamed generation", exc)
                 yield _sse({"type": "error", "error": _stream_generation_error(exc)})
+                _emit_sse_request_completion(
+                    _sse_meta,
+                    completion_status=completion_status,
+                    error_code=error_code,
+                )
                 return
 
         if full_answer and not deterministic_request:
@@ -4920,13 +5069,15 @@ def post_conversation_message_stream(thread_id: str):
                             else ({"active_event_followup": True} if active_event_request else None)
                         ),
                 )
+        except GeneratorExit:
+            _fail_active_turn()
+            completion_status = "client_disconnected"
+            error_code = "client_disconnected"
+            raise
         except ConversationConflictError:
-            if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
-                fail_turn(
-                    get_db_connection,
-                    turn_row_id=turn_reservation.turn_row_id,
-                    lease_owner=turn_reservation.lease_owner,
-                )
+            _fail_active_turn()
+            completion_status = "rejected"
+            error_code = "conversation_conflict"
             if emergency_request:
                 _log_emergency_metrics(
                     emergency_decision,
@@ -4942,13 +5093,10 @@ def post_conversation_message_stream(thread_id: str):
                 "code": "conversation_conflict",
             })
         except Exception as exc:  # noqa: BLE001
-            if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
-                fail_turn(
-                    get_db_connection,
-                    turn_row_id=turn_reservation.turn_row_id,
-                    lease_owner=turn_reservation.lease_owner,
-                )
+            _fail_active_turn()
             if _is_retryable_db_contention(exc):
+                completion_status = "rejected"
+                error_code = "turn_in_progress"
                 yield _sse({
                     "type": "error",
                     "error": "This turn is already being processed. Please wait and try again.",
@@ -4956,6 +5104,8 @@ def post_conversation_message_stream(thread_id: str):
                     "retry_after": 1,
                 })
                 return
+            completion_status = "error"
+            error_code = "persistence_failed"
             if emergency_request:
                 _log_emergency_metrics(
                     emergency_decision,
@@ -4967,6 +5117,12 @@ def post_conversation_message_stream(thread_id: str):
                 )
             _log_exception("Error persisting streamed message", exc)
             yield _sse({"type": "error", "error": "Failed to save message."})
+        finally:
+            _emit_sse_request_completion(
+                _sse_meta,
+                completion_status=completion_status,
+                error_code=error_code,
+            )
 
     return Response(
         stream_with_context(_generate()),

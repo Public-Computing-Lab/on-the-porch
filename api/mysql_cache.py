@@ -162,7 +162,8 @@ class MySQLCacheStore:
             finally:
                 cursor.close()
         except Exception:
-            return True, 0
+            # Fail closed for shared MySQL rate limiting — never silently allow.
+            raise
         finally:
             if conn is not None:
                 try:

@@ -1,7 +1,8 @@
-"""Lightweight request rate limiting with MySQL or in-process fallback.
+"""Lightweight request rate limiting with MySQL or explicit in-process mode.
 
 Redis is not supported. Shared multi-worker limits use MySQL via MySQLCacheStore.
-Process-local memory is only a non-authoritative single-process fallback.
+Process-local memory is only allowed when the caller explicitly opts into
+single-process development mode (never as a silent MySQL fallback).
 """
 
 from __future__ import annotations
@@ -9,6 +10,10 @@ from __future__ import annotations
 import threading
 import time
 from typing import Optional, Tuple
+
+
+class RateLimitBackendError(RuntimeError):
+    """MySQL rate-limit backend failed; caller should map to a controlled response."""
 
 
 class RateLimiter:
@@ -19,9 +24,11 @@ class RateLimiter:
         *,
         mysql_store=None,
         key_prefix: str = "rethinkai:ratelimit:",
+        require_mysql: bool = False,
     ) -> None:
         self._mysql = mysql_store
         self._prefix = key_prefix
+        self._require_mysql = bool(require_mysql or mysql_store is not None)
         self._memory: dict[str, tuple[int, float]] = {}
         self._lock = threading.Lock()
 
@@ -29,7 +36,11 @@ class RateLimiter:
         return f"{self._prefix}{bucket}:{identifier}"
 
     def check(self, bucket: str, identifier: str, limit: int, window_seconds: int) -> Tuple[bool, int]:
-        """Return (allowed, retry_after_seconds)."""
+        """Return (allowed, retry_after_seconds).
+
+        When MySQL is the configured shared backend, errors propagate as
+        RateLimitBackendError (fail closed) — never silently allow traffic.
+        """
         if limit <= 0 or window_seconds <= 0:
             return True, 0
 
@@ -37,8 +48,12 @@ class RateLimiter:
         if self._mysql is not None:
             try:
                 return self._mysql.check_rate_limit(key, limit, window_seconds)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                raise RateLimitBackendError(
+                    "shared rate-limit backend unavailable"
+                ) from exc
+        if self._require_mysql:
+            raise RateLimitBackendError("shared rate-limit backend unavailable")
 
         now = time.time()
         with self._lock:

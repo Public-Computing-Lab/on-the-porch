@@ -120,6 +120,10 @@ def validate_launch_runtime(
     ).strip().lower()
     if semantic_backend != "mysql":
         errors.append("SEMANTIC_CACHE_BACKEND must be 'mysql' in production")
+    if _truthy(source.get("ALLOW_SINGLE_PROCESS_MEMORY_BACKEND"), "false"):
+        errors.append(
+            "ALLOW_SINGLE_PROCESS_MEMORY_BACKEND must be false in production"
+        )
 
     if _truthy(source.get("DYNAMIC_SQL_ENABLED"), "false"):
         errors.append("DYNAMIC_SQL_ENABLED must be false in production")

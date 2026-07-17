@@ -111,6 +111,10 @@ GUNICORN_WORKER_CLASS=gthread
 # memory is allowed only as single-process local optimization.
 # Redis is not supported (CACHE_BACKEND=redis will refuse to start).
 CACHE_BACKEND=mysql
+# Explicit single-process, non-authoritative development memory opt-in only.
+# Rejected when PRODUCTION_MODE=true or GUNICORN_WORKERS>1.
+# ALLOW_SINGLE_PROCESS_MEMORY_BACKEND=false
+# MySQL selection fails closed — there is no silent MySQL→memory fallback.
 # REDIS_URL is obsolete and ignored if present.
 CACHE_TTL_MINUTES=60
 CACHE_MAX_SESSIONS=100

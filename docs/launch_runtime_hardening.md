@@ -172,6 +172,12 @@ after staging validation.
 **Retention tradeoff:** 30 days for COMPLETED covers slow transport retries and
 support investigation; shorten only after confirming client retry horizons.
 
+**Operational consequence after deletion:** If a client retries with the same
+`client_turn_id` after the turn row has been deleted past retention, the server
+treats it as a **new** reservation (no COMPLETED replay). That can create a
+duplicate resident-visible turn. Keep retention ≥ the documented client retry
+horizon; do not clean up inside that window.
+
 ## Retryable `turn_in_progress`
 
 Identical in-flight turns return HTTP 409 with `code=turn_in_progress` and
@@ -194,3 +200,19 @@ unnecessary internal retries. Health remains lightly rate-policy appropriate.
 
 Unsupported Redis env vars must not activate Redis. Production cannot silently
 fall back to process-local authoritative cache/state.
+
+`CACHE_BACKEND=mysql` and `SEMANTIC_CACHE_BACKEND=mysql` **fail closed** if MySQL
+is unavailable (startup / builder raises; no silent switch to memory).
+
+Process-local memory is an explicit, single-process, non-authoritative
+development opt-in only:
+
+```
+ALLOW_SINGLE_PROCESS_MEMORY_BACKEND=true
+CACHE_BACKEND=memory
+GUNICORN_WORKERS=1
+PRODUCTION_MODE=false
+```
+
+Memory mode is rejected when `PRODUCTION_MODE=true` or `GUNICORN_WORKERS>1`.
+Shared rate limiting with MySQL also fails closed (no allow-on-error).

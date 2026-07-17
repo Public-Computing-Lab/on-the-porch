@@ -750,6 +750,189 @@ def case_50_health_no_expensive_scans() -> None:
     assert "vectordb" not in health_src.lower()
 
 
+def case_51_mysql_unavailable_no_silent_memory() -> None:
+    import api_v2
+
+    src = Path(api_v2.__file__).read_text(encoding="utf-8")
+    assert "no silent memory fallback" in src
+    assert "ALLOW_SINGLE_PROCESS_MEMORY_BACKEND" in src
+    assert "falling back to in-memory" not in src.lower()
+    assert "fallback to memory" not in src.lower()
+    rl = (ROOT / "api" / "rate_limit.py").read_text(encoding="utf-8")
+    assert "RateLimitBackendError" in rl
+    mc = (ROOT / "api" / "mysql_cache.py").read_text(encoding="utf-8")
+    assert "never silently allow" in mc.lower() or "Fail closed" in mc
+
+
+def case_52_explicit_memory_requires_opt_in() -> None:
+    result = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(
+            CACHE_BACKEND="memory",
+            ALLOW_SINGLE_PROCESS_MEMORY_BACKEND="true",
+        ),
+    )
+    assert not result.ok
+    import config as cfg
+
+    old = (
+        cfg.CACHE_BACKEND,
+        cfg.SEMANTIC_CACHE_BACKEND,
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+    )
+    try:
+        cfg.CACHE_BACKEND = "memory"
+        cfg.SEMANTIC_CACHE_BACKEND = "memory"
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND = False
+        errors = cfg.validate_cache_backend_contract()
+        assert any("ALLOW_SINGLE_PROCESS_MEMORY_BACKEND" in e for e in errors)
+    finally:
+        (
+            cfg.CACHE_BACKEND,
+            cfg.SEMANTIC_CACHE_BACKEND,
+            cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+        ) = old
+
+
+def case_53_multi_worker_memory_rejected() -> None:
+    import config as cfg
+
+    old = (
+        cfg.CACHE_BACKEND,
+        cfg.SEMANTIC_CACHE_BACKEND,
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+    )
+    try:
+        cfg.CACHE_BACKEND = "memory"
+        cfg.SEMANTIC_CACHE_BACKEND = "mysql"
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND = True
+        with mock.patch.dict(
+            os.environ, {"GUNICORN_WORKERS": "2", "PRODUCTION_MODE": "false"}
+        ):
+            errors = cfg.validate_cache_backend_contract()
+        assert any(
+            "single-process" in e.lower() or "GUNICORN_WORKERS" in e for e in errors
+        )
+    finally:
+        (
+            cfg.CACHE_BACKEND,
+            cfg.SEMANTIC_CACHE_BACKEND,
+            cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+        ) = old
+
+
+def case_54_production_memory_rejected() -> None:
+    result = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(
+            CACHE_BACKEND="memory",
+            ALLOW_SINGLE_PROCESS_MEMORY_BACKEND="true",
+        ),
+    )
+    assert not result.ok
+
+
+def case_55_one_worker_explicit_memory_allowed() -> None:
+    import config as cfg
+
+    old = (
+        cfg.CACHE_BACKEND,
+        cfg.SEMANTIC_CACHE_BACKEND,
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+    )
+    try:
+        cfg.CACHE_BACKEND = "memory"
+        cfg.SEMANTIC_CACHE_BACKEND = "memory"
+        cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND = True
+        with mock.patch.dict(
+            os.environ, {"GUNICORN_WORKERS": "1", "PRODUCTION_MODE": "false"}
+        ):
+            errors = cfg.validate_cache_backend_contract()
+        assert errors == [], errors
+    finally:
+        (
+            cfg.CACHE_BACKEND,
+            cfg.SEMANTIC_CACHE_BACKEND,
+            cfg.ALLOW_SINGLE_PROCESS_MEMORY_BACKEND,
+        ) = old
+
+
+def case_56_ui_entity_live_fixture_date_stable() -> None:
+    src = (ROOT / "scripts" / "test_ui_entity_context.py").read_text(encoding="utf-8")
+    assert "_seed_live_event_fixture" in src
+    assert "ZoneInfo" in src or "America/New_York" in src
+    assert "OTP UI LIVE FIXTURE" in src
+    assert "simulated_today" in src
+    assert "(435,)" not in src
+
+
+def case_57_golden_fact_runner_bounded() -> None:
+    src = (ROOT / "scripts" / "golden_fact_test.py").read_text(encoding="utf-8")
+    assert "TIMEOUT_CONTROLLED" in src
+    assert "SKIP_ENVIRONMENT" in src
+    assert "ThreadPoolExecutor" in src
+    assert "GOLDEN_SUITE_TIMEOUT" in src or "SUITE_TIMEOUT" in src
+
+
+def case_58_sse_completion_deferred_to_generator() -> None:
+    import api_v2
+
+    src = Path(api_v2.__file__).read_text(encoding="utf-8")
+    assert "_emit_sse_request_completion" in src
+    assert "client_disconnected" in src
+    assert "GeneratorExit" in src
+
+
+def case_59_rate_limit_mysql_fail_closed() -> None:
+    from rate_limit import RateLimitBackendError, RateLimiter
+
+    class _Boom:
+        def check_rate_limit(self, *a, **k):
+            raise RuntimeError("mysql down")
+
+    limiter = RateLimiter(mysql_store=_Boom(), require_mysql=True)
+    try:
+        limiter.check("chat", "x", 1, 60)
+        raise AssertionError("expected RateLimitBackendError")
+    except RateLimitBackendError:
+        pass
+
+
+def case_60_startup_validator_paths_share_contract() -> None:
+    import api_v2
+
+    src = Path(api_v2.__file__).read_text(encoding="utf-8")
+    assert "validate_launch_runtime" in src
+    assert "_production_env_overlay" in src
+    assert "_run_startup_checks" in src
+    start_api = (ROOT / "start_api.sh").read_text(encoding="utf-8")
+    assert "launch_runtime" in start_api
+    gconf = (ROOT / "api" / "gunicorn.conf.py").read_text(encoding="utf-8")
+    assert "launch_runtime" in gconf
+
+
+def case_61_cleanup_replay_horizon_documented() -> None:
+    docs = (ROOT / "docs" / "launch_runtime_hardening.md").read_text(encoding="utf-8")
+    assert "client_turn_id" in docs
+    assert "deleted" in docs.lower() or "deletion" in docs.lower()
+
+
+def case_62_no_generated_artifacts_committed() -> None:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "diff", "--name-only", "main...HEAD"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    names = proc.stdout.splitlines()
+    banned = (".pyc", "__pycache__", ".chroma", "node_modules/", ".DS_Store")
+    offenders = [n for n in names if any(b in n for b in banned)]
+    assert not offenders, offenders
+
+
 def main() -> int:
     cases = [
         ("01_valid_production_config", case_01_valid_production_config),
@@ -802,6 +985,18 @@ def main() -> int:
         ("48_process_counters_non_authoritative", case_48_process_counters_non_authoritative),
         ("49_faults_not_via_request_in_production", case_49_faults_not_via_request_in_production),
         ("50_health_no_expensive_scans", case_50_health_no_expensive_scans),
+        ("51_mysql_unavailable_no_silent_memory", case_51_mysql_unavailable_no_silent_memory),
+        ("52_explicit_memory_requires_opt_in", case_52_explicit_memory_requires_opt_in),
+        ("53_multi_worker_memory_rejected", case_53_multi_worker_memory_rejected),
+        ("54_production_memory_rejected", case_54_production_memory_rejected),
+        ("55_one_worker_explicit_memory_allowed", case_55_one_worker_explicit_memory_allowed),
+        ("56_ui_entity_live_fixture_date_stable", case_56_ui_entity_live_fixture_date_stable),
+        ("57_golden_fact_runner_bounded", case_57_golden_fact_runner_bounded),
+        ("58_sse_completion_deferred_to_generator", case_58_sse_completion_deferred_to_generator),
+        ("59_rate_limit_mysql_fail_closed", case_59_rate_limit_mysql_fail_closed),
+        ("60_startup_validator_paths_share_contract", case_60_startup_validator_paths_share_contract),
+        ("61_cleanup_replay_horizon_documented", case_61_cleanup_replay_horizon_documented),
+        ("62_no_generated_artifacts_committed", case_62_no_generated_artifacts_committed),
     ]
     print(f"Running {len(cases)} launch-runtime hardening cases...\n")
     for name, fn in cases:
