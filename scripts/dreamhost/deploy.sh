@@ -1,11 +1,22 @@
 #!/bin/bash
-# DreamHost Deployment Script
-# This script deploys the RethinkAI application to DreamHost
+# LEGACY / UNVALIDATED — DreamHost Passenger deployment helper.
+# Preferred staging/production-mode path: PRODUCTION_MODE=true ./start_api.sh (Gunicorn).
+# See docs/staging/hosting_audit.md.
+#
+# This script will not run unless OTP_ALLOW_LEGACY_PASSENGER_DEPLOY=1 is set,
+# after operators explicitly accept that Passenger is unverified vs launch-runtime.
 
 set -e  # Exit on error
 
+if [ "${OTP_ALLOW_LEGACY_PASSENGER_DEPLOY:-}" != "1" ]; then
+  echo "REFUSED: scripts/dreamhost/deploy.sh is LEGACY (Passenger)." >&2
+  echo "Supported path: PRODUCTION_MODE=true ./start_api.sh" >&2
+  echo "To override after review: OTP_ALLOW_LEGACY_PASSENGER_DEPLOY=1 $0" >&2
+  exit 2
+fi
+
 echo "=========================================="
-echo "RethinkAI DreamHost Deployment"
+echo "RethinkAI DreamHost Deployment (LEGACY Passenger)"
 echo "=========================================="
 
 # Configuration
