@@ -1,5 +1,11 @@
 # DreamHost Deployment Guide
 
+> **Staging / post–PR #18 notice:** The **supported** production-mode startup path is
+> `./start_api.sh` (Gunicorn + `api/gunicorn.conf.py` + launch-runtime validation).
+> Passenger-oriented steps below are **legacy** and must not be used for the staging
+> validation slice unless operators explicitly approve an exception.
+> See `docs/staging/hosting_audit.md` and `docs/staging/README.md`.
+
 This directory contains scripts for deploying the RethinkAI application on DreamHost.
 
 ## Prerequisites
