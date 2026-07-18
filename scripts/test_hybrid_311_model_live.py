@@ -95,10 +95,10 @@ def run(base_url: str, expected_mode: str) -> Dict[str, Any]:
     records.append(recent)
     check("June 27, 2026" in recent["answer"], "recent answer must disclose data-through date")
     check("not" in recent["answer"].lower() and "distinct" in recent["answer"].lower(), "recent answer needs distinct-request caveat")
-    if hybrid:
-        _assert_hybrid_record(recent, planner=0, synthesis=1)
-    else:
-        check(int(recent["diagnostics"].get("llm_call_count") or 0) == 0, "disabled mode used a model")
+    check(int(recent["diagnostics"].get("llm_call_count") or 0) == 0, "recent answer should be deterministic")
+    check(recent["diagnostics"].get("answer_mode") == "DETERMINISTIC_ENRICHED", "recent deterministic mode")
+    check("most common" not in recent["answer"].lower(), "recent answer leaked category ranking")
+    check("street breakdown" not in recent["answer"].lower(), "recent answer leaked street commentary")
 
     top = _turn(client, pothole_thread, "B_top_streets", "Which streets have the most pothole reports?")
     records.append(top)
@@ -166,16 +166,19 @@ def run(base_url: str, expected_mode: str) -> Dict[str, Any]:
     comparison = _turn(client, comparison_thread, "E_comparison", "Are pothole complaints getting worse?")
     records.append(comparison)
     comparison_text = comparison["answer"].lower()
+    check("12" in comparison_text and "5" in comparison_text, "comparison counts missing")
+    check("decrease of 7" in comparison_text, "comparison absolute change missing")
+    check("58.3%" in comparison_text, "comparison percentage missing")
+    check("two latest comparable 7-day periods" in comparison_text, "equivalent comparison period missing")
+    check("does not describe current conditions" in comparison_text, "comparison freshness missing")
+    check("most common" not in comparison_text, "comparison leaked category ranking")
     check(
-        "preceding 7-day period" in comparison_text
-        or "preceding comparable period" in comparison_text,
-        "equivalent comparison period missing",
+        not re.search(r"\b(?:getting (?:better|worse)|improving|worsening|trend continued)\b", comparison_text),
+        "comparison made an unsupported general trend claim",
     )
-    if hybrid:
-        _assert_hybrid_record(comparison, planner=0, synthesis=1)
-        check("-%" not in comparison["answer"] and not re.search(r"-\d+(?:\.\d+)?%", comparison["answer"]), "signed decrease percentage")
-    else:
-        check(int(comparison["diagnostics"].get("llm_call_count") or 0) == 0, "disabled comparison used model")
+    check(int(comparison["diagnostics"].get("llm_call_count") or 0) == 0, "comparison should be deterministic")
+    check(comparison["diagnostics"].get("answer_mode") == "DETERMINISTIC_ENRICHED", "comparison deterministic mode")
+    check("-%" not in comparison["answer"] and not re.search(r"-\d+(?:\.\d+)?%", comparison["answer"]), "signed decrease percentage")
 
     category_thread = client.create_thread("311 category acceptance")
     category = _turn(client, category_thread, "F_category_overview", "What street problems are people reporting around Dorchester?")
@@ -185,10 +188,8 @@ def run(base_url: str, expected_mode: str) -> Dict[str, Any]:
         all(label in category_text for label in ("trash and illegal dumping", "street and pavement condition", "pothole")),
         "humanized category evidence missing",
     )
-    if hybrid:
-        _assert_hybrid_record(category, planner=0, synthesis=1)
-    else:
-        check(int(category["diagnostics"].get("llm_call_count") or 0) == 0, "disabled category used model")
+    check(int(category["diagnostics"].get("llm_call_count") or 0) == 0, "category answer should be deterministic")
+    check(category["diagnostics"].get("answer_mode") == "DETERMINISTIC_ENRICHED", "category deterministic mode")
 
     # Completed-turn replay proves JSON/SSE parity without a second model call.
     parity_thread = client.create_thread("311 JSON SSE replay parity")

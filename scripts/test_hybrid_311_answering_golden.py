@@ -69,7 +69,8 @@ def test_recent_reports() -> None:
     assert_resident_safe(answer)
     check("23 pothole-related 311 service requests" in answer, "count answer missing")
     check("covers only part of last month" in answer and "June 27, 2026" in answer, "partial coverage missing")
-    check("does not verify" in answer, "closed-status caveat missing")
+    check("not necessarily distinct verified physical conditions" in answer, "service-request caveat missing")
+    check("Blue Hill" not in answer and "Dorchester Ave" not in answer, "recent answer must not volunteer streets")
 
 
 def test_comparison() -> None:
@@ -81,6 +82,7 @@ def test_comparison() -> None:
     ))
     assert_resident_safe(answer)
     check("increased from 17 to 23" in answer, "comparison values missing")
+    check("increase of 6 requests, or 35.3%" in answer, "comparison magnitude missing")
     check("getting worse" not in answer.lower(), "comparison must not overstate current conditions")
 
 

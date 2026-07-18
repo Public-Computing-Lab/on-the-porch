@@ -657,13 +657,11 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
         (
             OutputName.ISSUE_COUNT.value,
             OutputName.STATUS_BREAKDOWN.value,
-            OutputName.TOP_STREETS.value,
             OutputName.SOURCE_FRESHNESS.value,
         ),
         (
             ToolName.ISSUE_COUNT.value,
             ToolName.STATUS_BREAKDOWN.value,
-            ToolName.TOP_STREETS.value,
             ToolName.SOURCE_FRESHNESS.value,
         ),
         "recent_reports",
@@ -1447,6 +1445,7 @@ def _bundle_from_execution(
             "domain": "311",
             "intent": plan.intent,
             "issue_label": _family_label(plan.issue_family) if plan.issue_family else None,
+            "requested_outputs": list(plan.outputs),
         },
         issue_family=family.value if family else None,
         geography=geography.to_dict(),
@@ -1557,13 +1556,7 @@ def _period_intro(bundle: EvidenceBundle) -> str:
             + used
         )
     if executed != requested:
-        used = executed
-        if range_text and _normalized(range_text) not in _normalized(executed):
-            used = f"{executed} ({range_text})"
-        return (
-            f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions. "
-            f"I used {used}."
-        )
+        return f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions."
     if bundle.evidence_status in {EvidenceStatus.PARTIALLY_COVERED, EvidenceStatus.STALE_BUT_USABLE}:
         return f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions."
     return ""
@@ -1631,16 +1624,26 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         current = _int_value(comparison.get("current_count"))
         previous = _int_value(comparison.get("previous_count"))
         difference = _int_value(comparison.get("difference"))
+        try:
+            percentage = abs(float(comparison["percentage_change"]))
+        except (KeyError, TypeError, ValueError):
+            percentage = None
         days = max(1, (date.fromisoformat(bundle.executed_period["end_date_exclusive"]) - date.fromisoformat(bundle.executed_period["start_date"])).days)
         if difference > 0:
-            sentence = f"In the two latest comparable {days}-day periods available, {request_label} increased from {previous} to {current}."
+            direction = "increase"
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} increased from {previous} to {current}"
         elif difference < 0:
-            sentence = f"In the two latest comparable {days}-day periods available, {request_label} decreased from {previous} to {current}."
+            direction = "decrease"
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} decreased from {previous} to {current}"
         else:
-            sentence = f"In the two latest comparable {days}-day periods available, {request_label} remained at {current}."
-        current_range = _period_range(bundle.executed_period)
-        if current_range:
-            sentence += f" The more recent period was {current_range}."
+            direction = None
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} remained at {current}"
+        if direction:
+            request_word = "request" if abs(difference) == 1 else "requests"
+            sentence += f", a {direction} of {abs(difference)} {request_word}"
+            if percentage is not None:
+                sentence += f", or {percentage:g}%"
+        sentence += "."
         lines.append(sentence)
         _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
@@ -1690,6 +1693,24 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_FALLBACK
+    if plan.intent == "recent_reports" and count > 0:
+        request_word = _counted_request_label(count, bundle.issue_family)
+        lines.append(
+            f"During {period}, there {'was' if count == 1 else 'were'} {count} {request_word} {place_scope}."
+        )
+        status = bundle.facts.get(ToolName.STATUS_BREAKDOWN.value) or {}
+        open_count = _optional_nonnegative_int(status.get("open_count"))
+        closed_count = _optional_nonnegative_int(status.get("closed_count"))
+        if open_count is not None and closed_count is not None:
+            closed_verb = "is" if closed_count == 1 else "are"
+            open_verb = "is" if open_count == 1 else "are"
+            lines.append(
+                f"{closed_count} {closed_verb} recorded as closed and {open_count} {open_verb} recorded as open or in progress."
+            )
+        lines.append("Service requests are not necessarily distinct verified physical conditions.")
+        _append_period_context(lines, prefix, bundle)
+        lines.append(f"Source: {SOURCE_LABEL}.")
+        return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     if count == 0:
         lines.append(f"I did not find matching {request_label} {place_scope} for {period}.")
         if street_label:
@@ -1728,13 +1749,84 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
     return "\n\n".join(lines), mode
 
 
-def _synthesis_prompt(question: str, bundle: EvidenceBundle) -> str:
+_MODEL_FACT_BY_OUTPUT = {
+    OutputName.ISSUE_COUNT.value: "issue_count",
+    OutputName.MATCHING_REQUESTS.value: "issue_count",
+    OutputName.STATUS_BREAKDOWN.value: "status_breakdown",
+    OutputName.TOP_STREETS.value: "top_streets",
+    OutputName.RECENT_EXAMPLES.value: "recent_examples",
+    OutputName.PERIOD_COMPARISON.value: "period_comparison",
+    OutputName.CATEGORY_DISTRIBUTION.value: "category_distribution",
+}
+
+
+def _answer_task_projection(question: str, plan: StrictToolPlan, bundle: EvidenceBundle) -> Dict[str, Any]:
+    """Project only evidence that can answer this plan's requested information need."""
+    payload = bundle.bounded_for_model()
+    requested = set(plan.outputs)
+    allowed_by_intent = {
+        "exact_count": {OutputName.ISSUE_COUNT.value},
+        "recent_reports": {OutputName.ISSUE_COUNT.value, OutputName.STATUS_BREAKDOWN.value},
+        "status_followup": {OutputName.STATUS_BREAKDOWN.value},
+        "top_streets": {OutputName.TOP_STREETS.value, OutputName.ISSUE_COUNT.value},
+        "street_status": {
+            OutputName.MATCHING_REQUESTS.value,
+            OutputName.ISSUE_COUNT.value,
+            OutputName.STATUS_BREAKDOWN.value,
+            OutputName.RECENT_EXAMPLES.value,
+        },
+        "period_comparison": {OutputName.PERIOD_COMPARISON.value},
+        "category_overview": {OutputName.CATEGORY_DISTRIBUTION.value},
+    }.get(plan.intent, requested)
+    relevant_outputs = requested.intersection(allowed_by_intent)
+    fact_keys = {
+        _MODEL_FACT_BY_OUTPUT[output]
+        for output in relevant_outputs
+        if output in _MODEL_FACT_BY_OUTPUT
+    }
+    payload["scope"] = {
+        "intent": plan.intent,
+        "issue_label": bundle.question_scope.get("issue_label") or _family_label(bundle.issue_family),
+    }
+    payload["task"] = {
+        "requested_information": [key.replace("_", " ") for key in sorted(fact_keys)],
+        "resident_question": question[:600],
+    }
+    payload["facts"] = {
+        key: value
+        for key, value in dict(payload.get("facts") or {}).items()
+        if key in fact_keys
+    }
+    location_relevant = bool(bundle.geography.get("street") or bundle.geography.get("subarea"))
+    street_relevant = OutputName.TOP_STREETS.value in relevant_outputs or location_relevant
+    payload["limitations"] = [
+        limitation
+        for limitation in payload.get("limitations") or []
+        if street_relevant or "street" not in str(limitation).lower()
+    ]
+    return payload
+
+
+def _synthesis_prompt(question: str, bundle: EvidenceBundle, plan: StrictToolPlan) -> str:
     executed_label = str(bundle.executed_period.get("label") or "the executed period")
+    intent_instruction = {
+        "street_status": (
+            "Answer the matching-request and status questions together. Include recent examples only when supplied. "
+            "State that request records or their absence do not determine whether the physical condition was addressed. "
+        ),
+        "period_comparison": (
+            "Report only the change between the two supplied equivalent periods; do not make a current or general trend claim. "
+        ),
+        "category_overview": (
+            "Rank only the supplied street-related categories and do not discuss missing street fields. "
+        ),
+    }.get(plan.intent, "Answer only the requested information represented in the task evidence. ")
     return (
         "Answer a Dorchester resident using only this structured official 311 evidence. "
-        "Answer the question first. Preserve counts, streets, geography, and periods exactly. "
-        "Include each non-empty count, status breakdown, street ranking, comparison, category, or recent example supplied when it directly answers the question. "
-        "For a percentage change, use the absolute magnitude with the direction word increase or decrease; do not write a signed percentage. "
+        "Answer the question first. Preserve supplied counts, streets, geography, and periods exactly. "
+        "Do not mention an evidence type, missing field, ranking, or limitation unless it appears in the answer task below. "
+        + intent_instruction
+        + "For a percentage change, use the absolute magnitude with the direction word increase or decrease; do not write a signed percentage. "
         f"Call the records '{_request_label(bundle.issue_family)}', not complaints or reports. "
         "Say that service requests are not necessarily distinct verified physical conditions. "
         "Use count-aware grammar: one request is recorded as open; multiple requests are recorded as open. "
@@ -1742,18 +1834,16 @@ def _synthesis_prompt(question: str, bundle: EvidenceBundle) -> str:
         "Do not mention tools, SQL, RAG, tables, or internal identifiers. Do not infer repair from closed status or active work from open status. "
         "For a street_status question, explicitly state that request records or their absence do not determine whether the physical condition was addressed. "
         "Do not add emergency guidance. If data is stale or partial, use the supplied resident-facing limitation; never say stale but usable, outside local coverage, or coverage status. "
-        "For comparisons, report only the change between the two supplied equivalent periods; do not claim that conditions are getting better or worse now. "
-        "For a category overview, begin with 'During [period]' and state which street-related 311 service-request categories were most common. "
         "For a zero count, say that you did not find matching records; never claim definitively that there were no requests. "
         f"State the executed period using this exact label or its exact inclusive date range: {executed_label}. "
         f"End with exactly: Source: {SOURCE_LABEL}. "
-        "Resident question: " + question[:600] + "\nEvidence: " + json.dumps(bundle.bounded_for_model(), ensure_ascii=False, separators=(",", ":"), default=str)
+        "Resident question: " + question[:600] + "\nAnswer task evidence: " + json.dumps(_answer_task_projection(question, plan, bundle), ensure_ascii=False, separators=(",", ":"), default=str)
     )
 
 
-def _repair_prompt(question: str, bundle: EvidenceBundle, failures: Sequence[str]) -> str:
+def _repair_prompt(question: str, bundle: EvidenceBundle, plan: StrictToolPlan, failures: Sequence[str]) -> str:
     return (
-        _synthesis_prompt(question, bundle)
+        _synthesis_prompt(question, bundle, plan)
         + "\nThe previous draft failed deterministic validation for only these reasons: "
         + ", ".join(bounded_strings(failures, limit=8, maximum_length=48))
         + f". Include the source line exactly as 'Source: {SOURCE_LABEL}.' "
@@ -1775,12 +1865,14 @@ def _should_synthesize(plan: StrictToolPlan, bundle: EvidenceBundle) -> bool:
     )
     if issue_count == 0:
         return False
-    return plan.intent in {
-        "recent_reports",
-        "street_status",
-        "period_comparison",
-        "category_overview",
-    }
+    # Use synthesis only when it adds semantic or communicative value beyond
+    # the deterministic evidence composer. Reviewed count/status, ranking, and
+    # two-period shapes are clearer and cheaper when composed deterministically.
+    return plan.intent == "street_status" and {
+        OutputName.MATCHING_REQUESTS.value,
+        OutputName.STATUS_BREAKDOWN.value,
+        OutputName.RECENT_EXAMPLES.value,
+    }.issubset(set(plan.outputs))
 
 
 @dataclass(frozen=True)
@@ -1871,7 +1963,77 @@ def _answer_has_labeled_count(text: str, count: int, label: str) -> bool:
     )
 
 
-def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[str, ...]]:
+def _relevance_issues(
+    text: str,
+    bundle: EvidenceBundle,
+    plan: Optional[StrictToolPlan],
+) -> List[str]:
+    """Reject supported-but-off-task claim classes for a known answer plan."""
+    if plan is not None:
+        intent = plan.intent
+        requested = set(plan.outputs)
+    else:
+        intent = str(bundle.question_scope.get("intent") or "")
+        requested = {
+            str(value)
+            for value in bundle.question_scope.get("requested_outputs") or ()
+        }
+    if not requested:
+        return []
+
+    issues: List[str] = []
+    category_ranking = re.search(
+        r"\b(?:most common|leading|highest(?:-ranked)?|top categor(?:y|ies))\b",
+        text,
+        re.IGNORECASE,
+    )
+    if category_ranking and not (
+        intent == "category_overview"
+        and OutputName.CATEGORY_DISTRIBUTION.value in requested
+    ):
+        issues.append("irrelevant_category_ranking")
+
+    street_commentary = re.search(
+        r"\b(?:street (?:breakdown|fields?|data|ranking)|streets? (?:were|was) not specified|usable street breakdown|streets? with the most)\b",
+        text,
+        re.IGNORECASE,
+    )
+    location_relevant = bool(bundle.geography.get("street") or bundle.geography.get("subarea"))
+    if street_commentary and not (
+        OutputName.TOP_STREETS.value in requested or location_relevant
+    ):
+        issues.append("irrelevant_street_commentary")
+
+    status_commentary = re.search(r"\b(?:open|closed|in progress)\b", text, re.IGNORECASE)
+    if status_commentary and not (
+        OutputName.STATUS_BREAKDOWN.value in requested
+        or intent in {"status_followup", "street_status"}
+    ):
+        issues.append("irrelevant_status_commentary")
+
+    comparison_claim = re.search(
+        r"\b(?:increased|decreased|increase of|decrease of|percentage change|comparable(?:\s+\d+-day)?\s+periods?|compared with|compared to)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if comparison_claim and OutputName.PERIOD_COMPARISON.value not in requested:
+        issues.append("irrelevant_comparison_claim")
+
+    work_completion = re.search(
+        r"\b(?:repaired|fixed|active work|physical condition was addressed|work was completed)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if work_completion and intent not in {"street_status", "status_followup"}:
+        issues.append("irrelevant_work_completion_caveat")
+    return issues
+
+
+def validate_claims(
+    answer: str,
+    bundle: EvidenceBundle,
+    plan: Optional[StrictToolPlan] = None,
+) -> Tuple[bool, Tuple[str, ...]]:
     text = str(answer or "").strip()
     normalized_text = _normalized(text)
     issues: List[str] = []
@@ -1889,6 +2051,7 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         issues.append("internal_freshness_wording")
     if re.search(r"\bcomplaints?\b", text, re.IGNORECASE):
         issues.append("complaint_terminology")
+    issues.extend(_relevance_issues(text, bundle, plan))
     if bundle.question_scope.get("intent") == "period_comparison" and re.search(
         r"\b(?:getting (?:better|worse)|not getting worse|improving|worsening)\b", text, re.IGNORECASE
     ):
@@ -1956,10 +2119,18 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         )
     except (KeyError, TypeError, ValueError):
         pass
+    comparison_period_scope = False
+    if bundle.question_scope.get("intent") == "period_comparison" and executed_range is not None:
+        period_days = (executed_range[1] - executed_range[0]).days + 1
+        comparison_period_scope = bool(re.search(
+            rf"\btwo latest comparable {period_days} day periods\b",
+            normalized_text,
+        ))
     if (
         executed_label
         and _normalized(executed_label) not in normalized_text
         and (executed_range is None or executed_range not in answer_ranges)
+        and not comparison_period_scope
     ):
         issues.append("missing_executed_period")
     if any(candidate not in allowed_ranges for candidate in answer_ranges):
@@ -2043,7 +2214,7 @@ def compose_311_answer(
         candidate: Optional[str] = None
         try:
             candidate = synthesis_llm(
-                _synthesis_prompt(message, bundle),
+                _synthesis_prompt(message, bundle, plan),
                 min(6.0, deadline.remaining(reserve_for_persistence=True)),
             )
         except TimeoutError:
@@ -2055,7 +2226,7 @@ def compose_311_answer(
         synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
         if candidate is not None:
             validation_started = time.perf_counter()
-            valid, issues = validate_claims(candidate, bundle)
+            valid, issues = validate_claims(candidate, bundle, plan)
             validation_ms += int((time.perf_counter() - validation_started) * 1000)
             if valid:
                 answer = candidate.strip()
@@ -2069,7 +2240,7 @@ def compose_311_answer(
                     repaired: Optional[str] = None
                     try:
                         repaired = repair_llm(
-                            _repair_prompt(message, bundle, issues),
+                            _repair_prompt(message, bundle, plan, issues),
                             min(3.0, deadline.remaining(reserve_for_persistence=True)),
                         )
                     except TimeoutError:
@@ -2079,7 +2250,7 @@ def compose_311_answer(
                     repair_ms = int((time.perf_counter() - repair_started) * 1000)
                     if repaired is not None:
                         validation_started = time.perf_counter()
-                        repaired_valid, _repair_issues = validate_claims(repaired, bundle)
+                        repaired_valid, _repair_issues = validate_claims(repaired, bundle, plan)
                         validation_ms += int((time.perf_counter() - validation_started) * 1000)
                         if repaired_valid:
                             answer = repaired.strip()
@@ -2092,7 +2263,7 @@ def compose_311_answer(
         answer, _deterministic_mode = deterministic_answer(bundle, plan)
         mode = AnswerMode.DETERMINISTIC_FALLBACK
     validation_started = time.perf_counter()
-    valid, _issues = validate_claims(answer, bundle)
+    valid, _issues = validate_claims(answer, bundle, plan)
     if not valid:
         answer, mode = deterministic_answer(bundle, plan)
         mode = AnswerMode.DETERMINISTIC_FALLBACK
