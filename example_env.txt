@@ -20,6 +20,10 @@ GEMINI_EMBED_MODEL=models/gemini-embedding-001
 GEMINI_REQUEST_TIMEOUT=25
 GEMINI_STREAM_TIMEOUT=30
 GEMINI_MAX_ATTEMPTS=2
+
+# Future model-led orchestrator foundation. Keep off until a later cutover phase.
+MODEL_LED_ORCHESTRATOR_MODE=off
+MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS=1.5
 # Structured 311 model policy: disabled, auto, or required.
 # auto enables planner/synthesis only when GEMINI_API_KEY is configured.
 CIVIC_311_HYBRID_MODE=auto

@@ -56,32 +56,46 @@ control. Applied too broadly, however, keyword-to-one-query-to-template paths mi
 resident's real information need. Zero model calls is an optimization, not a product goal.
 Complex but bounded evidence may deserve one synthesis call.
 
-## 6. Target hybrid answering pipeline
+## 6. Final model-led answering pipeline
 
-1. Validate request, identity, ownership, idempotency, and one global deadline.
-2. Apply deterministic emergency and fixed policy interception.
-3. Load trusted MySQL conversation state and relevant recent turns.
-4. Interpret relationship, topic, geography, time, filters, and entities with rules first.
-5. Resolve trusted references; ask for clarification when required context is absent.
-6. Use one bounded planner call only when rules cannot construct a safe plan.
-7. Validate the plan against an allowlisted registry and typed input schemas.
-8. Execute independent deterministic capabilities concurrently within the remaining budget.
-9. Build one structured evidence bundle and assess freshness, coverage, and sufficiency.
-10. Select an answer mode; synthesize at most once when the evidence benefits from it.
-11. Validate claims and citations, or use a deterministic fallback.
-12. Atomically persist and return the same final answer over JSON or SSE.
+1. Validate request, identity, ownership, idempotency, and one global 15-second deadline.
+2. Apply deterministic emergency, authentication, rate-limit, and fixed policy interception.
+3. Load only bounded, server-owned MySQL conversation state and trusted reference tokens.
+4. Normalize the current resident message without discarding its original form.
+5. Reserve one `ORCHESTRATOR` call. The model chooses exactly `DIRECT_RESPONSE`,
+   `ASK_CLARIFICATION`, or `EXECUTE_TOOLS` using the strict provider-neutral schema.
+6. Reject unknown tools, incompatible domains, SQL, URLs, untrusted references, unrestricted
+   filters, provider objects, recursive actions, factual tool-plan prose, and oversized state.
+7. Execute one to four independent deterministic capabilities concurrently when tools were
+   selected. The model never selects tables, vector collections, or arbitrary functions.
+8. Convert tool results to one domain-neutral evidence bundle with stable evidence and source
+   IDs, explicit scope, freshness, coverage, limitations, missing evidence, and partial failures.
+9. If tools ran, reserve at most one `SYNTHESIS` call. Validate its factual claims, citations,
+   source types, scope, safety language, and internal-term hygiene.
+10. On any provider, synthesis, or validation failure, format completed deterministic evidence.
+    There is no planner retry, synthesis retry, repair call, recursive loop, or third model call.
+11. Atomically persist and return one authoritative result over JSON or SSE. Completed replay
+    reserves zero model calls.
 
-## 7. Rule-first versus planner-assisted interpretation
+## 7. Model-led semantics and deterministic invariants
 
-Rules handle emergencies, exact UI entities, clear follow-ups, explicit dates and locations,
-supported canonical concepts, and common factual requests. The planner is allowed only for
-ambiguous decomposition or multi-capability selection. It receives bounded state, may select
-only registered tools, and cannot generate SQL, names, loops, state mutations, or retries.
-Structured civic requests permit at most one planner call, one primary synthesis call, and
-one repair call. The current 311 slice uses no planner for exact counts, clear issue/status/
-top-street follow-ups, comparisons, category overviews, or other rule-resolved requests.
-It uses the planner only for ambiguous compound 311 requests that rules cannot safely
-decompose.
+The orchestrator owns semantic interpretation for ordinary free-form resident messages:
+goal, relationship, domains, trusted references, geography, semantic time, tool selection,
+answer requirements, and a bounded state proposal. It receives no unrestricted history and
+cannot establish civic facts. It uses semantic periods such as `CURRENT_WEEK`,
+`NEXT_CALENDAR_WEEK`, `LAST_N_DAYS`, or `RETAIN_TRUSTED_PERIOD`; deterministic code calculates
+dates and validates retained references.
+
+Code remains authoritative for identity, thread ownership, emergency and fixed policy,
+idempotency, deadlines, call accounting, canonical IDs, date arithmetic, tool registration,
+domain compatibility, SQL prohibition, data access, source metadata, evidence sufficiency,
+citations, answer validation, persistence, and replay. Exact trusted UI references remain
+server-owned tokens. The model may rephrase a trusted summary but may not create a new civic
+claim through `DIRECT_RESPONSE`.
+
+Phase 1 introduces these contracts and offline evaluation only. Existing rule-first routing
+remains authoritative until later phases meet documented parity gates. Evaluation examples
+are not production phrase rules and expected labels are never loaded into production prompts.
 
 ### Semantic dialogue controller
 
@@ -176,8 +190,8 @@ Synthesis receives only the resident question, compact trusted state, evidence b
 answer policy. It may not add facts, silently broaden scope, treat community reports as
 official records, convert closed status into proof of repair, or make categorical safety
 judgments. It must cite factual claims, expose important freshness/coverage limits, avoid
-internal identifiers, and fit the remaining request budget. There is at most one bounded
-repair attempt.
+internal identifiers, and fit the remaining request budget. There is no repair attempt. A
+failed or invalid synthesis returns deterministic evidence formatting within the same deadline.
 
 ## 14. Deterministic answer validation
 
@@ -190,9 +204,9 @@ best deterministic composer; it never starts an unbounded model loop.
 
 One monotonic deadline covers validation, state, interpretation, tools, retrieval,
 synthesis, validation, persistence, and SSE finalization. Initial internal ceilings are about
-0.5 seconds for validation/state, 2.5 seconds for optional planning, 3 seconds for tools,
-6 seconds for synthesis, 2 seconds for validation or one repair, and the remainder for
-persistence. These are shares of one deadline, not independent allowances. Emergency,
+0.5 seconds for validation/state, up to 3 seconds for the orchestrator, up to 5 seconds for
+concurrent tools, up to 5 seconds for synthesis and validation, and at least 1 second reserved
+for persistence. These are shares of one deadline, not independent allowances. Emergency,
 replay, and clarification should normally finish below 0.5 seconds; simple structured facts
 below 3 seconds; enriched answers below 10 seconds; every controlled case below 15 seconds.
 
@@ -257,12 +271,14 @@ coverage is visible to sufficiency and composition; it is never collapsed into z
 
 ## 20. Minimal target module arrangement
 
-Keep the Flask endpoints thin. Introduce one request orchestrator only when the first 311
-slice is implemented. Give it one planner interface, one tool registry, one shared evidence
-and sufficiency representation, and one composer/validator interface. Retain cohesive domain
-capabilities for events, 311, crime, and RAG. Reuse existing state, idempotency, persistence,
-freshness, request-budget, and provider infrastructure. Avoid per-tool modules, wrapper
-chains, and parallel legacy implementations.
+Keep the Flask endpoints thin. `model_led_orchestrator.py` owns the provider-neutral decision
+contract, normalization, and prompt. `civic_tool_catalog.py` owns the generic typed registry.
+`model_call_ledger.py` owns the one-orchestrator/one-synthesis invariant.
+`civic_evidence.py` owns the domain-neutral tool-result envelope. Cohesive domain capabilities
+for events, 311, crime, and document retrieval continue to execute deterministic operations.
+Reuse existing state, idempotency, persistence, freshness, request-budget, and provider
+infrastructure. Do not introduce per-question tools, generated SQL, wrapper chains, or a
+second resident chat stack.
 
 ## 21. Existing modules to keep
 
@@ -291,22 +307,32 @@ default, or certify worker counts without RSS and concurrency measurements.
 
 ## 24. Phased implementation roadmap
 
-0. **Current event review:** consolidate event time semantics, isolate relevance exceptions,
-   keep transport thin, expose structured event evidence, measure runtime, and retain the
-   draft review gate.
-1. **Shared kernel for one caller:** implement the global 15-second deadline, typed
-   allowlisted plan, evidence/sufficiency types, answer-mode selection, model-call limits,
-   deterministic fallback, and telemetry required by the first 311 slice.
-2. **311 vertical slice:** add reviewed concepts for potholes, drainage/flooding, street
-   conditions, trash, and streetlights; execute count/status/top-street/recent-example/
-   comparison/freshness prepared tools in parallel; resolve or clarify street references;
-   synthesize at most once; validate claims; never equate closed with repaired.
-3. **Crime and public safety:** reuse the kernel for counts, categories, comparisons,
-   freshness, coverage, cautious synthesis, and no categorical safety judgment.
-4. **Events:** retain deterministic listing/detail behavior and use synthesis only for
-   comparisons, recommendations grounded in explicit attributes, or thematic summaries.
-5. **Meetings, news, and community evidence:** use bounded lexical/vector retrieval,
-   source-type separation, citation validation, and the same global deadline.
-6. **Cleanup and tuning:** after migrated paths have callers and regression coverage, retire
-   proven-dead code, consolidate test helpers, simplify imports, and tune workers, pools,
-   caches, and provider initialization using measured RSS.
+1. **Foundation and model adequacy:** freeze the strict decision, call-ledger, tool-catalog,
+   evidence, normalization, evaluation, and off-by-default shadow contracts. Compare candidate
+   models on development families and evaluate the frozen selection once on sealed holdout.
+2. **Shadow integration and transport unification:** invoke the orchestrator diagnostically
+   behind a short independent allowance while legacy decisions remain authoritative. Share one
+   JSON/SSE orchestration function and prove no response, state, retrieval, or persistence drift.
+3. **Domain cutover:** execute generic tools behind validated decisions, beginning with events
+   and aggregate 311, then crime and documents. Require per-domain semantic, factual, citation,
+   latency, provider-failure, replay, and concurrency parity before enabling resident traffic.
+4. **Legacy retirement and tuning:** remove replaced semantic rules, planner/repair paths, and
+   duplicated orchestration only after caller/import/runtime proof. Tune model choice, pools,
+   caches, and worker topology from measured production-like behavior.
+
+## 25. Semantic debt and deprecation map
+
+| Current path | Future disposition | Replacement phase | Parity gate before removal |
+| --- | --- | --- | --- |
+| `semantic_dialogue_controller` semantic rules | Replace with orchestrator decision; keep emergency/fixed policy invariants | 2-4 | Shadow strategy/domain/tool agreement, safety gates, provider-failure fallback |
+| `conversation_relationship` phrase rules | Replace semantic classification; keep ownership and bounded state loading | 2-4 | Relationship/context-isolation >= 99%, correction/refinement dialogue tests |
+| `conversation_dimensions` phrase extraction | Replace with geography/time/filter/state proposal | 2-4 | Canonical geography/time >= 95%, no untrusted-state mutation |
+| Event semantic regexes | Replace interpretation; expose event list/detail as `query_events` | 3 | Selected-entity, negation, date, listing/detail, JSON/SSE parity |
+| 311 semantic rules and planner | Replace interpretation; expose prepared aggregates/search as generic tools | 3 | Existing 311 golden/model-path tests, factual/citation parity, no closed=resolved claim |
+| Crime routing | Replace interpretation; expose `aggregate_crime` | 3 | Public-safety caution, freshness, coverage, count/comparison parity |
+| `intent_router` and `plan_builder` | Remove after all public domains use validated orchestrator decisions | 4 | No remaining callers plus cross-domain and unknown-tool tests |
+| `unified_chatbot` follow-up logic | Replace with bounded trusted state and relationship output | 2-4 | Multi-turn replay, correction, new-topic, entity/location isolation |
+| Generic RAG routing | Replace selection; retain bounded document retrieval implementation | 3 | Corpus/source-type precision, citation support, no public vector writes |
+| Post-answer classifier/regeneration | Replace with deterministic answer validator and fallback | 3-4 | Claim/source/citation/internal-term validation with zero repair calls |
+| JSON/SSE orchestration duplication | Consolidate around one authoritative turn result | 2 | Byte-equivalent persisted answer/sources/state and idempotent replay |
+| Planner retry, synthesis repair, regeneration calls | Remove; ledger permits only orchestrator and synthesis | 3-4 | Deterministic fallback quality and all deadline/provider-failure tests |
