@@ -107,6 +107,10 @@ def test_aliases_and_rule_plans() -> None:
     check(overview.intent == "category_overview", "category overview must be deterministic")
     check(overview.tools == (ToolName.CATEGORY_DISTRIBUTION.value, ToolName.SOURCE_FRESHNESS.value), "overview tools")
 
+    streets = plan_311_question("Which streets have the most pothole reports?", now=date(2026, 7, 17))
+    check(streets.intent == "top_streets", "top-streets question must keep its intent")
+    check(not streets.geography.get("street"), "the final letters of 'most' must not become a street suffix")
+
 
 def test_clarifications_and_trusted_context() -> None:
     no_context = plan_311_question("Are these reports still open?", now=date(2026, 7, 17))

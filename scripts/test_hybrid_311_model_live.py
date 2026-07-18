@@ -112,7 +112,11 @@ def run(base_url: str, expected_mode: str) -> Dict[str, Any]:
 
     status = _turn(client, pothole_thread, "C_status", "Are these reports still open?")
     records.append(status)
-    check("open or in-progress" in status["answer"].lower(), "status breakdown missing")
+    check(
+        "open or in-progress" in status["answer"].lower()
+        or "open or in progress" in status["answer"].lower(),
+        "status breakdown missing",
+    )
     check("does not show active work" in status["answer"].lower(), "active-work caveat missing")
     check("does not verify" in status["answer"].lower(), "repair caveat missing")
     check(int(status["diagnostics"].get("synthesis_call_count") or 0) == 0, "status should remain deterministic")
@@ -147,11 +151,14 @@ def run(base_url: str, expected_mode: str) -> Dict[str, Any]:
         "street answer must preserve work/coverage limits",
     )
     if hybrid:
-        _assert_hybrid_record(street, planner=0, synthesis=1)
-        check(
-            street["diagnostics"].get("answer_mode") == "EVIDENCE_BOUNDED_SYNTHESIS",
-            "street continuation should accept a grounded synthesis",
-        )
+        if "did not find matching" in street_text:
+            check(int(street["diagnostics"].get("synthesis_call_count") or 0) == 0, "zero-result street answer must be deterministic")
+        else:
+            _assert_hybrid_record(street, planner=0, synthesis=1)
+            check(
+                street["diagnostics"].get("answer_mode") == "EVIDENCE_BOUNDED_SYNTHESIS",
+                "nonzero street continuation should accept a grounded synthesis",
+            )
     else:
         check(int(street["diagnostics"].get("llm_call_count") or 0) == 0, "disabled street continuation used model")
 

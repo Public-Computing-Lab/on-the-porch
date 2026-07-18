@@ -497,7 +497,7 @@ def _period_from_message(message: str, *, today: date) -> CivicPeriod:
 
 
 _STREET_CAPTURE = re.compile(
-    r"\b(?:on|at|near|along|around)\s+([A-Za-z0-9 .'-]{2,72}?(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|place|pl|square|sq))\b",
+    r"\b(?:on|at|near|along|around)\s+([A-Za-z0-9 .'-]{2,72}?\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|place|pl|square|sq))\b",
     re.IGNORECASE,
 )
 
@@ -521,7 +521,7 @@ def _street_from_message(message: str) -> Optional[str]:
         return _canonical_street(match.group(1))
     stripped = str(message or "").strip(" .,!?:;\"'")
     if re.fullmatch(
-        r"[A-Za-z0-9 .'-]{2,72}(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|place|pl)",
+        r"[A-Za-z0-9 .'-]{2,72}\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|place|pl)",
         stripped,
         re.IGNORECASE,
     ):
@@ -1077,18 +1077,21 @@ def _status_and_period(
     if executed is None:
         return fresh, requested, EvidenceStatus.DEPENDENCY_UNAVAILABLE, ["The source coverage could not be verified."]
     if assessment.coverage_status is CoverageStatus.OUTSIDE:
+        through = _date_phrase(assessment.data_through_date.isoformat()) or assessment.data_through_date.isoformat()
         limitations.append(
-            f"The requested period is outside local coverage through {assessment.data_through_date.isoformat()}."
+            f"The local data only runs through {through}, so it does not describe current conditions."
         )
         return fresh, executed, EvidenceStatus.STALE_BUT_USABLE, limitations
     if assessment.coverage_status is CoverageStatus.PARTIAL:
+        through = _date_phrase(assessment.data_through_date.isoformat()) or assessment.data_through_date.isoformat()
         limitations.append(
-            f"The requested period is only covered through {assessment.data_through_date.isoformat()}."
+            f"The local data only runs through {through}, so it covers only part of {requested.label}."
         )
         return fresh, executed, EvidenceStatus.PARTIALLY_COVERED, limitations
     if assessment.freshness_status in {FreshnessStatus.STALE, FreshnessStatus.DELAYED}:
+        through = _date_phrase(assessment.data_through_date.isoformat()) or assessment.data_through_date.isoformat()
         limitations.append(
-            f"The local source contains records through {assessment.data_through_date.isoformat()}."
+            f"The local data only runs through {through}, so it does not describe current conditions."
         )
         return fresh, executed, EvidenceStatus.STALE_BUT_USABLE, limitations
     return fresh, executed, EvidenceStatus.COMPLETE, limitations
@@ -1477,15 +1480,92 @@ def _family_label(family: Optional[str]) -> str:
     return definition.label if definition else "street-service"
 
 
+def _request_label(family: Optional[str]) -> str:
+    labels = {
+        IssueFamily.ROAD_SURFACE_POTHOLE.value: "pothole-related 311 service requests",
+        IssueFamily.DRAINAGE_AND_FLOODING.value: "drainage- or flooding-related 311 service requests",
+        IssueFamily.STREET_AND_PAVEMENT_CONDITION.value: "street- or pavement-related 311 service requests",
+        IssueFamily.TRASH_AND_ILLEGAL_DUMPING.value: "trash- or illegal-dumping-related 311 service requests",
+        IssueFamily.STREETLIGHT.value: "streetlight-related 311 service requests",
+    }
+    return labels.get(str(family or ""), "street-related 311 service requests")
+
+
+def _counted_request_label(count: int, family: Optional[str]) -> str:
+    plural = _request_label(family)
+    return plural[:-1] if count == 1 else plural
+
+
+def _period_range(period: Mapping[str, Any]) -> Optional[str]:
+    try:
+        start = date.fromisoformat(str(period["start_date"]))
+        end = date.fromisoformat(str(period["end_date_exclusive"])) - timedelta(days=1)
+    except (KeyError, TypeError, ValueError):
+        return None
+    start_text = f"{start.strftime('%B')} {start.day}"
+    if start.year != end.year:
+        start_text += f", {start.year}"
+    end_text = f"{end.strftime('%B')} {end.day}, {end.year}"
+    return f"{start_text} through {end_text}"
+
+
+def _status_count_phrase(count: int, label: str, *, include_request: bool) -> str:
+    noun = "request" if count == 1 else "requests"
+    verb = "is" if count == 1 else "are"
+    if include_request:
+        return f"{count} {noun} {verb} recorded as {label}"
+    return f"{count} {verb} recorded as {label}"
+
+
+def _status_sentence(open_count: int, closed_count: int) -> str:
+    return (
+        _status_count_phrase(open_count, "open or in progress", include_request=True)
+        + ", and "
+        + _status_count_phrase(closed_count, "closed", include_request=False)
+        + "."
+    )
+
+
+def _append_limitations(lines: List[str], bundle: EvidenceBundle) -> None:
+    rendered = _normalized(" ".join(lines))
+    for limitation in bundle.limitations[:3]:
+        normalized = _normalized(limitation)
+        if normalized and normalized not in rendered:
+            lines.append(limitation)
+            rendered = _normalized(" ".join(lines))
+
+
+def _append_period_context(lines: List[str], prefix: str, bundle: EvidenceBundle) -> None:
+    if prefix:
+        lines.append(prefix)
+    _append_limitations(lines, bundle)
+
+
 def _period_intro(bundle: EvidenceBundle) -> str:
     requested = bundle.requested_period.get("label", "the requested period")
     executed = bundle.executed_period.get("label", requested)
     through = _date_phrase(bundle.freshness.get("data_through_date"))
+    range_text = _period_range(bundle.executed_period)
+    coverage_status = str(bundle.coverage.get("status") or "").upper()
+    if coverage_status == CoverageStatus.PARTIAL.value:
+        rendered_period = executed
+        if range_text and _normalized(range_text) not in _normalized(executed):
+            rendered_period = f"{executed} ({range_text})"
+        used = f" I used {rendered_period}." if executed != requested else ""
+        return (
+            f"The local data only runs through {through or 'the latest recorded date'}, so it covers only part of {requested}."
+            + used
+        )
     if executed != requested:
-        lead = f"The local Boston 311 dataset contains records through {through or 'the latest recorded date'}, so it does not cover {requested}. I used {executed}."
-        return lead
+        used = executed
+        if range_text and _normalized(range_text) not in _normalized(executed):
+            used = f"{executed} ({range_text})"
+        return (
+            f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions. "
+            f"I used {used}."
+        )
     if bundle.evidence_status in {EvidenceStatus.PARTIALLY_COVERED, EvidenceStatus.STALE_BUT_USABLE}:
-        return f"The available local Boston 311 data contains records through {through or 'the latest recorded date'}."
+        return f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions."
     return ""
 
 
@@ -1509,12 +1589,19 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             AnswerMode.DETERMINISTIC_FALLBACK,
         )
     family_label = _family_label(bundle.issue_family)
+    request_label = _request_label(bundle.issue_family)
     period = bundle.executed_period.get("label", "the selected period")
     geo = bundle.geography
     street_label = str(geo.get("street") or "").title()
     place = street_label or ("Dorchester" if geo.get("filterable", True) else "Dorchester-wide records")
+    if street_label:
+        place_scope = f"for {street_label}"
+    elif geo.get("filterable", True):
+        place_scope = "in Dorchester"
+    else:
+        place_scope = "in the available Dorchester-wide records"
     prefix = _period_intro(bundle)
-    lines: List[str] = [prefix] if prefix else []
+    lines: List[str] = []
     required_fact = {
         "category_overview": ToolName.CATEGORY_DISTRIBUTION.value,
         "period_comparison": ToolName.PERIOD_COMPARISON.value,
@@ -1523,18 +1610,20 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
     }.get(plan.intent, ToolName.ISSUE_COUNT.value)
     if bundle.evidence_status is EvidenceStatus.PARTIAL and required_fact not in bundle.facts:
         lines.append(
-            f"Some Boston 311 results for {family_label} in {place} for {period} were temporarily unavailable, "
+            f"Some Boston 311 results for {family_label} {place_scope} for {period} were temporarily unavailable, "
             "so I cannot confirm the requested result from this response."
         )
+        _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_FALLBACK
     if plan.intent == "category_overview":
         categories = (bundle.facts.get(ToolName.CATEGORY_DISTRIBUTION.value) or {}).get("categories") or []
         if not categories:
-            lines.append(f"I found no matching supported street-service requests in Dorchester for {period}.")
+            lines.append(f"I did not find matching supported street-related 311 service requests in Dorchester for {period}.")
         else:
             listed = "; ".join(f"{item['label']} ({_int_value(item['count'])})" for item in categories)
-            lines.append(f"For {period}, the most common supported street-service requests in Dorchester were {listed}.")
+            lines.append(f"For {period}, the most common supported street-related 311 service requests in Dorchester were {listed}.")
+        _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     if plan.intent == "period_comparison":
@@ -1542,13 +1631,19 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         current = _int_value(comparison.get("current_count"))
         previous = _int_value(comparison.get("previous_count"))
         difference = _int_value(comparison.get("difference"))
-        direction = "more" if difference > 0 else "fewer" if difference < 0 else "the same number of"
-        sentence = f"There were {current} {family_label} 311 requests in Dorchester for {period}, {abs(difference)} {direction} than the preceding comparable period ({previous})."
-        percentage = comparison.get("percentage_change")
-        if percentage is not None:
-            sentence += f" That is a {abs(float(percentage)):.1f}% {'increase' if float(percentage) > 0 else 'decrease'} from the comparable period."
+        days = max(1, (date.fromisoformat(bundle.executed_period["end_date_exclusive"]) - date.fromisoformat(bundle.executed_period["start_date"])).days)
+        if difference > 0:
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} increased from {previous} to {current}."
+        elif difference < 0:
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} decreased from {previous} to {current}."
+        else:
+            sentence = f"In the two latest comparable {days}-day periods available, {request_label} remained at {current}."
+        current_range = _period_range(bundle.executed_period)
+        if current_range:
+            sentence += f" The more recent period was {current_range}."
         lines.append(sentence)
-        lines.append(f"Source: {SOURCE_LABEL}. Comparable periods use the same number of covered days.")
+        _append_period_context(lines, prefix, bundle)
+        lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     if plan.intent == "status_followup":
         status = bundle.facts.get(ToolName.STATUS_BREAKDOWN.value) or {}
@@ -1556,17 +1651,16 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         closed_count = _optional_nonnegative_int(status.get("closed_count"))
         if open_count is not None and closed_count is not None:
             lines.append(
-                f"For the matching {family_label} 311 requests in {place} for {period}, "
-                f"the recorded statuses include {open_count} open or in-progress requests and {closed_count} closed requests. "
+                f"For the matching {request_label} {place_scope} for {period}, "
+                f"{_status_sentence(open_count, closed_count)} "
                 "A closed request does not verify that a physical problem was repaired, and an open request does not show active work."
             )
         else:
             lines.append(
-                f"I found matching {family_label} 311 requests in {place} for {period}, "
+                f"I found matching {family_label} 311 requests {place_scope} for {period}, "
                 "but the available status breakdown is incomplete. A closed request does not verify that a physical problem was repaired."
             )
-        if bundle.limitations:
-            lines.append(bundle.limitations[0])
+        _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     if plan.intent == "top_streets":
@@ -1580,12 +1674,11 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             )
         elif count > 0:
             lines.append(
-                f"I found {count} matching {family_label} 311 requests for {period}, but the source data did not provide a usable street breakdown for those matching records."
+                f"I found {count} matching {request_label} for {period}, but the source data did not provide a usable street breakdown for those matching records."
             )
         else:
-            lines.append(f"I found no matching {family_label} 311 requests for {period}.")
-        if bundle.limitations:
-            lines.append(bundle.limitations[0])
+            lines.append(f"I did not find matching {request_label} in the available records for {period}.")
+        _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     count_data = bundle.facts.get(ToolName.ISSUE_COUNT.value) or {}
@@ -1594,29 +1687,33 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         lines.append(
             f"I cannot verify a street-specific count for {street_label} from the available {family_label} 311 records for {period}, because those matching records do not include street fields."
         )
-        if bundle.limitations:
-            lines.append(bundle.limitations[0])
+        _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_FALLBACK
-    if bundle.evidence_status is EvidenceStatus.NO_MATCHING_RECORDS:
-        lines.append(f"I found no matching {family_label} 311 requests in {place} for {period}.")
+    if count == 0:
+        lines.append(f"I did not find matching {request_label} {place_scope} for {period}.")
+        if street_label:
+            lines.append(
+                "Street names in 311 records may be missing or formatted differently, so this is not definitive proof that no request was made for that location."
+            )
+        lines.append("Request records or their absence do not determine whether the physical condition was addressed.")
     else:
-        lines.append(f"I found {count} {family_label} 311 requests in {place} for {period}.")
+        lines.append(f"I found {count} {_counted_request_label(count, bundle.issue_family)} {place_scope} for {period}.")
         lines.append(
             "These are service requests, not a verified count of distinct physical conditions."
         )
     status = bundle.facts.get(ToolName.STATUS_BREAKDOWN.value) or {}
-    if status:
+    if status and count > 0:
         open_count = _int_value(status.get("open_count"))
         closed_count = _int_value(status.get("closed_count"))
         lines.append(
-            f"The recorded statuses include {open_count} open or in-progress requests and {closed_count} closed requests. "
+            f"{_status_sentence(open_count, closed_count)} "
             "A closed request does not verify that a physical problem was repaired, and an open request does not show active work."
         )
     streets = (bundle.facts.get(ToolName.TOP_STREETS.value) or {}).get("streets") or []
     rendered_streets = _format_streets(streets)
     if rendered_streets:
-        lines.append(f"The streets with the most matching reports were {rendered_streets}.")
+        lines.append(f"The streets with the most matching requests were {rendered_streets}.")
     examples = (bundle.facts.get(ToolName.RECENT_EXAMPLES.value) or {}).get("examples") or []
     if examples and plan.intent == "street_status":
         rendered = "; ".join(
@@ -1625,8 +1722,7 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         )
         if rendered:
             lines.append(f"Recent matching request records include: {rendered}.")
-    if bundle.limitations:
-        lines.append(bundle.limitations[0])
+    _append_period_context(lines, prefix, bundle)
     lines.append(f"Source: {SOURCE_LABEL}.")
     mode = AnswerMode.DETERMINISTIC_DIRECT if not status and not streets else AnswerMode.DETERMINISTIC_ENRICHED
     return "\n\n".join(lines), mode
@@ -1639,11 +1735,16 @@ def _synthesis_prompt(question: str, bundle: EvidenceBundle) -> str:
         "Answer the question first. Preserve counts, streets, geography, and periods exactly. "
         "Include each non-empty count, status breakdown, street ranking, comparison, category, or recent example supplied when it directly answers the question. "
         "For a percentage change, use the absolute magnitude with the direction word increase or decrease; do not write a signed percentage. "
+        f"Call the records '{_request_label(bundle.issue_family)}', not complaints or reports. "
         "Say that service requests are not necessarily distinct verified physical conditions. "
+        "Use count-aware grammar: one request is recorded as open; multiple requests are recorded as open. "
         "Use the resident-friendly issue_family label from the evidence; never emit an all-caps enum or underscore identifier. "
         "Do not mention tools, SQL, RAG, tables, or internal identifiers. Do not infer repair from closed status or active work from open status. "
         "For a street_status question, explicitly state that request records or their absence do not determine whether the physical condition was addressed. "
-        "Do not add emergency guidance. If data is stale or partial, state the supplied limitation naturally. "
+        "Do not add emergency guidance. If data is stale or partial, use the supplied resident-facing limitation; never say stale but usable, outside local coverage, or coverage status. "
+        "For comparisons, report only the change between the two supplied equivalent periods; do not claim that conditions are getting better or worse now. "
+        "For a category overview, begin with 'During [period]' and state which street-related 311 service-request categories were most common. "
+        "For a zero count, say that you did not find matching records; never claim definitively that there were no requests. "
         f"State the executed period using this exact label or its exact inclusive date range: {executed_label}. "
         f"End with exactly: Source: {SOURCE_LABEL}. "
         "Resident question: " + question[:600] + "\nEvidence: " + json.dumps(bundle.bounded_for_model(), ensure_ascii=False, separators=(",", ":"), default=str)
@@ -1666,7 +1767,13 @@ def _should_synthesize(plan: StrictToolPlan, bundle: EvidenceBundle) -> bool:
     if bundle.evidence_status in {
         EvidenceStatus.DEPENDENCY_UNAVAILABLE,
         EvidenceStatus.INSUFFICIENT_EVIDENCE,
+        EvidenceStatus.NO_MATCHING_RECORDS,
     }:
+        return False
+    issue_count = _optional_nonnegative_int(
+        (bundle.facts.get(ToolName.ISSUE_COUNT.value) or {}).get("count")
+    )
+    if issue_count == 0:
         return False
     return plan.intent in {
         "recent_reports",
@@ -1776,6 +1883,20 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         issues.append("unsupported_emergency_guidance")
     if re.search(r"-\s*\d+(?:\.\d+)?\s*%", text):
         issues.append("signed_directional_percentage")
+    if re.search(r"\b1\s+(?:open(?:\s+or\s+in[- ]progress)?|closed)\s+requests\b", text, re.IGNORECASE):
+        issues.append("singular_request_grammar")
+    if re.search(r"\b(?:stale but usable|outside local coverage|coverage status)\b", text, re.IGNORECASE):
+        issues.append("internal_freshness_wording")
+    if re.search(r"\bcomplaints?\b", text, re.IGNORECASE):
+        issues.append("complaint_terminology")
+    if bundle.question_scope.get("intent") == "period_comparison" and re.search(
+        r"\b(?:getting (?:better|worse)|not getting worse|improving|worsening)\b", text, re.IGNORECASE
+    ):
+        issues.append("unsupported_current_trend")
+    if bundle.question_scope.get("intent") == "category_overview" and re.search(
+        r"^\s*in\s+dorchester,?\s+the\b.{0,160}\bthere were\b", text, re.IGNORECASE | re.DOTALL
+    ):
+        issues.append("awkward_category_sentence")
     if re.search(r"\b(?:closed|closure)\b.{0,40}\b(?:repaired|fixed|resolved)\b", text, re.IGNORECASE):
         issues.append("closed_is_repaired")
     claims_open_active_work = re.search(
@@ -1809,6 +1930,13 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         re.IGNORECASE,
     ):
         issues.append("stale_claimed_current")
+    coverage_status = str(bundle.coverage.get("status") or "").upper()
+    requested_label = str(bundle.requested_period.get("label") or "").strip()
+    executed_label = str(bundle.executed_period.get("label") or "").strip()
+    if coverage_status == "OUTSIDE" and requested_label != executed_label and "does not describe current conditions" not in normalized_text:
+        issues.append("missing_current_conditions_limitation")
+    if coverage_status == "PARTIAL" and "covers only part" not in normalized_text:
+        issues.append("missing_partial_coverage_limitation")
     if bundle.evidence_status not in {
         EvidenceStatus.DEPENDENCY_UNAVAILABLE,
         EvidenceStatus.INSUFFICIENT_EVIDENCE,
@@ -1836,7 +1964,6 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         issues.append("missing_executed_period")
     if any(candidate not in allowed_ranges for candidate in answer_ranges):
         issues.append("unsupported_date_range")
-    requested_label = str(bundle.requested_period.get("label") or "").strip()
     through = str(bundle.freshness.get("data_through_date") or "").strip()
     if requested_label and executed_label and requested_label != executed_label:
         human_through = _date_phrase(through)
@@ -1866,6 +1993,10 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
             and _answer_has_labeled_count(text, closed_count, "closed")
         ):
             issues.append("missing_status_breakdown")
+        if issue_count == 0 and re.search(
+            r"\b(?:there (?:were|are) (?:no|0)|(?:i )?found no)\b", text, re.IGNORECASE
+        ):
+            issues.append("categorical_zero_claim")
     allowed_numbers = _allowed_numbers(bundle)
     for number in re.findall(r"\b\d+(?:\.\d+)?\b", text):
         if number not in allowed_numbers:

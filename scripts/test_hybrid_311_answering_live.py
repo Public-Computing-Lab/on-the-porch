@@ -230,7 +230,11 @@ def run(base_url: str) -> None:
     second = _turn(client, thread, "B_status_followup", "Are these reports still open?")
     check(second["payload"]["assistant_message"]["response_mode"] == "structured_311", "B must use structured_311")
     _assert_resident_safe(second["answer"])
-    check("open or in-progress" in second["answer"].lower(), "B must report status evidence")
+    check(
+        "open or in-progress" in second["answer"].lower()
+        or "open or in progress" in second["answer"].lower(),
+        "B must report status evidence",
+    )
 
     third = _turn(client, thread, "C_subarea_reference", "What do those 311 reports look like in Codman Square?")
     check(third["payload"]["assistant_message"]["response_mode"] == "structured_311", "C must use structured_311")
@@ -254,13 +258,13 @@ def run(base_url: str) -> None:
     fifth = _turn(client, category_thread, "E_category_overview", "Most common 311 street problems this month?")
     check(fifth["payload"]["assistant_message"]["response_mode"] == "structured_311", "E must use structured_311")
     _assert_resident_safe(fifth["answer"])
-    check("common supported street-service requests" in fifth["answer"].lower(), "E category answer")
+    check("common supported street-related 311 service requests" in fifth["answer"].lower(), "E category answer")
 
     flooding_thread = client.create_thread("Hybrid 311 freshness verification")
     sixth = _turn(client, flooding_thread, "F_flooding_freshness", "How serious is current flooding near Fields Corner?")
     check(sixth["payload"]["assistant_message"]["response_mode"] == "structured_311", "F must use structured_311")
     _assert_resident_safe(sixth["answer"])
-    check("records through" in sixth["answer"].lower(), "F must disclose source freshness")
+    check("local data only runs through" in sixth["answer"].lower(), "F must disclose source freshness")
 
     emergency_thread = client.create_thread("Emergency precedence verification")
     seventh = _turn(client, emergency_thread, "G_emergency_precedence", "My house is on fire right now")

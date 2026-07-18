@@ -86,7 +86,7 @@ def bundle() -> EvidenceBundle:
             ToolName.TOP_STREETS.value: {"streets": []},
         },
         tool_results={},
-        limitations=["The requested period is outside local coverage through 2026-06-27."],
+        limitations=["The local data only runs through June 27, 2026, so it does not describe current conditions."],
         source_records=[{
             "type": "official",
             "source": "Boston 311 service-request data",
@@ -100,8 +100,9 @@ def bundle() -> EvidenceBundle:
 
 def valid_synthesized_answer() -> str:
     return (
-        "For the latest fully covered 7-day period, Dorchester had 12 pothole 311 requests: "
-        "4 open or in progress and 8 closed. The local data ends June 27, 2026. "
+        "For the latest fully covered 7-day period, Dorchester had 12 pothole-related 311 service requests: "
+        "4 requests are recorded as open or in progress, and 8 are recorded as closed. "
+        "The local data only runs through June 27, 2026, so it does not describe current conditions. "
         "These service requests are not necessarily distinct verified physical conditions. "
         "A closed request does not verify that a physical problem was repaired, and an open request does not show active work. "
         "Source: Boston 311 service-request data."
@@ -358,18 +359,43 @@ def test_deadline_pressure_skips_synthesis() -> None:
     check(outcome.timeout_stage == "synthesis_budget" and outcome.fallback_used, "deadline fallback metadata")
 
 
+def test_zero_result_uses_cautious_deterministic_answer() -> None:
+    evidence = bundle()
+    evidence.question_scope = {"domain": "311", "intent": "street_status"}
+    evidence.geography = CivicGeography(street="dorchester ave").to_dict()
+    evidence.facts[ToolName.ISSUE_COUNT.value] = {"count": 0}
+    evidence.facts[ToolName.STATUS_BREAKDOWN.value] = {"open_count": 0, "closed_count": 0}
+    calls = []
+    outcome = compose_311_answer(
+        "What has been done about drainage on Dorchester Ave?",
+        bundle=evidence,
+        plan=plan("street_status"),
+        deadline=GlobalDeadline.now(),
+        synthesis_llm=lambda *_args: calls.append(True) or valid_synthesized_answer(),
+    )
+    check(not calls and outcome.synthesis_call_count == 0, "zero result must not be synthesized")
+    check("I did not find matching" in outcome.answer, "zero result needs cautious wording")
+    check("There were no" not in outcome.answer and "I found 0" not in outcome.answer, "zero overclaim")
+    check("formatted differently" in outcome.answer, "street normalization limitation")
+
+
 def test_validator_rejects_unsupported_claims() -> None:
     evidence = bundle()
     cases = {
         "There were 99 pothole requests for the latest fully covered 7-day period. Source: Boston 311 service-request data.": "unsupported_number",
         "Blue Hill Avenue had pothole requests for the latest fully covered 7-day period. Source: Boston 311 service-request data.": "unsupported_street",
-        valid_synthesized_answer().replace("ends June 27, 2026", "is current"): "stale_claimed_current",
+        valid_synthesized_answer().replace(
+            "only runs through June 27, 2026, so it does not describe current conditions",
+            "is current",
+        ): "stale_claimed_current",
         valid_synthesized_answer() + " It covered June 21 through June 28, 2026.": "unsupported_date_range",
         valid_synthesized_answer().replace("does not show active work", "shows active work"): "open_is_active_work",
-        valid_synthesized_answer().replace("4 open or in progress and 8 closed. ", ""): "missing_status_breakdown",
+        valid_synthesized_answer().replace("4 requests are recorded as open or in progress, and 8 are recorded as closed. ", ""): "missing_status_breakdown",
         valid_synthesized_answer() + " Call 911.": "unsupported_emergency_guidance",
         valid_synthesized_answer() + " That is a -58.3% decrease.": "signed_directional_percentage",
         valid_synthesized_answer() + " The RAG pipeline failed.": "internal_term",
+        valid_synthesized_answer().replace("311 service requests", "311 complaints"): "complaint_terminology",
+        valid_synthesized_answer().replace("4 requests are", "1 open or in-progress requests are"): "singular_request_grammar",
     }
     for answer, expected in cases.items():
         valid, issues = validate_claims(answer, evidence)
@@ -386,7 +412,8 @@ def test_validator_rejects_unsupported_claims() -> None:
     }
     street_without_completion_limit = (
         "For the latest fully covered 7-day period, Dorchester Ave had 12 pothole service requests: "
-        "4 open or in progress and 8 closed. The local data ends June 27, 2026. "
+        "4 requests are recorded as open or in progress, and 8 are recorded as closed. "
+        "The local data only runs through June 27, 2026, so it does not describe current conditions. "
         "Service requests are not necessarily distinct verified physical conditions. "
         "Source: Boston 311 service-request data."
     )
@@ -411,13 +438,30 @@ def test_validator_rejects_unsupported_claims() -> None:
         "open_count": 0,
         "closed_count": 0,
     }
-    zero_answer = (
-        "There were 0 pothole service requests on Dorchester Ave during the latest fully covered 7-day period. "
-        "The local data ends June 27, 2026. Request records or their absence do not determine whether the physical condition was addressed. "
+    categorical_zero = (
+        "There were 0 pothole-related 311 service requests on Dorchester Ave during the latest fully covered 7-day period. "
+        "The local data only runs through June 27, 2026, so it does not describe current conditions. "
+        "Request records or their absence do not determine whether the physical condition was addressed. "
         "Source: Boston 311 service-request data."
     )
-    valid, issues = validate_claims(zero_answer, zero_street_evidence)
-    check(valid, f"zero-result street answer should not need a distinct-request caveat: {issues}")
+    valid, issues = validate_claims(categorical_zero, zero_street_evidence)
+    check(not valid and "categorical_zero_claim" in issues, "categorical zero should be rejected")
+    cautious_zero = categorical_zero.replace(
+        "There were 0 pothole-related 311 service requests",
+        "I did not find matching pothole-related 311 service requests",
+    )
+    valid, issues = validate_claims(cautious_zero, zero_street_evidence)
+    check(valid, f"cautious zero-result street answer should validate: {issues}")
+
+    category_evidence = bundle()
+    category_evidence.question_scope = {"domain": "311", "intent": "category_overview"}
+    awkward_category = (
+        "In Dorchester, the latest fully covered 7-day period, there were 50 street-related 311 service requests. "
+        "The local data only runs through June 27, 2026, so it does not describe current conditions. "
+        "Source: Boston 311 service-request data."
+    )
+    valid, issues = validate_claims(awkward_category, category_evidence)
+    check(not valid and "awkward_category_sentence" in issues, "awkward category lead should be rejected")
 
 
 def main() -> None:
@@ -430,6 +474,7 @@ def main() -> None:
         test_partial_tool_failure_never_becomes_a_false_zero,
         test_validation_failure_repairs_once_then_stops,
         test_deadline_pressure_skips_synthesis,
+        test_zero_result_uses_cautious_deterministic_answer,
         test_validator_rejects_unsupported_claims,
     ]
     for test in tests:

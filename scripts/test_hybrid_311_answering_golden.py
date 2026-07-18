@@ -41,7 +41,9 @@ def bundle(*, facts: dict, status: EvidenceStatus = EvidenceStatus.PARTIALLY_COV
         geography=CivicGeography().to_dict(), requested_period={"label": "last month (June 2026)"},
         executed_period={"kind": "LAST_MONTH", "label": "the covered portion of last month (June 2026)", "start_date": "2026-06-01", "end_date_exclusive": "2026-06-28"},
         freshness={"data_through_date": "2026-06-27"}, coverage={"status": "PARTIAL"},
-        facts=facts, tool_results={}, limitations=["The requested period is only covered through 2026-06-27."],
+        facts=facts, tool_results={}, limitations=[
+            "The local data only runs through June 27, 2026, so it covers only part of last month (June 2026)."
+        ],
         source_records=[], evidence_status=status,
     )
 
@@ -65,8 +67,8 @@ def test_recent_reports() -> None:
         (ToolName.ISSUE_COUNT.value, ToolName.STATUS_BREAKDOWN.value, ToolName.TOP_STREETS.value),
     ))
     assert_resident_safe(answer)
-    check("23 pothole 311 requests" in answer, "count answer missing")
-    check("does not cover last month" in answer and "only covered through" in answer, "partial coverage missing")
+    check("23 pothole-related 311 service requests" in answer, "count answer missing")
+    check("covers only part of last month" in answer and "June 27, 2026" in answer, "partial coverage missing")
     check("does not verify" in answer, "closed-status caveat missing")
 
 
@@ -78,7 +80,8 @@ def test_comparison() -> None:
         "period_comparison", (OutputName.PERIOD_COMPARISON.value,), (ToolName.PERIOD_COMPARISON.value,),
     ))
     assert_resident_safe(answer)
-    check("6 more" in answer and "35.3% increase" in answer, "comparison values missing")
+    check("increased from 17 to 23" in answer, "comparison values missing")
+    check("getting worse" not in answer.lower(), "comparison must not overstate current conditions")
 
 
 def test_category_overview() -> None:
@@ -99,7 +102,7 @@ def test_status_followup_does_not_invent_zero_count() -> None:
         "status_followup", (OutputName.STATUS_BREAKDOWN.value,), (ToolName.STATUS_BREAKDOWN.value,),
     ))
     assert_resident_safe(answer)
-    check("4 open or in-progress requests and 9 closed requests" in answer, "status values missing")
+    check("4 requests are recorded as open or in progress, and 9 are recorded as closed" in answer, "status values missing")
     check("I found 0" not in answer, "status-only answer must not invent a zero count")
 
 
@@ -113,6 +116,16 @@ def test_status_followup_handles_missing_status_values() -> None:
     check("0 open" not in answer.lower(), "missing status values must not become zero")
 
 
+def test_status_followup_uses_singular_grammar() -> None:
+    evidence = bundle(facts={ToolName.STATUS_BREAKDOWN.value: {"open_count": 1, "closed_count": 4}}, status=EvidenceStatus.COMPLETE)
+    answer, _ = deterministic_answer(evidence, plan(
+        "status_followup", (OutputName.STATUS_BREAKDOWN.value,), (ToolName.STATUS_BREAKDOWN.value,),
+    ))
+    assert_resident_safe(answer)
+    check("1 request is recorded as open or in progress, and 4 are recorded as closed" in answer, "singular grammar")
+    check("1 open or in-progress requests" not in answer, "malformed singular grammar leaked")
+
+
 def main() -> None:
     tests = [
         test_recent_reports,
@@ -120,6 +133,7 @@ def main() -> None:
         test_category_overview,
         test_status_followup_does_not_invent_zero_count,
         test_status_followup_handles_missing_status_values,
+        test_status_followup_uses_singular_grammar,
     ]
     for test in tests:
         test()
