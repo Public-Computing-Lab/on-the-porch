@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urljoin
@@ -175,6 +176,7 @@ from semantic_dialogue_controller import (  # noqa: E402
     TurnKind,
     decide_dialogue_turn,
     next_dialogue_context,
+    safe_direct_response,
 )
 from conversation_transitions import (  # noqa: E402
     CacheAction,
@@ -3582,6 +3584,38 @@ def _selected_event_dialogue_hint(
     )
 
 
+def _active_event_dialogue_hint(
+    message: str,
+    state: ConversationState,
+) -> Optional[DomainHint]:
+    property_name = detect_event_property(message)
+    if property_name is None:
+        return None
+    active_entity = state.active_entity
+    if active_entity is None or active_entity.entity_type != "event":
+        return DomainHint(
+            turn_kind=TurnKind.AMBIGUOUS,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.FOLLOW_UP,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.UNTRUSTED_CONTEXT,
+            direct_response=MISSING_EVENT_REFERENCE_MESSAGE,
+            priority=112,
+        )
+    return DomainHint(
+        turn_kind=TurnKind.CONTEXTUAL_TOOL_FOLLOWUP,
+        domain=DialogueDomain.EVENTS,
+        relationship=DialogueRelationship.FOLLOW_UP,
+        response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+        tool_required=True,
+        capability_intent=CapabilityIntent.EVENT_DETAILS,
+        trusted_reference_target=TrustedReferenceTarget.ACTIVE_EVENT,
+        priority=112,
+    )
+
+
 def _semantic_dialogue_llm_enabled() -> bool:
     configured = bool(str(os.getenv("GEMINI_API_KEY", "") or "").strip())
     raw = os.getenv("SEMANTIC_DIALOGUE_CONTROLLER_LLM_ENABLED")
@@ -3601,6 +3635,7 @@ def _decide_semantic_dialogue(
     thread_id: str,
     request_started_at: Optional[float],
 ) -> DialogueDecision:
+    controller_started = time.perf_counter()
     deadline = GlobalDeadline.from_started_at(
         request_started_at or time.perf_counter(), hard_ceiling_seconds=15.0,
     )
@@ -3608,6 +3643,7 @@ def _decide_semantic_dialogue(
         hint
         for hint in (
             _selected_event_dialogue_hint(event_context),
+            _active_event_dialogue_hint(message, state_envelope.conversation_state),
             build_311_dialogue_hint(message, state_envelope.civic_311_context),
             build_event_dialogue_hint(
                 message,
@@ -3626,6 +3662,10 @@ def _decide_semantic_dialogue(
         ),
         deadline=deadline,
     )
+    decision = replace(
+        decision,
+        controller_latency_ms=(time.perf_counter() - controller_started) * 1000.0,
+    )
     print(
         json_dumps({
             "event": "semantic_dialogue_controller",
@@ -3642,15 +3682,20 @@ def _decide_semantic_dialogue(
 def _direct_dialogue_agent_result(
     decision: DialogueDecision,
     retrieval_cache: Mapping[str, Any],
+    dialogue_context: Optional[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    answer = str(decision.direct_response or "Could you clarify what you would like me to do?").strip()
+    answer = safe_direct_response(decision, dialogue_context).strip()
     return {
         "answer": answer,
         "mode": "conversation_direct",
         "sources": [],
         "result": {"answer": answer, "direct_conversation": True},
         "retrieval_cache": copy.deepcopy(dict(retrieval_cache)),
-        "model_name": None,
+        "model_name": (
+            os.getenv("GEMINI_FAST_MODEL", os.getenv("GEMINI_MODEL", "")) or None
+            if decision.controller_call_count
+            else None
+        ),
         "llm_calls": decision.controller_call_count,
         "execution_degraded": False,
     }
@@ -3676,10 +3721,15 @@ def _next_dialogue_context_for_turn(
             "geography": copy.deepcopy(civic_context.get("geography") or {}),
             "period": copy.deepcopy(civic_context.get("executed_period") or {}),
         }
-        summary = {
-            "kind": "CIVIC_311",
-            "status": str(civic_context.get("coverage_status") or "UNKNOWN"),
-        }
+        trusted_summary = agent_result.get("trusted_result_summary")
+        summary = (
+            copy.deepcopy(dict(trusted_summary))
+            if isinstance(trusted_summary, Mapping)
+            else {
+                "kind": "CIVIC_311",
+                "status": str(civic_context.get("coverage_status") or "UNKNOWN"),
+            }
+        )
         if civic_context.get("coverage_status") == "PENDING_CLARIFICATION":
             pending_type = "311_ISSUE_SCOPE"
             pending_domain = DialogueDomain.CIVIC_311
@@ -4808,37 +4858,37 @@ def post_conversation_message(thread_id: str):
                 thread_id=thread_id,
                 request_started_at=getattr(g, "request_started_at", None),
             )
+            relationship = _classify_relationship_shadow(
+                message,
+                history_rows,
+                thread_id=thread_id,
+                authoritative_active_event=conversation_state.active_entity is not None,
+            )
+            dimensions = _extract_dimensions_shadow(
+                message,
+                thread_id=thread_id,
+                conversation_state=conversation_state,
+                event_list_context=(
+                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                    or _explicit_event_list_request(message)
+                    or bool(
+                        conversation_state.active_topic is CanonicalTopic.EVENTS
+                        and relationship is not None
+                        and relationship.relationship
+                        in {
+                            ConversationRelationship.REFINEMENT,
+                            ConversationRelationship.FOLLOW_UP,
+                            ConversationRelationship.CORRECTION,
+                        }
+                    )
+                ),
+            )
             if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
                 direct_dialogue_result = _direct_dialogue_agent_result(
-                    dialogue_decision, retrieval_cache,
+                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
                 )
             else:
                 event_resolution = _resolve_validated_event_context(conn, event_context)
-                relationship = _classify_relationship_shadow(
-                    message,
-                    history_rows,
-                    thread_id=thread_id,
-                    authoritative_active_event=conversation_state.active_entity is not None,
-                )
-                dimensions = _extract_dimensions_shadow(
-                    message,
-                    thread_id=thread_id,
-                    conversation_state=conversation_state,
-                    event_list_context=(
-                        dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
-                        or _explicit_event_list_request(message)
-                        or bool(
-                            conversation_state.active_topic is CanonicalTopic.EVENTS
-                            and relationship
-                            and relationship.relationship
-                            in {
-                                ConversationRelationship.REFINEMENT,
-                                ConversationRelationship.FOLLOW_UP,
-                                ConversationRelationship.CORRECTION,
-                            }
-                        )
-                    ),
-                )
                 if event_resolution is None:
                     active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
@@ -4860,10 +4910,7 @@ def post_conversation_message(thread_id: str):
                     event_resolution is None
                     and active_event_result is None
                     and state_aware_event_result is None
-                    and (
-                        dialogue_decision.domain is DialogueDomain.CIVIC_311
-                        or is_311_candidate(message, state_envelope.civic_311_context)
-                    )
+                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
                 )
         conn.close()
         conn = None
@@ -5234,37 +5281,37 @@ def post_conversation_message_stream(thread_id: str):
                 thread_id=thread_id,
                 request_started_at=getattr(g, "request_started_at", None),
             )
+            relationship = _classify_relationship_shadow(
+                message,
+                history_rows,
+                thread_id=thread_id,
+                authoritative_active_event=conversation_state.active_entity is not None,
+            )
+            dimensions = _extract_dimensions_shadow(
+                message,
+                thread_id=thread_id,
+                conversation_state=conversation_state,
+                event_list_context=(
+                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                    or _explicit_event_list_request(message)
+                    or bool(
+                        conversation_state.active_topic is CanonicalTopic.EVENTS
+                        and relationship is not None
+                        and relationship.relationship
+                        in {
+                            ConversationRelationship.REFINEMENT,
+                            ConversationRelationship.FOLLOW_UP,
+                            ConversationRelationship.CORRECTION,
+                        }
+                    )
+                ),
+            )
             if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
                 direct_dialogue_result = _direct_dialogue_agent_result(
-                    dialogue_decision, retrieval_cache,
+                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
                 )
             else:
                 event_resolution = _resolve_validated_event_context(conn, event_context)
-                relationship = _classify_relationship_shadow(
-                    message,
-                    history_rows,
-                    thread_id=thread_id,
-                    authoritative_active_event=conversation_state.active_entity is not None,
-                )
-                dimensions = _extract_dimensions_shadow(
-                    message,
-                    thread_id=thread_id,
-                    conversation_state=conversation_state,
-                    event_list_context=(
-                        dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
-                        or _explicit_event_list_request(message)
-                        or bool(
-                            conversation_state.active_topic is CanonicalTopic.EVENTS
-                            and relationship
-                            and relationship.relationship
-                            in {
-                                ConversationRelationship.REFINEMENT,
-                                ConversationRelationship.FOLLOW_UP,
-                                ConversationRelationship.CORRECTION,
-                            }
-                        )
-                    ),
-                )
                 if event_resolution is None:
                     active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
@@ -5286,10 +5333,7 @@ def post_conversation_message_stream(thread_id: str):
                     event_resolution is None
                     and active_event_result is None
                     and state_aware_event_result is None
-                    and (
-                        dialogue_decision.domain is DialogueDomain.CIVIC_311
-                        or is_311_candidate(message, state_envelope.civic_311_context)
-                    )
+                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
                 )
     except Exception as exc:
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):

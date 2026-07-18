@@ -348,6 +348,24 @@ class Civic311Result:
             "fallback_used": self.telemetry.fallback_used,
             "timeout_stage": self.telemetry.timeout_stage,
         }
+        trusted_result_summary: Optional[Dict[str, Any]] = None
+        count_result = self.evidence.tool_results.get(ToolName.ISSUE_COUNT.value)
+        count = count_result.get("count") if isinstance(count_result, Mapping) else None
+        if self.plan.intent == "exact_count" and isinstance(count, int) and count >= 0:
+            trusted_result_summary = {
+                "kind": "CIVIC_311_COUNT",
+                "status": self.evidence.evidence_status.value,
+                "count": count,
+                "request_label": _request_label(
+                    self.evidence.issue_family,
+                    all_311=self.plan.issue_scope == IssueScope.ALL_311.value,
+                ),
+                "geography_label": str(self.evidence.geography.get("label") or "Dorchester")[:96],
+                "executed_start_date": self.evidence.executed_period.get("start_date"),
+                "executed_end_date_exclusive": self.evidence.executed_period.get("end_date_exclusive"),
+                "requested_end_date_exclusive": self.evidence.requested_period.get("end_date_exclusive"),
+                "data_through_date": self.evidence.freshness.get("data_through_date"),
+            }
         return {
             "answer": self.answer,
             "mode": "structured_311",
@@ -371,6 +389,7 @@ class Civic311Result:
             "civic_311_context": self.next_context,
             "civic_311_context_update": self.update_context,
             "civic_311_diagnostics": diagnostics,
+            "trusted_result_summary": trusted_result_summary,
         }
 
 
@@ -465,6 +484,7 @@ def _is_reference_only(message: str) -> bool:
             "what types were most common",
             "which types were most common",
             "what about overall",
+            "what about there",
         }
     )
 
@@ -486,6 +506,15 @@ _ALL_311_RESPONSES = frozenset(
 
 def _is_all_311_response(message: str) -> bool:
     return _normalized(message).strip(" .,!?:;") in _ALL_311_RESPONSES
+
+
+def _is_overall_refinement(message: str) -> bool:
+    text = _normalized(message).strip(" .,!?:;")
+    return bool(
+        text in {"overall", "what about overall"}
+        or re.search(r"\b(?:everything|all) overall\b", text)
+        or (re.search(r"\boverall\b", text) and re.search(r"\bnot only\b", text))
+    )
 
 
 def _is_explicit_all_311(message: str) -> bool:
@@ -510,13 +539,44 @@ def _is_category_distribution_followup(message: str) -> bool:
     return bool(re.search(r"\b(?:what|which) (?:types|categories) (?:were|are) most common\b", text))
 
 
+def _is_community_opinion_request(message: str) -> bool:
+    text = _normalized(message)
+    return bool(
+        re.search(r"\b(?:residents?|community|people)\b", text)
+        and re.search(r"\b(?:say|saying|concerned|concerns|feel|think|opinion)\b", text)
+    )
+
+
 def build_311_dialogue_hint(
     message: str,
     active_context: Optional[Mapping[str, Any]],
 ) -> Optional[DomainHint]:
     """Return a reviewed semantic hint without exposing a tool implementation."""
+    # Community voice still belongs to the established RAG/hybrid route. A
+    # matching 311 issue family is evidence context, not a request for a count.
+    if _is_community_opinion_request(message):
+        return None
     active = Active311FactContext.from_mapping(active_context)
     pending_scope = bool(active and active.coverage_status == "PENDING_CLARIFICATION")
+    if _is_explicit_all_311(message) and re.search(
+        r"\bwithout (?:looking|checking|searching) (?:anything )?up\b",
+        _normalized(message),
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.AMBIGUOUS,
+            domain=DialogueDomain.CIVIC_311,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.EVIDENCE_REQUIRED,
+            trusted_reference_target=TrustedReferenceTarget.NONE,
+            direct_response=(
+                "I need to check the current 311 data to answer that accurately. "
+                "Would you like me to look it up?"
+            ),
+            priority=120,
+        )
     if pending_scope and _is_all_311_response(message):
         return DomainHint(
             turn_kind=TurnKind.CLARIFICATION_RESPONSE,
@@ -528,7 +588,7 @@ def build_311_dialogue_hint(
             trusted_reference_target=TrustedReferenceTarget.PENDING_311_ISSUE_SCOPE,
             priority=100,
         )
-    if _is_explicit_all_311(message) or (active and _normalized(message).strip(" .,!?:;") in {"what about overall", "overall"}):
+    if _is_explicit_all_311(message) or (active and _is_overall_refinement(message)):
         return DomainHint(
             turn_kind=(TurnKind.CONTEXTUAL_TOOL_FOLLOWUP if active else TurnKind.FACTUAL_TOOL_QUERY),
             domain=DialogueDomain.CIVIC_311,
@@ -677,6 +737,7 @@ def _is_contextual_followup(message: str) -> bool:
     return (
         _is_reference_only(message)
         or _is_all_311_response(message)
+        or _is_overall_refinement(message)
         or _street_from_message(message) is not None
     )
 
@@ -737,7 +798,7 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
     if active and (
         _is_month_before_followup(message)
         or _is_all_311_response(message)
-        or _normalized(message).strip(" .,!?:;") == "what about overall"
+        or _is_overall_refinement(message)
     ):
         outputs = active.outputs or (
             OutputName.ISSUE_COUNT.value,
@@ -1054,10 +1115,9 @@ def plan_311_question(
     today = now or date.today()
     active = Active311FactContext.from_mapping(active_context)
     family = family_for_message(message)
-    aggregate_refinement = bool(
-        active
-        and _normalized(message).strip(" .,!?:;") in {"overall", "what about overall"}
-    )
+    aggregate_refinement = bool(active and _is_overall_refinement(message))
+    if aggregate_refinement:
+        family = None
     if (
         family is None
         and active

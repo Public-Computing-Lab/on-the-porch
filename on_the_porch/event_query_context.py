@@ -226,10 +226,41 @@ def build_event_dialogue_hint(
         or context.get("previous_capability_intent") == CapabilityIntent.LIST_EVENTS.value
     )
 
+    if re.search(r"\bare there no events?\b", text) and re.search(
+        r"\b(?:happening|scheduled|listed)\b", text,
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.FACTUAL_TOOL_QUERY,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.LIST_EVENTS,
+            priority=125,
+        )
+
+    if re.search(r"\bevents?\b", text) and re.search(
+        r"\bnot scheduled anywhere\b", text,
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.UNSATISFIABLE,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.UNBOUNDED_NEGATION,
+            direct_response=(
+                "That request is not well-defined because there are countless events that are not scheduled. "
+                "Are you asking about canceled events or events happening outside a particular time period?"
+            ),
+            priority=125,
+        )
+
     if (
         re.search(r"\bevents?\b", text)
         and re.search(r"\bnot happening\b", text)
-        and re.search(r"\b(?:don't|dont|do not)\s+(?:say|list|show)\b", text)
+        and re.search(r"\b(?:don't|dont|do not)\s+(?:say|list|show|include)\b", text)
     ):
         return DomainHint(
             turn_kind=TurnKind.UNSATISFIABLE,

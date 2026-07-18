@@ -17,7 +17,8 @@ variant in `api/api_v2.py`. Both enforce identity, ownership, rate limits, CSRF,
 validation, and turn idempotency before generation. Emergency interception precedes
 history-dependent processing. Normal requests load MySQL thread state and recent history,
 resolve trusted UI context, classify relationship and dimensions, attempt deterministic
-event handling, then call the existing agent pipeline. The final answer, sources, state,
+event handling, run the rule-first semantic dialogue controller, then call the selected
+domain capability or existing agent pipeline. The final answer, sources, state,
 cache metadata, and idempotency completion are committed in one MySQL transaction. JSON
 and SSE serialize that persisted result; completed retries replay it.
 
@@ -30,6 +31,7 @@ and SSE serialize that persisted result; completed retries replay it.
 | Rate limiting and shared cache | `api/rate_limit.py`, `api/mysql_cache.py` |
 | Request deadline and metrics | `on_the_porch/request_budget.py`, `api/request_metrics.py` |
 | Relationship, dimensions, state | `conversation_relationship.py`, `conversation_dimensions.py`, `conversation_state.py`, `conversation_transitions.py` |
+| Semantic turn strategy | `semantic_dialogue_controller.py`; domain hints in `civic_311.py`, `event_query_context.py`, and `api/api_v2.py` |
 | Emergency policy | `emergency_routing.py` |
 | Event capability | `event_query_context.py`, `event_relevance.py`, `event_context.py` |
 | Structured civic facts | `sql_chat/prepared_sql.py`; compatibility code in `sql_chat/app4.py` |
@@ -80,6 +82,49 @@ one repair call. The current 311 slice uses no planner for exact counts, clear i
 top-street follow-ups, comparisons, category overviews, or other rule-resolved requests.
 It uses the planner only for ambiguous compound 311 requests that rules cannot safely
 decompose.
+
+### Semantic dialogue controller
+
+The semantic dialogue controller runs after emergency interception and trusted thread-state
+loading, but before a capability, SQL, event lookup, or legacy retrieval route is selected.
+It returns one validated strategy from fixed enums: turn kind, domain, relationship,
+response strategy, registered capability, clarification reason, and trusted reference. It
+cannot return SQL, arguments, URLs, arbitrary tools, resident prose, or civic facts.
+
+Reviewed rules have precedence for clear aggregate 311 requests, compatible pending
+clarifications, exact event listing and correction forms, known trusted rephrases, zoning
+location clarification, greetings/capability questions, and reviewed adversarial or
+unbounded requests. A hosted model is called only when no reviewed domain hint applies and
+the current message has semantic ambiguity such as correction, negation, rephrasing, or a
+short context-dependent reference. The model receives only the current message and a
+schema-validated bounded context: prior canonical turn/domain/capability, pending
+clarification type, canonical parameters, and a server-generated previous-result summary.
+Raw conversation history and prior assistant prose are not sent as authoritative state.
+
+`SEMANTIC_DIALOGUE_CONTROLLER_LLM_ENABLED` controls that optional call. The controller uses
+the existing configured Gemini provider, makes at most one call, retries zero times, and
+caps the call at 2.5 seconds or the smaller remaining global deadline. Controller decisions
+perform no embeddings or vector search. Malformed JSON, unknown enums, incompatible
+domain/capability pairs, unavailable trusted references, low confidence, timeout, provider
+failure, or provider absence fail closed to a deterministic clarification. Provider-disabled
+mode still supports every rule-resolved 311 and event operation, known rephrase, zoning
+clarification, and direct conversational response.
+
+Model decisions never contain resident-facing prose. Direct responses are built by reviewed
+server code and may contain only fixed clarification/conversational wording or a rephrasing
+of a validated server-owned `EVENT_LIST` or `CIVIC_311_COUNT` summary. They cannot introduce
+new counts, event names, locations, safety conditions, or zoning requirements. Dialogue
+state is schema validated, JSON bounded to 4 KB, isolated by owned thread, and atomically
+persisted with the turn.
+
+Isolated local-demo validation exercised the configured hosted Gemini provider for an
+ambiguous trusted event rephrase, a context-dependent contradictory event request, and a
+trusted 311 result rephrase. Rule-only live cases covered negated event evidence, aggregate
+and contextual 311, small talk, capability and zoning questions, prompt-injection and
+unknown-tool requests, cross-thread/user isolation, JSON/SSE parity, and completed replay.
+Separate provider-disabled and controlled-fault tests covered absence, timeout, malformed
+output, unknown/mismatched capability, low confidence, and deadline pressure. These tests do
+not certify production credentials, production data, or DreamHost latency.
 
 ## 8. Allowlisted tool registry
 
