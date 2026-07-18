@@ -96,6 +96,8 @@ def test_category_overview() -> None:
     ))
     assert_resident_safe(answer)
     check("pothole (24); streetlight (10)" in answer, "category listing missing")
+    check("available categories" in answer, "category coverage wording missing")
+    check("supported street-related" not in answer, "internal capability wording leaked")
 
 
 def test_status_followup_does_not_invent_zero_count() -> None:

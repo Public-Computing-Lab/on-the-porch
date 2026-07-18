@@ -1612,10 +1612,10 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
     if plan.intent == "category_overview":
         categories = (bundle.facts.get(ToolName.CATEGORY_DISTRIBUTION.value) or {}).get("categories") or []
         if not categories:
-            lines.append(f"I did not find matching supported street-related 311 service requests in Dorchester for {period}.")
+            lines.append(f"I did not find matching street-related 311 service requests in the available categories in Dorchester for {period}.")
         else:
             listed = "; ".join(f"{item['label']} ({_int_value(item['count'])})" for item in categories)
-            lines.append(f"For {period}, the most common supported street-related 311 service requests in Dorchester were {listed}.")
+            lines.append(f"For {period}, the most common street-related 311 service requests in the available categories in Dorchester were {listed}.")
         _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED

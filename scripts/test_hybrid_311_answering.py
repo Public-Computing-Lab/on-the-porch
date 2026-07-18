@@ -106,6 +106,15 @@ def test_aliases_and_rule_plans() -> None:
     overview = plan_311_question("Most common 311 street problems this month?", now=date(2026, 7, 17))
     check(overview.intent == "category_overview", "category overview must be deterministic")
     check(overview.tools == (ToolName.CATEGORY_DISTRIBUTION.value, ToolName.SOURCE_FRESHNESS.value), "overview tools")
+    overview_bundle = _bundle()
+    overview_bundle.facts = {
+        ToolName.CATEGORY_DISTRIBUTION.value: {
+            "categories": [{"label": "pothole", "count": 5}],
+        },
+    }
+    overview_answer, _ = deterministic_answer(overview_bundle, overview)
+    check("available categories" in overview_answer, "category wording must explain bounded coverage")
+    check("supported street-related" not in overview_answer, "internal capability wording must stay hidden")
 
     streets = plan_311_question("Which streets have the most pothole reports?", now=date(2026, 7, 17))
     check(streets.intent == "top_streets", "top-streets question must keep its intent")
