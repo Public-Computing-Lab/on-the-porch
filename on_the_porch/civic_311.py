@@ -13,6 +13,7 @@ import os
 import re
 import time
 import unicodedata
+from calendar import month_name
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -312,9 +313,13 @@ class Civic311Result:
             "tool_count": self.telemetry.tool_count,
             "synthesis_ms": self.telemetry.synthesis_ms,
             "validation_ms": self.telemetry.validation_ms,
+            "repair_ms": self.telemetry.repair_ms,
             "persistence_ms": self.telemetry.persistence_ms,
             "total_latency_ms": self.telemetry.total_latency_ms,
             "llm_call_count": self.telemetry.llm_call_count,
+            "planner_call_count": self.telemetry.planner_call_count,
+            "synthesis_call_count": self.telemetry.synthesis_call_count,
+            "repair_call_count": self.telemetry.repair_call_count,
             "embedding_call_count": 0,
             "fallback_used": self.telemetry.fallback_used,
             "timeout_stage": self.telemetry.timeout_stage,
@@ -347,6 +352,7 @@ class Civic311Result:
 
 PlannerLLM = Callable[[str, float], str]
 SynthesisLLM = Callable[[str, float], str]
+RepairLLM = Callable[[str, float], str]
 ConnectionFactory = Callable[[], Any]
 
 
@@ -450,11 +456,24 @@ def is_311_candidate(message: str, active_context: Optional[Mapping[str, Any]]) 
     if _is_reference_only(message):
         return True
     context = Active311FactContext.from_mapping(active_context)
-    return context is not None and _is_reference_only(message)
+    return context is not None and _is_contextual_followup(message)
 
 
 def _period_from_message(message: str, *, today: date) -> CivicPeriod:
     text = _normalized(message)
+    month_lookup = {name.lower(): index for index, name in enumerate(month_name) if name}
+    month_match = re.search(
+        r"\b(?:in|during|for)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(20\d{2}))?\b",
+        text,
+    )
+    if month_match:
+        month = month_lookup[month_match.group(1)]
+        year = int(month_match.group(2) or today.year)
+        if month_match.group(2) is None and month > today.month:
+            year -= 1
+        start = date(year, month, 1)
+        end = date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1)
+        return CivicPeriod("CALENDAR_MONTH", f"{month_name[month]} {year}", start, end)
     if "last month" in text:
         first_this_month = today.replace(day=1)
         end = first_this_month
@@ -498,12 +517,44 @@ def _canonical_street(value: str) -> Optional[str]:
 
 def _street_from_message(message: str) -> Optional[str]:
     match = _STREET_CAPTURE.search(message or "")
-    return _canonical_street(match.group(1)) if match else None
+    if match:
+        return _canonical_street(match.group(1))
+    stripped = str(message or "").strip(" .,!?:;\"'")
+    if re.fullmatch(
+        r"[A-Za-z0-9 .'-]{2,72}(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|way|place|pl)",
+        stripped,
+        re.IGNORECASE,
+    ):
+        return _canonical_street(stripped)
+    return None
 
 
 def _needs_street(message: str) -> bool:
     text = _normalized(message)
     return any(_phrase_in(text, phrase) for phrase in ("my street", "this street", "our street"))
+
+
+def _is_contextual_followup(message: str) -> bool:
+    return _is_reference_only(message) or _street_from_message(message) is not None
+
+
+def _requires_semantic_planner(message: str) -> bool:
+    text = _normalized(message)
+    return bool(
+        _is_implementation_question(message)
+        and re.search(r"\b(?:and|also)\b", text)
+        and re.search(r"\b(?:complain|complained|complaints?|reports?|requests?|other people)\b", text)
+    )
+
+
+def _is_exact_count_request(message: str) -> bool:
+    text = _normalized(message)
+    return bool(
+        (text.startswith("how many ") or re.search(r"\b(?:count|number) of\b", text))
+        and not _is_comparison(message)
+        and not _is_implementation_question(message)
+        and not re.search(r"\b(?:status|open|closed|which streets?|top streets?|and what|and how)\b", text)
+    )
 
 
 def _geography_from_context(
@@ -534,7 +585,7 @@ def _geography_from_context(
             label = "Codman Square" if location_id == "codman_square" else "Fields Corner"
             # The supplied source has no authoritative subarea boundary field.
             return CivicGeography(label=label, kind="SUBAREA", subarea=label, filterable=False)
-    if active_context and _is_reference_only(message):
+    if active_context and _is_contextual_followup(message):
         return active_context.geography
     return CivicGeography()
 
@@ -552,6 +603,12 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
             (ToolName.PERIOD_COMPARISON.value, ToolName.SOURCE_FRESHNESS.value),
             "period_comparison",
         )
+    if _is_exact_count_request(message):
+        return (
+            (OutputName.ISSUE_COUNT.value, OutputName.SOURCE_FRESHNESS.value),
+            (ToolName.ISSUE_COUNT.value, ToolName.SOURCE_FRESHNESS.value),
+            "exact_count",
+        )
     if _is_status_followup(message):
         return (
             (OutputName.STATUS_BREAKDOWN.value, OutputName.SOURCE_FRESHNESS.value),
@@ -563,6 +620,22 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
             (OutputName.TOP_STREETS.value, OutputName.ISSUE_COUNT.value, OutputName.SOURCE_FRESHNESS.value),
             (ToolName.TOP_STREETS.value, ToolName.ISSUE_COUNT.value, ToolName.SOURCE_FRESHNESS.value),
             "top_streets",
+        )
+    if _street_from_message(message) and active and OutputName.MATCHING_REQUESTS.value in active.outputs:
+        return (
+            (
+                OutputName.MATCHING_REQUESTS.value,
+                OutputName.STATUS_BREAKDOWN.value,
+                OutputName.RECENT_EXAMPLES.value,
+                OutputName.SOURCE_FRESHNESS.value,
+            ),
+            (
+                ToolName.ISSUE_COUNT.value,
+                ToolName.STATUS_BREAKDOWN.value,
+                ToolName.RECENT_EXAMPLES.value,
+                ToolName.SOURCE_FRESHNESS.value,
+            ),
+            "street_status",
         )
     if _is_implementation_question(message):
         return (
@@ -599,7 +672,7 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
 
 def _default_period_from_context(message: str, active: Optional[Active311FactContext], *, today: date) -> CivicPeriod:
     text = _normalized(message)
-    if active and _is_reference_only(message) and not re.search(r"\b(?:last|this|recent|\d+ days?)\b", text):
+    if active and _is_contextual_followup(message) and not re.search(r"\b(?:last|this|recent|\d+ days?)\b", text):
         return active.executed_period
     return _period_from_message(message, today=today)
 
@@ -611,6 +684,7 @@ def _clarification_plan(
     geography: CivicGeography,
     period: CivicPeriod,
     clarification: str,
+    outputs: Sequence[str] = (),
 ) -> StrictToolPlan:
     return StrictToolPlan(
         domain="311",
@@ -618,7 +692,7 @@ def _clarification_plan(
         issue_family=family.value if family else None,
         geography=geography.to_dict(),
         period=period.to_dict(),
-        outputs=(),
+        outputs=bounded_strings(outputs, limit=7, maximum_length=48),
         tools=(),
         needs_clarification=True,
         clarification_message=clarification,
@@ -627,22 +701,117 @@ def _clarification_plan(
     )
 
 
+_PLANNER_KEYS = frozenset({
+    "domain",
+    "intent",
+    "issue_family",
+    "geography_scope",
+    "street_reference",
+    "time_intent",
+    "requested_outputs",
+    "needs_clarification",
+    "confidence",
+})
+_PLANNER_INTENTS = frozenset({
+    "recent_reports",
+    "exact_count",
+    "status_followup",
+    "top_streets",
+    "street_status",
+    "period_comparison",
+    "category_overview",
+})
+_OUTPUT_TO_TOOL = {
+    OutputName.ISSUE_COUNT.value: ToolName.ISSUE_COUNT.value,
+    OutputName.MATCHING_REQUESTS.value: ToolName.ISSUE_COUNT.value,
+    OutputName.STATUS_BREAKDOWN.value: ToolName.STATUS_BREAKDOWN.value,
+    OutputName.TOP_STREETS.value: ToolName.TOP_STREETS.value,
+    OutputName.RECENT_EXAMPLES.value: ToolName.RECENT_EXAMPLES.value,
+    OutputName.PERIOD_COMPARISON.value: ToolName.PERIOD_COMPARISON.value,
+    OutputName.CATEGORY_DISTRIBUTION.value: ToolName.CATEGORY_DISTRIBUTION.value,
+    OutputName.SOURCE_FRESHNESS.value: ToolName.SOURCE_FRESHNESS.value,
+}
+_INTENT_REQUIRED_OUTPUTS = {
+    "recent_reports": frozenset({OutputName.ISSUE_COUNT.value}),
+    "exact_count": frozenset({OutputName.ISSUE_COUNT.value}),
+    "status_followup": frozenset({OutputName.STATUS_BREAKDOWN.value}),
+    "top_streets": frozenset({OutputName.TOP_STREETS.value}),
+    "street_status": frozenset({OutputName.MATCHING_REQUESTS.value, OutputName.STATUS_BREAKDOWN.value}),
+    "period_comparison": frozenset({OutputName.PERIOD_COMPARISON.value}),
+    "category_overview": frozenset({OutputName.CATEGORY_DISTRIBUTION.value}),
+}
+_GEOGRAPHY_SCOPES = frozenset({"DORCHESTER", "STREET", "SUBAREA"})
+_STREET_REFERENCE_STATES = frozenset({"NONE", "EXPLICIT", "INHERITED", "MISSING"})
+_TIME_INTENTS = frozenset({
+    "RECENT", "LAST_MONTH", "THIS_MONTH", "LAST_WEEK", "ROLLING_30_DAYS", "INHERIT",
+})
+
+
+def _tools_for_outputs(outputs: Sequence[str]) -> Tuple[str, ...]:
+    tools: List[str] = []
+    for output in outputs:
+        tool = _OUTPUT_TO_TOOL.get(output)
+        if tool and tool not in tools:
+            tools.append(tool)
+    if ToolName.SOURCE_FRESHNESS.value not in tools:
+        tools.append(ToolName.SOURCE_FRESHNESS.value)
+    return tuple(tools)
+
+
+def _requires_street_status_outputs(outputs: Sequence[str]) -> bool:
+    required = {
+        OutputName.MATCHING_REQUESTS.value,
+        OutputName.STATUS_BREAKDOWN.value,
+    }
+    return required.issubset(set(outputs))
+
+
 def _validate_llm_plan(raw: str, *, fallback: StrictToolPlan) -> Optional[StrictToolPlan]:
-    """Accept only a bounded planner selection, never arbitrary calls or SQL."""
+    """Accept one semantic selection; derive tool calls deterministically."""
     try:
         value = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or set(value) != _PLANNER_KEYS:
+        return None
+    if value.get("domain") != "311":
         return None
     family = str(value.get("issue_family") or "")
     if family not in _FAMILY_BY_ID:
         return None
-    outputs = bounded_strings(value.get("outputs") if isinstance(value.get("outputs"), list) else (), limit=7, maximum_length=48)
-    tools = bounded_strings(value.get("tools") if isinstance(value.get("tools"), list) else (), limit=7, maximum_length=48)
+    intent = str(value.get("intent") or "")
+    if intent not in _PLANNER_INTENTS:
+        return None
+    outputs = bounded_strings(
+        value.get("requested_outputs") if isinstance(value.get("requested_outputs"), list) else (),
+        limit=7,
+        maximum_length=48,
+    )
     allowed_outputs = {item.value for item in OutputName}
-    allowed_tools = set(TOOL_REGISTRY)
-    if not outputs or not tools or any(item not in allowed_outputs for item in outputs) or any(item not in allowed_tools for item in tools):
+    if not outputs or any(item not in allowed_outputs for item in outputs):
+        return None
+    if not _INTENT_REQUIRED_OUTPUTS[intent].issubset(outputs):
+        return None
+    if _requires_street_status_outputs(fallback.outputs) and (
+        intent != "street_status" or not set(fallback.outputs).issubset(outputs)
+    ):
+        return None
+    geography_scope = str(value.get("geography_scope") or "")
+    street_reference = str(value.get("street_reference") or "")
+    time_intent = str(value.get("time_intent") or "")
+    if geography_scope not in _GEOGRAPHY_SCOPES:
+        return None
+    if street_reference not in _STREET_REFERENCE_STATES or time_intent not in _TIME_INTENTS:
+        return None
+    fallback_street = fallback.geography.get("street")
+    if street_reference == "EXPLICIT" and not fallback_street:
+        return None
+    if geography_scope == "SUBAREA" and not fallback.geography.get("subarea"):
+        return None
+    needs_clarification = value.get("needs_clarification")
+    if not isinstance(needs_clarification, bool):
+        return None
+    if street_reference == "MISSING" and not needs_clarification:
         return None
     try:
         confidence = float(value.get("confidence"))
@@ -650,9 +819,31 @@ def _validate_llm_plan(raw: str, *, fallback: StrictToolPlan) -> Optional[Strict
         return None
     if confidence < 0.75:
         return None
+    if needs_clarification:
+        clarification = (
+            "Which street in Dorchester are you asking about?"
+            if street_reference == "MISSING"
+            else "Which city-service issue are you asking about?"
+        )
+        return StrictToolPlan(
+            domain="311",
+            intent="clarification",
+            issue_family=family,
+            geography=fallback.geography,
+            period=fallback.period,
+            outputs=outputs,
+            tools=(),
+            needs_clarification=True,
+            clarification_message=clarification,
+            confidence=confidence,
+            planner_source=PlannerSource.LLM,
+        )
+    tools = _tools_for_outputs(outputs)
+    if any(tool not in TOOL_REGISTRY for tool in tools):
+        return None
     return StrictToolPlan(
         domain="311",
-        intent=_bounded_optional_text(value.get("intent"), 64) or fallback.intent,
+        intent=intent,
         issue_family=family,
         geography=fallback.geography,
         period=fallback.period,
@@ -673,23 +864,88 @@ def plan_311_question(
     now: Optional[date] = None,
     planner_llm: Optional[PlannerLLM] = None,
     deadline: Optional[GlobalDeadline] = None,
+    planner_stats: Optional[Dict[str, Any]] = None,
 ) -> StrictToolPlan:
     """Build one typed 311 plan with deterministic rules before an optional planner."""
     today = now or date.today()
     active = Active311FactContext.from_mapping(active_context)
     family = family_for_message(message)
-    if family is None and active and _is_reference_only(message):
+    if family is None and active and _is_contextual_followup(message):
         family = IssueFamily(active.issue_family)
     geography = _geography_from_context(message, active_context=active, state_location=state_location)
     period = _default_period_from_context(message, active, today=today)
-    if _needs_street(message) and geography.street is None:
-        return _clarification_plan(
+    outputs, tools, intent = _planned_outputs(message, family, active)
+    missing_street = _needs_street(message) and geography.street is None
+    fallback = (
+        _clarification_plan(
             message=message,
             family=family,
             geography=geography,
             period=period,
             clarification="Which street in Dorchester are you asking about?",
+            outputs=outputs,
         )
+        if missing_street
+        else StrictToolPlan(
+            domain="311",
+            intent=intent,
+            issue_family=family.value if family else None,
+            geography=geography.to_dict(),
+            period=period.to_dict(),
+            outputs=outputs,
+            tools=tools,
+            needs_clarification=False,
+            clarification_message=None,
+            confidence=0.99 if family or _is_category_overview(message) else 0.4,
+            planner_source=PlannerSource.RULE,
+        )
+    )
+    semantic_value = not (family is None and _is_reference_only(message)) and (
+        (family is None and not _is_category_overview(message))
+        or _requires_semantic_planner(message)
+    )
+    if planner_llm and deadline and semantic_value and deadline.remaining(reserve_for_persistence=True) >= 3.0:
+        if planner_stats is not None:
+            planner_stats["call_count"] = 1
+        compound_constraint = (
+            " This reviewed compound request requires intent=street_status and must preserve "
+            "these requested_outputs: " + ", ".join(fallback.outputs) + "."
+            if _requires_street_status_outputs(fallback.outputs)
+            else ""
+        )
+        prompt = (
+            "Classify one Dorchester 311 question. Return one JSON object with exactly these keys: "
+            "domain, intent, issue_family, geography_scope, street_reference, time_intent, "
+            "requested_outputs, needs_clarification, confidence. "
+            "domain must be 311. Allowed intent: " + ", ".join(sorted(_PLANNER_INTENTS))
+            + ". Allowed issue_family: " + ", ".join(item.value for item in IssueFamily)
+            + ". Allowed geography_scope: DORCHESTER, STREET, SUBAREA. "
+            "Allowed street_reference: NONE, EXPLICIT, INHERITED, MISSING. "
+            "Allowed time_intent: " + ", ".join(sorted(_TIME_INTENTS))
+            + ". Allowed requested_outputs: " + ", ".join(item.value for item in OutputName)
+            + ". Do not return tools, SQL, URLs, dates, filters, or prose. "
+            "If the question says my street without a trusted street, set street_reference=MISSING "
+            "and needs_clarification=true."
+            + compound_constraint
+            + " Question: " + message[:400]
+        )
+        try:
+            raw = planner_llm(prompt, min(2.5, deadline.remaining(reserve_for_persistence=True)))
+            planned = _validate_llm_plan(raw, fallback=fallback)
+            if planned is not None:
+                if planner_stats is not None:
+                    planner_stats["accepted"] = True
+                return planned
+            if planner_stats is not None:
+                planner_stats["failure"] = "invalid_output"
+        except TimeoutError:
+            if planner_stats is not None:
+                planner_stats["failure"] = "timeout"
+        except Exception:
+            if planner_stats is not None:
+                planner_stats["failure"] = "provider_failure"
+    if missing_street:
+        return fallback
     if family is None and not _is_category_overview(message):
         if _is_status_followup(message):
             return _clarification_plan(
@@ -699,28 +955,6 @@ def plan_311_question(
                 period=period,
                 clarification="Which 311 issue or set of reports are you asking about?",
             )
-        if planner_llm and deadline and deadline.remaining(reserve_for_persistence=True) >= 3.0:
-            fallback = StrictToolPlan(
-                domain="311", intent="ambiguous_311", issue_family=None,
-                geography=geography.to_dict(), period=period.to_dict(), outputs=(), tools=(),
-                needs_clarification=True,
-                clarification_message="Which city-service issue are you asking about?",
-                confidence=0.4, planner_source=PlannerSource.RULE,
-            )
-            prompt = (
-                "Interpret a Dorchester 311 request. Return JSON only with issue_family, intent, "
-                "outputs, tools, confidence. Allowed issue_family values: "
-                + ", ".join(item.value for item in IssueFamily)
-                + ". Allowed outputs: " + ", ".join(item.value for item in OutputName)
-                + ". Allowed tools: " + ", ".join(TOOL_REGISTRY)
-                + ". Never write SQL or a resident answer. Question: " + message[:400]
-            )
-            try:
-                planned = _validate_llm_plan(planner_llm(prompt, min(2.5, deadline.remaining(reserve_for_persistence=True))), fallback=fallback)
-                if planned is not None:
-                    return planned
-            except Exception:
-                pass
         return _clarification_plan(
             message=message,
             family=None,
@@ -728,20 +962,7 @@ def plan_311_question(
             period=period,
             clarification="Which city-service issue are you asking about?",
         )
-    outputs, tools, intent = _planned_outputs(message, family, active)
-    return StrictToolPlan(
-        domain="311",
-        intent=intent,
-        issue_family=family.value if family else None,
-        geography=geography.to_dict(),
-        period=period.to_dict(),
-        outputs=outputs,
-        tools=tools,
-        needs_clarification=False,
-        clarification_message=None,
-        confidence=0.99 if family or _is_category_overview(message) else 0.8,
-        planner_source=PlannerSource.RULE,
-    )
+    return fallback
 
 
 def _period_from_plan(plan: StrictToolPlan) -> CivicPeriod:
@@ -1205,8 +1426,25 @@ def _bundle_from_execution(
             f"The local 311 source does not include a verified {geography.subarea} boundary, so the available count is Dorchester-wide.")
         if status is EvidenceStatus.COMPLETE:
             status = EvidenceStatus.PARTIALLY_COVERED
+    model_fact_labels = {
+        ToolName.ISSUE_COUNT.value: "issue_count",
+        ToolName.STATUS_BREAKDOWN.value: "status_breakdown",
+        ToolName.TOP_STREETS.value: "top_streets",
+        ToolName.RECENT_EXAMPLES.value: "recent_examples",
+        ToolName.PERIOD_COMPARISON.value: "period_comparison",
+        ToolName.CATEGORY_DISTRIBUTION.value: "category_distribution",
+    }
+    model_facts = {
+        model_fact_labels[name]: value
+        for name, value in results.items()
+        if name in model_fact_labels
+    }
     return EvidenceBundle(
-        question_scope={"domain": "311", "intent": plan.intent},
+        question_scope={
+            "domain": "311",
+            "intent": plan.intent,
+            "issue_label": _family_label(plan.issue_family) if plan.issue_family else None,
+        },
         issue_family=family.value if family else None,
         geography=geography.to_dict(),
         requested_period=requested.to_dict(),
@@ -1214,6 +1452,7 @@ def _bundle_from_execution(
         freshness=dict(freshness),
         coverage={"status": freshness.get("coverage_status"), "data_through_date": freshness.get("data_through_date")},
         facts=facts,
+        model_facts=model_facts,
         tool_results=results,
         limitations=list(dict.fromkeys(limitations))[:5],
         missing_evidence=failures[:7],
@@ -1276,6 +1515,19 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
     place = street_label or ("Dorchester" if geo.get("filterable", True) else "Dorchester-wide records")
     prefix = _period_intro(bundle)
     lines: List[str] = [prefix] if prefix else []
+    required_fact = {
+        "category_overview": ToolName.CATEGORY_DISTRIBUTION.value,
+        "period_comparison": ToolName.PERIOD_COMPARISON.value,
+        "status_followup": ToolName.STATUS_BREAKDOWN.value,
+        "top_streets": ToolName.TOP_STREETS.value,
+    }.get(plan.intent, ToolName.ISSUE_COUNT.value)
+    if bundle.evidence_status is EvidenceStatus.PARTIAL and required_fact not in bundle.facts:
+        lines.append(
+            f"Some Boston 311 results for {family_label} in {place} for {period} were temporarily unavailable, "
+            "so I cannot confirm the requested result from this response."
+        )
+        lines.append(f"Source: {SOURCE_LABEL}.")
+        return "\n\n".join(lines), AnswerMode.DETERMINISTIC_FALLBACK
     if plan.intent == "category_overview":
         categories = (bundle.facts.get(ToolName.CATEGORY_DISTRIBUTION.value) or {}).get("categories") or []
         if not categories:
@@ -1317,6 +1569,25 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             lines.append(bundle.limitations[0])
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
+    if plan.intent == "top_streets":
+        count_data = bundle.facts.get(ToolName.ISSUE_COUNT.value) or {}
+        count = _int_value(count_data.get("count"))
+        streets = (bundle.facts.get(ToolName.TOP_STREETS.value) or {}).get("streets") or []
+        rendered_streets = _format_streets(streets)
+        if rendered_streets:
+            lines.append(
+                f"For {period}, the streets with the most matching {family_label} 311 requests were {rendered_streets}."
+            )
+        elif count > 0:
+            lines.append(
+                f"I found {count} matching {family_label} 311 requests for {period}, but the source data did not provide a usable street breakdown for those matching records."
+            )
+        else:
+            lines.append(f"I found no matching {family_label} 311 requests for {period}.")
+        if bundle.limitations:
+            lines.append(bundle.limitations[0])
+        lines.append(f"Source: {SOURCE_LABEL}.")
+        return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
     count_data = bundle.facts.get(ToolName.ISSUE_COUNT.value) or {}
     count = _int_value(count_data.get("count"))
     if count_data.get("street_coverage_unavailable"):
@@ -1331,6 +1602,9 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         lines.append(f"I found no matching {family_label} 311 requests in {place} for {period}.")
     else:
         lines.append(f"I found {count} {family_label} 311 requests in {place} for {period}.")
+        lines.append(
+            "These are service requests, not a verified count of distinct physical conditions."
+        )
     status = bundle.facts.get(ToolName.STATUS_BREAKDOWN.value) or {}
     if status:
         open_count = _int_value(status.get("open_count"))
@@ -1359,13 +1633,60 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
 
 
 def _synthesis_prompt(question: str, bundle: EvidenceBundle) -> str:
+    executed_label = str(bundle.executed_period.get("label") or "the executed period")
     return (
         "Answer a Dorchester resident using only this structured official 311 evidence. "
         "Answer the question first. Preserve counts, streets, geography, and periods exactly. "
+        "Include each non-empty count, status breakdown, street ranking, comparison, category, or recent example supplied when it directly answers the question. "
+        "For a percentage change, use the absolute magnitude with the direction word increase or decrease; do not write a signed percentage. "
+        "Say that service requests are not necessarily distinct verified physical conditions. "
+        "Use the resident-friendly issue_family label from the evidence; never emit an all-caps enum or underscore identifier. "
         "Do not mention tools, SQL, RAG, tables, or internal identifiers. Do not infer repair from closed status or active work from open status. "
+        "For a street_status question, explicitly state that request records or their absence do not determine whether the physical condition was addressed. "
         "Do not add emergency guidance. If data is stale or partial, state the supplied limitation naturally. "
+        f"State the executed period using this exact label or its exact inclusive date range: {executed_label}. "
+        f"End with exactly: Source: {SOURCE_LABEL}. "
         "Resident question: " + question[:600] + "\nEvidence: " + json.dumps(bundle.bounded_for_model(), ensure_ascii=False, separators=(",", ":"), default=str)
     )
+
+
+def _repair_prompt(question: str, bundle: EvidenceBundle, failures: Sequence[str]) -> str:
+    return (
+        _synthesis_prompt(question, bundle)
+        + "\nThe previous draft failed deterministic validation for only these reasons: "
+        + ", ".join(bounded_strings(failures, limit=8, maximum_length=48))
+        + f". Include the source line exactly as 'Source: {SOURCE_LABEL}.' "
+        + "Return one corrected answer only. Do not discuss the validation process."
+    )
+
+
+def _should_synthesize(plan: StrictToolPlan, bundle: EvidenceBundle) -> bool:
+    if plan.needs_clarification:
+        return False
+    if bundle.evidence_status in {
+        EvidenceStatus.DEPENDENCY_UNAVAILABLE,
+        EvidenceStatus.INSUFFICIENT_EVIDENCE,
+    }:
+        return False
+    return plan.intent in {
+        "recent_reports",
+        "street_status",
+        "period_comparison",
+        "category_overview",
+    }
+
+
+@dataclass(frozen=True)
+class CompositionOutcome:
+    answer: str
+    mode: AnswerMode
+    synthesis_ms: int = 0
+    validation_ms: int = 0
+    repair_ms: int = 0
+    synthesis_call_count: int = 0
+    repair_call_count: int = 0
+    fallback_used: bool = False
+    timeout_stage: Optional[str] = None
 
 
 def _allowed_numbers(bundle: EvidenceBundle) -> set[str]:
@@ -1391,8 +1712,61 @@ def _known_streets(bundle: EvidenceBundle) -> set[str]:
     return values
 
 
+_ANSWER_DATE_RANGE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+    r"(\d{1,2})(?:,\s*(20\d{2}))?\s*(?:through|to|[-\u2013])\s*"
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)?\s*"
+    r"(\d{1,2}),\s*(20\d{2})\b",
+    re.IGNORECASE,
+)
+_MONTH_NUMBER = {name.lower(): index for index, name in enumerate(month_name) if name}
+
+
+def _answer_date_ranges(text: str) -> set[Tuple[date, date]]:
+    ranges: set[Tuple[date, date]] = set()
+    for match in _ANSWER_DATE_RANGE.finditer(text):
+        start_month = _MONTH_NUMBER[match.group(1).lower()]
+        end_month = _MONTH_NUMBER[(match.group(4) or match.group(1)).lower()]
+        end_year = int(match.group(6))
+        start_year = int(match.group(3) or end_year)
+        try:
+            ranges.add(
+                (
+                    date(start_year, start_month, int(match.group(2))),
+                    date(end_year, end_month, int(match.group(5))),
+                )
+            )
+        except ValueError:
+            continue
+    return ranges
+
+
+def _bundle_date_ranges(bundle: EvidenceBundle) -> set[Tuple[date, date]]:
+    ranges: set[Tuple[date, date]] = set()
+    for raw in (bundle.requested_period, bundle.executed_period):
+        try:
+            ranges.add(
+                (
+                    date.fromisoformat(str(raw["start_date"])),
+                    date.fromisoformat(str(raw["end_date_exclusive"])) - timedelta(days=1),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return ranges
+
+
+def _answer_has_labeled_count(text: str, count: int, label: str) -> bool:
+    escaped = re.escape(str(count))
+    return bool(
+        re.search(rf"\b{escaped}\b.{{0,28}}\b{label}\b", text, re.IGNORECASE)
+        or re.search(rf"\b{label}\b.{{0,28}}\b{escaped}\b", text, re.IGNORECASE)
+    )
+
+
 def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[str, ...]]:
     text = str(answer or "").strip()
+    normalized_text = _normalized(text)
     issues: List[str] = []
     if not text:
         issues.append("empty_answer")
@@ -1400,12 +1774,98 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
         issues.append("internal_term")
     if re.search(r"\bcall 911\b", text, re.IGNORECASE):
         issues.append("unsupported_emergency_guidance")
+    if re.search(r"-\s*\d+(?:\.\d+)?\s*%", text):
+        issues.append("signed_directional_percentage")
     if re.search(r"\b(?:closed|closure)\b.{0,40}\b(?:repaired|fixed|resolved)\b", text, re.IGNORECASE):
         issues.append("closed_is_repaired")
-    if re.search(r"\bopen\b.{0,40}\b(?:actively|currently)\s+(?:being )?worked", text, re.IGNORECASE):
+    claims_open_active_work = re.search(
+        r"\bopen\b.{0,40}\b(?:shows?|means?|indicates?)\s+(?:that\s+)?active work\b"
+        r"|\bopen\b.{0,40}\b(?:actively|currently)\s+(?:being )?worked\b",
+        text,
+        re.IGNORECASE,
+    )
+    negates_open_active_work = re.search(
+        r"\bopen\b.{0,40}\b(?:does not|doesn't|do not|don't|not)\s+"
+        r"(?:show|mean|indicate)\s+(?:that\s+)?active work\b",
+        text,
+        re.IGNORECASE,
+    )
+    if claims_open_active_work and not negates_open_active_work:
         issues.append("open_is_active_work")
-    if bundle.evidence_status in {EvidenceStatus.STALE_BUT_USABLE, EvidenceStatus.PARTIALLY_COVERED} and re.search(r"\b(?:right now|currently)\b", text, re.IGNORECASE):
+    if bundle.question_scope.get("intent") == "street_status" and not (
+        re.search(
+            r"\b(?:does not|do not|don't|cannot|can't)\b.{0,90}\b(?:determine|show|verify|prove)\b.{0,90}\b(?:physical|condition|addressed|repaired|completed)\b",
+            normalized_text,
+        )
+        or re.search(
+            r"\b(?:physical|condition)\b.{0,90}\b(?:does not|do not|don't|cannot|can't)\b.{0,90}\b(?:addressed|repaired|completed)\b",
+            normalized_text,
+        )
+    ):
+        issues.append("missing_physical_completion_caveat")
+    if bundle.evidence_status in {EvidenceStatus.STALE_BUT_USABLE, EvidenceStatus.PARTIALLY_COVERED} and re.search(
+        r"\b(?:right now|currently|(?:data|records?|coverage)\s+(?:is|are)\s+current)\b",
+        text,
+        re.IGNORECASE,
+    ):
         issues.append("stale_claimed_current")
+    if bundle.evidence_status not in {
+        EvidenceStatus.DEPENDENCY_UNAVAILABLE,
+        EvidenceStatus.INSUFFICIENT_EVIDENCE,
+    } and _normalized(SOURCE_LABEL) not in normalized_text:
+        issues.append("missing_source_label")
+    family_label = _family_label(bundle.issue_family)
+    if bundle.issue_family and _normalized(family_label) not in normalized_text:
+        issues.append("missing_issue_family")
+    executed_label = str(bundle.executed_period.get("label") or "").strip()
+    answer_ranges = _answer_date_ranges(text)
+    allowed_ranges = _bundle_date_ranges(bundle)
+    executed_range = None
+    try:
+        executed_range = (
+            date.fromisoformat(str(bundle.executed_period["start_date"])),
+            date.fromisoformat(str(bundle.executed_period["end_date_exclusive"])) - timedelta(days=1),
+        )
+    except (KeyError, TypeError, ValueError):
+        pass
+    if (
+        executed_label
+        and _normalized(executed_label) not in normalized_text
+        and (executed_range is None or executed_range not in answer_ranges)
+    ):
+        issues.append("missing_executed_period")
+    if any(candidate not in allowed_ranges for candidate in answer_ranges):
+        issues.append("unsupported_date_range")
+    requested_label = str(bundle.requested_period.get("label") or "").strip()
+    through = str(bundle.freshness.get("data_through_date") or "").strip()
+    if requested_label and executed_label and requested_label != executed_label:
+        human_through = _date_phrase(through)
+        if through not in text and (not human_through or _normalized(human_through) not in normalized_text):
+            issues.append("missing_coverage_date")
+    geography = bundle.geography
+    street = str(geography.get("street") or "").strip()
+    if street and _normalized(street) not in normalized_text:
+        issues.append("missing_requested_street")
+    subarea = str(geography.get("subarea") or "").strip()
+    if subarea and _normalized(subarea) not in normalized_text:
+        issues.append("missing_requested_subarea")
+    if subarea and not geography.get("filterable", True):
+        if not re.search(r"\b(?:dorchester wide|boundary|cannot verify|not available)\b", normalized_text):
+            issues.append("missing_subarea_limitation")
+    if bundle.question_scope.get("intent") in {"recent_reports", "street_status"}:
+        issue_count = _optional_nonnegative_int(
+            (bundle.facts.get(ToolName.ISSUE_COUNT.value) or {}).get("count")
+        )
+        if issue_count and not re.search(r"\b(?:not (?:a )?verified count of distinct|may not represent distinct|not necessarily distinct)\b", normalized_text):
+            issues.append("missing_distinct_request_caveat")
+        status = bundle.facts.get(ToolName.STATUS_BREAKDOWN.value) or {}
+        open_count = _optional_nonnegative_int(status.get("open_count"))
+        closed_count = _optional_nonnegative_int(status.get("closed_count"))
+        if issue_count and open_count is not None and closed_count is not None and not (
+            _answer_has_labeled_count(text, open_count, "open")
+            and _answer_has_labeled_count(text, closed_count, "closed")
+        ):
+            issues.append("missing_status_breakdown")
     allowed_numbers = _allowed_numbers(bundle)
     for number in re.findall(r"\b\d+(?:\.\d+)?\b", text):
         if number not in allowed_numbers:
@@ -1420,6 +1880,104 @@ def validate_claims(answer: str, bundle: EvidenceBundle) -> Tuple[bool, Tuple[st
             issues.append("unsupported_street")
             break
     return not issues, tuple(dict.fromkeys(issues))
+
+
+def compose_311_answer(
+    message: str,
+    *,
+    bundle: EvidenceBundle,
+    plan: StrictToolPlan,
+    deadline: GlobalDeadline,
+    synthesis_llm: Optional[SynthesisLLM] = None,
+    repair_llm: Optional[RepairLLM] = None,
+    prior_timeout_stage: Optional[str] = None,
+    prior_fallback_used: bool = False,
+) -> CompositionOutcome:
+    """Select one bounded answer mode and validate every resident-facing claim."""
+    answer, mode = deterministic_answer(bundle, plan)
+    synthesis_ms = 0
+    validation_ms = 0
+    repair_ms = 0
+    synthesis_call_count = 0
+    repair_call_count = 0
+    synthesis_accepted = False
+    fallback_used = prior_fallback_used
+    timeout_stage = prior_timeout_stage
+    synthesis_warranted = _should_synthesize(plan, bundle)
+    if synthesis_warranted and synthesis_llm is None:
+        fallback_used = True
+    if synthesis_llm is not None and synthesis_warranted and deadline.remaining(reserve_for_persistence=True) >= 2.0:
+        synthesis_started = time.perf_counter()
+        synthesis_call_count = 1
+        candidate: Optional[str] = None
+        try:
+            candidate = synthesis_llm(
+                _synthesis_prompt(message, bundle),
+                min(6.0, deadline.remaining(reserve_for_persistence=True)),
+            )
+        except TimeoutError:
+            fallback_used = True
+            timeout_stage = timeout_stage or "synthesis"
+        except Exception:
+            fallback_used = True
+            timeout_stage = timeout_stage or "synthesis_provider"
+        synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
+        if candidate is not None:
+            validation_started = time.perf_counter()
+            valid, issues = validate_claims(candidate, bundle)
+            validation_ms += int((time.perf_counter() - validation_started) * 1000)
+            if valid:
+                answer = candidate.strip()
+                mode = AnswerMode.EVIDENCE_BOUNDED_SYNTHESIS
+                synthesis_accepted = True
+            else:
+                fallback_used = True
+                if repair_llm is not None and deadline.remaining(reserve_for_persistence=True) >= 2.0:
+                    repair_started = time.perf_counter()
+                    repair_call_count = 1
+                    repaired: Optional[str] = None
+                    try:
+                        repaired = repair_llm(
+                            _repair_prompt(message, bundle, issues),
+                            min(3.0, deadline.remaining(reserve_for_persistence=True)),
+                        )
+                    except TimeoutError:
+                        timeout_stage = timeout_stage or "repair"
+                    except Exception:
+                        timeout_stage = timeout_stage or "repair_provider"
+                    repair_ms = int((time.perf_counter() - repair_started) * 1000)
+                    if repaired is not None:
+                        validation_started = time.perf_counter()
+                        repaired_valid, _repair_issues = validate_claims(repaired, bundle)
+                        validation_ms += int((time.perf_counter() - validation_started) * 1000)
+                        if repaired_valid:
+                            answer = repaired.strip()
+                            mode = AnswerMode.EVIDENCE_BOUNDED_SYNTHESIS
+                            synthesis_accepted = True
+    elif synthesis_warranted and synthesis_llm is not None:
+        fallback_used = True
+        timeout_stage = timeout_stage or "synthesis_budget"
+    if synthesis_call_count and not synthesis_accepted:
+        answer, _deterministic_mode = deterministic_answer(bundle, plan)
+        mode = AnswerMode.DETERMINISTIC_FALLBACK
+    validation_started = time.perf_counter()
+    valid, _issues = validate_claims(answer, bundle)
+    if not valid:
+        answer, mode = deterministic_answer(bundle, plan)
+        mode = AnswerMode.DETERMINISTIC_FALLBACK
+        fallback_used = True
+    validation_ms += int((time.perf_counter() - validation_started) * 1000)
+    return CompositionOutcome(
+        answer=answer,
+        mode=mode,
+        synthesis_ms=synthesis_ms,
+        validation_ms=validation_ms,
+        repair_ms=repair_ms,
+        synthesis_call_count=synthesis_call_count,
+        repair_call_count=repair_call_count,
+        fallback_used=fallback_used,
+        timeout_stage=timeout_stage,
+    )
 
 
 def _context_from_bundle(bundle: EvidenceBundle, plan: StrictToolPlan) -> Optional[Dict[str, Any]]:
@@ -1446,6 +2004,26 @@ def _context_from_bundle(bundle: EvidenceBundle, plan: StrictToolPlan) -> Option
         return None
 
 
+def _pending_context_from_plan(plan: StrictToolPlan) -> Optional[Dict[str, Any]]:
+    """Persist only validated canonical scope needed to answer a clarification."""
+    if not plan.issue_family or not plan.needs_clarification:
+        return None
+    try:
+        period = _period_from_plan(plan)
+        return Active311FactContext(
+            issue_family=plan.issue_family,
+            geography=_geography_from_plan(plan),
+            period_kind=period.kind,
+            executed_period=period,
+            data_through_date=None,
+            freshness_status="UNKNOWN",
+            coverage_status="PENDING_CLARIFICATION",
+            outputs=bounded_strings(plan.outputs, limit=7, maximum_length=48),
+        ).to_dict()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def process_311_question(
     message: str,
     *,
@@ -1456,12 +2034,14 @@ def process_311_question(
     now: Optional[datetime] = None,
     planner_llm: Optional[PlannerLLM] = None,
     synthesis_llm: Optional[SynthesisLLM] = None,
+    repair_llm: Optional[RepairLLM] = None,
 ) -> Civic311Result:
     """Run the bounded 311 path once and return no resident-internal diagnostics."""
     started = time.perf_counter()
     current_now = now or datetime.now().astimezone()
     deadline = GlobalDeadline.from_started_at(request_started_at or started)
     plan_started = time.perf_counter()
+    planner_stats: Dict[str, Any] = {"call_count": 0}
     plan = plan_311_question(
         message,
         active_context=active_context,
@@ -1469,8 +2049,11 @@ def process_311_question(
         now=current_now.date(),
         planner_llm=planner_llm,
         deadline=deadline,
+        planner_stats=planner_stats,
     )
     planner_ms = int((time.perf_counter() - plan_started) * 1000)
+    planner_call_count = int(planner_stats.get("call_count") or 0)
+    planner_failure = str(planner_stats.get("failure") or "")
     if plan.needs_clarification:
         evidence = EvidenceBundle(
             question_scope={"domain": "311", "intent": plan.intent},
@@ -1484,13 +2067,19 @@ def process_311_question(
             planner_source=plan.planner_source,
             planner_ms=planner_ms,
             total_latency_ms=int((time.perf_counter() - started) * 1000),
+            llm_call_count=planner_call_count,
+            planner_call_count=planner_call_count,
             evidence_status=evidence.evidence_status,
             answer_mode=AnswerMode.CLARIFICATION,
+            fallback_used=bool(planner_failure),
+            timeout_stage="planner" if planner_failure == "timeout" else None,
         )
+        pending_context = _pending_context_from_plan(plan)
         return Civic311Result(
             answer=plan.clarification_message or "Which city-service issue are you asking about?",
             mode=AnswerMode.CLARIFICATION, sources=[], evidence=evidence, plan=plan,
-            telemetry=telemetry, next_context=None, update_context=False,
+            telemetry=telemetry, next_context=pending_context,
+            update_context=pending_context is not None,
         )
     requested = _period_from_plan(plan)
     fresh, executed, evidence_status, limitations = _status_and_period(
@@ -1511,38 +2100,16 @@ def process_311_question(
         message=message, plan=plan, freshness=fresh, requested=requested, executed=executed,
         initial_status=evidence_status, limitations=limitations, results=results, failures=failures,
     )
-    answer, mode = deterministic_answer(bundle, plan)
-    synthesis_ms = 0
-    llm_calls = 1 if plan.planner_source is PlannerSource.LLM else 0
-    fallback_used = False
-    complex_request = plan.intent in {"period_comparison", "street_status"} or len(plan.tools) >= 4
-    if (
-        synthesis_llm is not None
-        and complex_request
-        and bundle.evidence_status not in {EvidenceStatus.DEPENDENCY_UNAVAILABLE, EvidenceStatus.INSUFFICIENT_EVIDENCE}
-        and deadline.remaining(reserve_for_persistence=True) >= 2.0
-    ):
-        synthesis_started = time.perf_counter()
-        try:
-            candidate = synthesis_llm(_synthesis_prompt(message, bundle), min(6.0, deadline.remaining(reserve_for_persistence=True)))
-            llm_calls += 1
-            valid, _issues = validate_claims(candidate, bundle)
-            if valid:
-                answer = candidate.strip()
-                mode = AnswerMode.EVIDENCE_BOUNDED_SYNTHESIS
-            else:
-                fallback_used = True
-        except Exception:
-            fallback_used = True
-            timeout_stage = timeout_stage or "synthesis"
-        synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
-    validation_started = time.perf_counter()
-    valid, _issues = validate_claims(answer, bundle)
-    if not valid:
-        answer, mode = deterministic_answer(bundle, plan)
-        mode = AnswerMode.DETERMINISTIC_FALLBACK
-        fallback_used = True
-    validation_ms = int((time.perf_counter() - validation_started) * 1000)
+    composition = compose_311_answer(
+        message,
+        bundle=bundle,
+        plan=plan,
+        deadline=deadline,
+        synthesis_llm=synthesis_llm,
+        repair_llm=repair_llm,
+        prior_timeout_stage=timeout_stage or ("planner" if planner_failure == "timeout" else None),
+        prior_fallback_used=bool(planner_failure),
+    )
     source = _source_record(fresh, executed)
     sources = [{key: value for key, value in source.items() if key != "source_key"}]
     next_context = _context_from_bundle(bundle, plan)
@@ -1551,19 +2118,27 @@ def process_311_question(
         planner_ms=planner_ms,
         tool_execution_ms=tool_ms,
         tool_count=len(plan.tools),
-        synthesis_ms=synthesis_ms,
-        validation_ms=validation_ms,
+        synthesis_ms=composition.synthesis_ms,
+        validation_ms=composition.validation_ms,
+        repair_ms=composition.repair_ms,
         total_latency_ms=int((time.perf_counter() - started) * 1000),
-        llm_call_count=llm_calls,
+        llm_call_count=(
+            planner_call_count
+            + composition.synthesis_call_count
+            + composition.repair_call_count
+        ),
+        planner_call_count=planner_call_count,
+        synthesis_call_count=composition.synthesis_call_count,
+        repair_call_count=composition.repair_call_count,
         embedding_call_count=0,
         evidence_status=bundle.evidence_status,
-        answer_mode=mode,
-        fallback_used=fallback_used,
-        timeout_stage=timeout_stage,
+        answer_mode=composition.mode,
+        fallback_used=composition.fallback_used,
+        timeout_stage=composition.timeout_stage,
     )
     return Civic311Result(
-        answer=answer,
-        mode=mode,
+        answer=composition.answer,
+        mode=composition.mode,
         sources=sources,
         evidence=bundle,
         plan=plan,

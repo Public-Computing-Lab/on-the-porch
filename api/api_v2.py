@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urljoin
@@ -156,7 +157,11 @@ from civic_311 import (  # noqa: E402
     is_311_candidate,
     process_311_question,
 )
-from answering_kernel import GlobalDeadline  # noqa: E402
+from answering_kernel import (  # noqa: E402
+    GlobalDeadline,
+    HybridRuntimeMode,
+    ModelRuntimePolicy,
+)
 from conversation_transitions import (  # noqa: E402
     CacheAction,
     CompletionStatus,
@@ -3472,15 +3477,56 @@ def _execute_agent_response_with_event_context(
     return result
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+def _civic_311_runtime_policy() -> ModelRuntimePolicy:
+    raw_mode = str(getattr(Config, "CIVIC_311_HYBRID_MODE", "auto") or "auto").strip().lower()
+    try:
+        mode = HybridRuntimeMode(raw_mode)
+    except ValueError:
+        mode = HybridRuntimeMode.DISABLED
+    provider_configured = bool(str(os.getenv("GEMINI_API_KEY", "") or "").strip())
+    with _CIVIC_PROVIDER_LOCK:
+        provider_available = (
+            provider_configured and time.monotonic() >= _CIVIC_PROVIDER_DISABLED_UNTIL
+        )
+
+    def enabled(name: str) -> bool:
+        if mode is HybridRuntimeMode.DISABLED:
+            return False
+        if mode is HybridRuntimeMode.REQUIRED:
+            return provider_available
+        explicit = os.getenv(name)
+        requested = (
+            str(explicit).strip().lower() in {"1", "true", "yes", "on"}
+            if explicit is not None
+            else True
+        )
+        return provider_available and requested
+
+    return ModelRuntimePolicy(
+        mode=mode,
+        provider_class="gemini" if provider_available else "none",
+        provider_available=provider_available,
+        planner_enabled=enabled("CIVIC_311_PLANNER_ENABLED"),
+        synthesis_enabled=enabled("CIVIC_311_SYNTHESIS_ENABLED"),
+    )
 
 
-def _civic_311_model_call(prompt: str, timeout_seconds: float) -> str:
-    """One optional bounded structured-model call for the new civic path."""
+_CIVIC_PROVIDER_LOCK = threading.Lock()
+_CIVIC_PROVIDER_DISABLED_UNTIL = 0.0
+
+
+def _bounded_civic_311_model_call(
+    prompt: str,
+    timeout_seconds: float,
+    *,
+    json_response: bool,
+) -> str:
+    """Use the existing Gemini client once, bounded by the caller's deadline."""
+    global _CIVIC_PROVIDER_DISABLED_UNTIL
+    timeout = max(0.25, float(timeout_seconds))
+    with _CIVIC_PROVIDER_LOCK:
+        if time.monotonic() < _CIVIC_PROVIDER_DISABLED_UNTIL:
+            raise RuntimeError("structured model provider is temporarily unavailable")
     client = _get_llm_client()
     model_name = os.getenv(
         "GEMINI_FAST_MODEL",
@@ -3488,12 +3534,48 @@ def _civic_311_model_call(prompt: str, timeout_seconds: float) -> str:
     )
     model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
-    response = model.generate_content(
-        prompt,
-        generation_config={"temperature": 0},
-        request_options={"timeout": max(0.25, float(timeout_seconds))},
-    )
-    return str(getattr(response, "text", "") or "")
+    generation_config: Dict[str, Any] = {"temperature": 0}
+    if json_response:
+        generation_config["response_mime_type"] = "application/json"
+
+    def invoke() -> Any:
+        return model.generate_content(
+            prompt,
+            generation_config=generation_config,
+            request_options={"timeout": timeout},
+        )
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="civic311model")
+    future = executor.submit(invoke)
+    try:
+        response = future.result(timeout=timeout)
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            raise RuntimeError("structured model provider returned an empty response")
+        return text
+    except FutureTimeoutError as exc:
+        future.cancel()
+        with _CIVIC_PROVIDER_LOCK:
+            _CIVIC_PROVIDER_DISABLED_UNTIL = time.monotonic() + float(
+                getattr(Config, "CIVIC_311_PROVIDER_COOLDOWN_SECONDS", 60)
+            )
+        raise TimeoutError("structured model provider exceeded its deadline") from exc
+    except Exception:
+        with _CIVIC_PROVIDER_LOCK:
+            _CIVIC_PROVIDER_DISABLED_UNTIL = time.monotonic() + float(
+                getattr(Config, "CIVIC_311_PROVIDER_COOLDOWN_SECONDS", 60)
+            )
+        raise
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _civic_311_planner_call(prompt: str, timeout_seconds: float) -> str:
+    return _bounded_civic_311_model_call(prompt, timeout_seconds, json_response=True)
+
+
+def _civic_311_synthesis_call(prompt: str, timeout_seconds: float) -> str:
+    return _bounded_civic_311_model_call(prompt, timeout_seconds, json_response=False)
 
 
 def _run_civic_311_answer(
@@ -3518,8 +3600,9 @@ def _run_civic_311_answer(
         if conversation_state.location is not None
         else None
     )
-    planner = _civic_311_model_call if _env_flag("CIVIC_311_PLANNER_ENABLED") else None
-    synthesis = _civic_311_model_call if _env_flag("CIVIC_311_SYNTHESIS_ENABLED") else None
+    runtime_policy = _civic_311_runtime_policy()
+    planner = _civic_311_planner_call if runtime_policy.planner_enabled else None
+    synthesis = _civic_311_synthesis_call if runtime_policy.synthesis_enabled else None
     with use_request_deadline(deadline.deadline):
         civic_result: Civic311Result = process_311_question(
             message,
@@ -3529,8 +3612,12 @@ def _run_civic_311_answer(
             request_started_at=started_at,
             planner_llm=planner,
             synthesis_llm=synthesis,
+            repair_llm=synthesis,
         )
     result = civic_result.to_agent_result()
+    result["civic_311_runtime"] = runtime_policy.to_safe_dict()
+    if int(result.get("llm_calls") or 0) > 0:
+        result["model_name"] = os.getenv("GEMINI_FAST_MODEL", os.getenv("GEMINI_MODEL", "")) or None
     diagnostics = result.get("civic_311_diagnostics") or {}
     _log_agent_metrics(
         mode="structured_311",
@@ -3546,9 +3633,13 @@ def _run_civic_311_answer(
             "tool_count": diagnostics.get("tool_count", 0),
             "synthesis_ms": diagnostics.get("synthesis_ms", 0),
             "validation_ms": diagnostics.get("validation_ms", 0),
+            "repair_ms": diagnostics.get("repair_ms", 0),
             "persistence_ms": diagnostics.get("persistence_ms", 0),
             "total_latency_ms": diagnostics.get("total_latency_ms", 0),
             "llm_call_count": diagnostics.get("llm_call_count", 0),
+            "planner_call_count": diagnostics.get("planner_call_count", 0),
+            "synthesis_call_count": diagnostics.get("synthesis_call_count", 0),
+            "repair_call_count": diagnostics.get("repair_call_count", 0),
             "embedding_call_count": 0,
             "fallback_used": bool(diagnostics.get("fallback_used")),
             "timeout_stage": diagnostics.get("timeout_stage"),
@@ -3578,11 +3669,15 @@ def _log_civic_311_persistence(
         "tool_count": diagnostics.get("tool_count", 0),
         "synthesis_ms": diagnostics.get("synthesis_ms", 0),
         "validation_ms": diagnostics.get("validation_ms", 0),
+        "repair_ms": diagnostics.get("repair_ms", 0),
         "persistence_ms": max(0, int(persistence_ms)),
         "total_latency_ms": max(0, int((time.perf_counter() - request_started_at) * 1000)),
         "evidence_status": diagnostics.get("evidence_status"),
         "answer_mode": diagnostics.get("answer_mode"),
         "fallback_used": bool(diagnostics.get("fallback_used")),
+        "planner_call_count": diagnostics.get("planner_call_count", 0),
+        "synthesis_call_count": diagnostics.get("synthesis_call_count", 0),
+        "repair_call_count": diagnostics.get("repair_call_count", 0),
         "timeout_stage": diagnostics.get("timeout_stage"),
     }
     print(json_dumps(payload), file=sys.stderr, flush=True)
@@ -3769,8 +3864,12 @@ def _user_message_metadata(
             "tool_count",
             "synthesis_ms",
             "validation_ms",
+            "repair_ms",
             "total_latency_ms",
             "llm_call_count",
+            "planner_call_count",
+            "synthesis_call_count",
+            "repair_call_count",
             "embedding_call_count",
             "fallback_used",
             "timeout_stage",
@@ -5632,6 +5731,7 @@ def _build_detailed_readiness() -> Dict[str, Any]:
         "vectordb_dir": str(_retrieval.VECTORDB_DIR) if _retrieval else None,
         "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         "gemini_fast_model": os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
+        "civic_311_hybrid": _civic_311_runtime_policy().to_safe_dict(),
     }
     try:
         conn = get_db_connection()

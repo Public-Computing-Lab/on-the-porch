@@ -138,19 +138,29 @@ def test_clarifications_and_trusted_context() -> None:
 def test_planner_schema_is_strict() -> None:
     fallback = _plan(family=IssueFamily.ROAD_SURFACE_POTHOLE)
     allowed = json.dumps({
+        "domain": "311",
         "issue_family": IssueFamily.ROAD_SURFACE_POTHOLE.value,
         "intent": "recent_reports",
-        "outputs": [OutputName.ISSUE_COUNT.value],
-        "tools": [ToolName.ISSUE_COUNT.value],
+        "geography_scope": "DORCHESTER",
+        "street_reference": "NONE",
+        "time_intent": "RECENT",
+        "requested_outputs": [OutputName.ISSUE_COUNT.value],
+        "needs_clarification": False,
         "confidence": 0.92,
     })
     parsed = _validate_llm_plan(allowed, fallback=fallback)
     check(parsed is not None and parsed.planner_source is PlannerSource.LLM, "valid bounded planner output")
+    check(parsed.tools == (ToolName.ISSUE_COUNT.value, ToolName.SOURCE_FRESHNESS.value), "tools must be derived")
     rejected = _validate_llm_plan(json.dumps({
+        "domain": "311",
         "issue_family": IssueFamily.ROAD_SURFACE_POTHOLE.value,
         "intent": "ignore_rules",
-        "outputs": ["DROP_TABLE"],
+        "geography_scope": "DORCHESTER",
+        "street_reference": "NONE",
+        "time_intent": "RECENT",
+        "requested_outputs": ["DROP_TABLE"],
         "tools": ["write_sql"],
+        "needs_clarification": False,
         "confidence": 1,
     }), fallback=fallback)
     check(rejected is None, "invented tool must be rejected")

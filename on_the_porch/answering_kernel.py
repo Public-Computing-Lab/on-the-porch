@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -38,6 +39,50 @@ class AnswerMode(str, Enum):
     DETERMINISTIC_ENRICHED = "DETERMINISTIC_ENRICHED"
     EVIDENCE_BOUNDED_SYNTHESIS = "EVIDENCE_BOUNDED_SYNTHESIS"
     DETERMINISTIC_FALLBACK = "DETERMINISTIC_FALLBACK"
+
+
+class HybridRuntimeMode(str, Enum):
+    DISABLED = "disabled"
+    AUTO = "auto"
+    REQUIRED = "required"
+
+
+@dataclass(frozen=True)
+class ModelRuntimePolicy:
+    """Provider-neutral policy for bounded planner/synthesis use."""
+
+    mode: HybridRuntimeMode
+    provider_class: str
+    provider_available: bool
+    planner_enabled: bool
+    synthesis_enabled: bool
+    max_planner_calls: int = 1
+    max_synthesis_calls: int = 1
+    max_repair_calls: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.provider_class or len(self.provider_class) > 64:
+            raise ValueError("provider class must be a bounded diagnostic label")
+        if any(value not in {0, 1} for value in (
+            self.max_planner_calls,
+            self.max_synthesis_calls,
+            self.max_repair_calls,
+        )):
+            raise ValueError("structured model call limits must be zero or one")
+        if not self.provider_available and (self.planner_enabled or self.synthesis_enabled):
+            raise ValueError("model features cannot be active without a provider")
+
+    def to_safe_dict(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode.value,
+            "provider_class": self.provider_class,
+            "provider_available": self.provider_available,
+            "planner_enabled": self.planner_enabled,
+            "synthesis_enabled": self.synthesis_enabled,
+            "max_planner_calls": self.max_planner_calls,
+            "max_synthesis_calls": self.max_synthesis_calls,
+            "max_repair_calls": self.max_repair_calls,
+        }
 
 
 @dataclass(frozen=True)
@@ -159,6 +204,7 @@ class EvidenceBundle:
     freshness: Mapping[str, Any]
     coverage: Mapping[str, Any]
     facts: Dict[str, Any] = field(default_factory=dict)
+    model_facts: Optional[Dict[str, Any]] = None
     tool_results: Dict[str, Any] = field(default_factory=dict)
     limitations: List[str] = field(default_factory=list)
     missing_evidence: List[str] = field(default_factory=list)
@@ -168,17 +214,98 @@ class EvidenceBundle:
 
     def bounded_for_model(self) -> Dict[str, Any]:
         """Small resident-safe evidence payload for one optional synthesis call."""
+
+        def model_period(raw: Mapping[str, Any]) -> Dict[str, Any]:
+            value = {
+                key: raw[key]
+                for key in ("kind", "label", "start_date")
+                if raw.get(key) is not None
+            }
+            end_exclusive = raw.get("end_date_exclusive")
+            if end_exclusive:
+                try:
+                    value["end_date_inclusive"] = (
+                        date.fromisoformat(str(end_exclusive)) - timedelta(days=1)
+                    ).isoformat()
+                except ValueError:
+                    pass
+            return value
+
+        def public_value(raw: Any) -> Any:
+            if isinstance(raw, Mapping):
+                cleaned: Dict[str, Any] = {}
+                for key, value in raw.items():
+                    public_key = str(key)
+                    if public_key in {"source_key", "family"}:
+                        continue
+                    if public_key == "end_date_exclusive":
+                        try:
+                            cleaned["end_date_inclusive"] = (
+                                date.fromisoformat(str(value)) - timedelta(days=1)
+                            ).isoformat()
+                        except ValueError:
+                            pass
+                        continue
+                    cleaned[public_key] = public_value(value)
+                return cleaned
+            if isinstance(raw, (list, tuple)):
+                return [public_value(item) for item in raw]
+            return raw
+
+        def public_facts(raw: Mapping[str, Any]) -> Dict[str, Any]:
+            cleaned: Dict[str, Any] = {}
+            for key, value in raw.items():
+                public_key = str(key)
+                if public_key.startswith("get_311_"):
+                    public_key = public_key[len("get_311_"):]
+                elif public_key == "compare_311_periods":
+                    public_key = "period_comparison"
+                if public_key == "source_freshness":
+                    continue
+                cleaned[public_key] = public_value(value)
+            return cleaned
+
+        safe_sources = [
+            {
+                key: model_period(value)
+                if key == "covered_period" and isinstance(value, Mapping)
+                else value
+                for key, value in dict(source).items()
+                if key in {"type", "source", "authority", "data_through_date", "covered_period"}
+            }
+            for source in self.source_records[:2]
+        ]
+        safe_freshness = {
+            key: value
+            for key, value in dict(self.freshness).items()
+            if key in {
+                "data_through_date",
+                "freshness_status",
+                "coverage_status",
+                "source_label",
+                "source_authority",
+            }
+        }
         return {
             "scope": dict(self.question_scope),
-            "issue_family": self.issue_family,
+            "issue_family": (
+                self.question_scope.get("issue_label")
+                or (str(self.issue_family).replace("_", " ").lower() if self.issue_family else None)
+            ),
             "geography": dict(self.geography),
-            "requested_period": dict(self.requested_period),
-            "executed_period": dict(self.executed_period),
-            "freshness": dict(self.freshness),
-            "coverage": dict(self.coverage),
-            "facts": self.facts,
+            "requested_period": model_period(self.requested_period),
+            "executed_period": model_period(self.executed_period),
+            "freshness": safe_freshness,
+            "coverage": {
+                key: value
+                for key, value in dict(self.coverage).items()
+                if key in {"status", "data_through_date"}
+            },
+            "facts": public_facts(
+                self.model_facts if self.model_facts is not None else self.facts
+            ),
             "limitations": self.limitations[:5],
-            "sources": self.source_records[:2],
+            "sources": safe_sources,
             "evidence_status": self.evidence_status.value,
         }
 
@@ -191,9 +318,13 @@ class CivicTelemetry:
     tool_count: int = 0
     synthesis_ms: int = 0
     validation_ms: int = 0
+    repair_ms: int = 0
     persistence_ms: int = 0
     total_latency_ms: int = 0
     llm_call_count: int = 0
+    planner_call_count: int = 0
+    synthesis_call_count: int = 0
+    repair_call_count: int = 0
     embedding_call_count: int = 0
     evidence_status: EvidenceStatus = EvidenceStatus.INSUFFICIENT_EVIDENCE
     answer_mode: AnswerMode = AnswerMode.DETERMINISTIC_FALLBACK
@@ -208,9 +339,13 @@ class CivicTelemetry:
             "tool_count": self.tool_count,
             "synthesis_ms": self.synthesis_ms,
             "validation_ms": self.validation_ms,
+            "repair_ms": self.repair_ms,
             "persistence_ms": self.persistence_ms,
             "total_latency_ms": self.total_latency_ms,
             "llm_call_count": self.llm_call_count,
+            "planner_call_count": self.planner_call_count,
+            "synthesis_call_count": self.synthesis_call_count,
+            "repair_call_count": self.repair_call_count,
             "embedding_call_count": self.embedding_call_count,
             "evidence_status": self.evidence_status.value,
             "answer_mode": self.answer_mode.value,

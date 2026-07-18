@@ -151,12 +151,18 @@ class Client:
         check(response.status_code == 201, f"JSON {response.status_code}: {response.text[:400]}")
         return response.json(), elapsed
 
-    def post_sse(self, thread_id: str, message: str) -> Tuple[Dict[str, Any], float]:
+    def post_sse(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        turn_id: str | None = None,
+    ) -> Tuple[Dict[str, Any], float]:
         started = time.perf_counter()
         response = self.session.post(
             f"{self.base}/conversations/{thread_id}/messages/stream",
             headers=self.headers(),
-            json={"message": message, "client_turn_id": str(uuid.uuid4())},
+            json={"message": message, "client_turn_id": turn_id or str(uuid.uuid4())},
             stream=True,
             timeout=40,
         )
@@ -302,7 +308,7 @@ def run(base_url: str) -> None:
         if record["mode"] == "structured_311":
             check(civic.get("embedding_call_count") == 0, f"{record['label']} embedding count")
             check(civic.get("llm_call_count") == 0, f"{record['label']} unexpected model call")
-            check(set(civic).issubset({"planner_source", "planner_ms", "tool_execution_ms", "evidence_status", "answer_mode", "tool_count", "synthesis_ms", "validation_ms", "persistence_ms", "total_latency_ms", "llm_call_count", "embedding_call_count", "fallback_used", "timeout_stage"}), "metadata scope")
+            check(set(civic).issubset({"planner_source", "planner_ms", "tool_execution_ms", "evidence_status", "answer_mode", "tool_count", "synthesis_ms", "validation_ms", "repair_ms", "persistence_ms", "total_latency_ms", "llm_call_count", "planner_call_count", "synthesis_call_count", "repair_call_count", "embedding_call_count", "fallback_used", "timeout_stage"}), "metadata scope")
     print(json.dumps({"status": "passed", "records": REPORTS, "idempotency": "passed"}, ensure_ascii=True, indent=2, default=str))
 
 

@@ -15,10 +15,21 @@ or write to a vector store during resident chat.
 - supported-category overviews;
 - count, status, comparison, and street-coverage follow-ups.
 
-The planner uses deterministic rules by default. `CIVIC_311_PLANNER_ENABLED`
-and `CIVIC_311_SYNTHESIS_ENABLED` are opt-in and default to false. Even when
-enabled, model output is limited to a strict, allowlisted plan; it cannot supply
-SQL, tool names, source identifiers, or resident-facing facts.
+The path is rule-first, with optional model assistance controlled by
+`CIVIC_311_HYBRID_MODE`:
+
+- `disabled`: deterministic planning and deterministic answers only;
+- `auto` (default): planner and synthesis are enabled when the configured provider is
+  available; either may be explicitly disabled with `CIVIC_311_PLANNER_ENABLED` or
+  `CIVIC_311_SYNTHESIS_ENABLED`;
+- `required`: production startup requires provider credentials.
+
+Exact counts, clear top-street follow-ups, and clear status follow-ups use zero model calls.
+Rule-resolved recent-report, street-status, comparison, and category-overview questions may
+use one synthesis call when the structured evidence benefits from natural composition.
+The planner runs only for ambiguous compound 311 requests that deterministic rules cannot
+safely decompose. Model output is limited to a strict, allowlisted plan; it cannot supply
+SQL, arbitrary tool names, source identifiers, or resident-facing facts.
 
 ## Guardrails
 
@@ -33,6 +44,10 @@ SQL, tool names, source identifiers, or resident-facing facts.
   limitation, never a zero count.
 - Normal 311 status answers do not imply that a closed request proves a physical
   repair, and they do not use emergency wording.
+- A request permits at most one planner call, one primary synthesis call, and one
+  repair call. It performs zero embedding or vector-retrieval calls.
+- Planner, synthesis, repair, validation, or provider failure falls back to a
+  deterministic clarification or grounded answer within the same deadline.
 
 ## Conversation behavior
 
@@ -56,10 +71,24 @@ The focused tests are:
 ```bash
 .venv/bin/python -B scripts/test_hybrid_311_answering.py
 .venv/bin/python -B scripts/test_hybrid_311_answering_golden.py
+.venv/bin/python -B scripts/test_hybrid_311_model_paths.py
 .venv/bin/python -B scripts/test_hybrid_311_answering_live.py
+.venv/bin/python -B scripts/test_hybrid_311_model_live.py --expected-mode disabled
 ```
 
-The live script refuses to run unless configured for the local Docker demo
-database. It exercises JSON and SSE parity, trusted follow-ups, topic switching,
-an explicit street-coverage limitation, an active-emergency non-regression,
-idempotency, and zero LLM/embedding calls in the default structured path.
+The focused and golden suites are deterministic. `test_hybrid_311_model_paths.py` uses
+mocked providers to validate strict planner schema, synthesis, timeout, malformed-output,
+unavailable-provider, claim-validation, one-repair, and model-call-limit behavior. These
+mocked cases are not real-provider validation.
+
+The live scripts refuse to run unless configured for the local Docker demo database. The
+deterministic live path exercises JSON/SSE parity, trusted follow-ups, topic switching, an
+explicit street-coverage limitation, emergency and event non-regressions, idempotency, and
+zero LLM/embedding calls. A separate isolated run with `--expected-mode hybrid` exercises
+the configured hosted provider for real planner and synthesis calls, still with zero
+embedding calls and within the 15-second kernel deadline.
+
+Current limitations remain: local demo data is stale and ends on June 27, 2026; matching
+demo rows may lack usable street fields; the legacy `google.generativeai` SDK emits a
+deprecation warning; local tests do not validate the production database, DreamHost proxy
+behavior, or production provider latency.
