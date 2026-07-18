@@ -30,6 +30,16 @@ from conversation_relationship import (
     RelationshipDecision,
 )
 from conversation_state import ConversationState
+from semantic_dialogue_controller import (
+    CapabilityIntent,
+    ClarificationReason,
+    DialogueDomain,
+    DialogueRelationship,
+    DomainHint,
+    ResponseStrategy,
+    TrustedReferenceTarget,
+    TurnKind,
+)
 from event_relevance import (
     EventLocationStatus,
     EventRelevanceKind,
@@ -198,6 +208,120 @@ def is_direct_event_list_request(message: str) -> bool:
             value,
         )
     )
+
+
+def build_event_dialogue_hint(
+    message: str,
+    *,
+    dialogue_context: Optional[Mapping[str, Any]] = None,
+) -> Optional[DomainHint]:
+    """Interpret reviewed event turn shapes before event retrieval is selected."""
+    text = re.sub(r"\s+", " ", str(message or "")).strip().lower()
+    context = dict(dialogue_context or {})
+    summary = context.get("previous_result_summary")
+    if not isinstance(summary, Mapping):
+        summary = {}
+    previous_event = bool(
+        context.get("previous_domain") == DialogueDomain.EVENTS.value
+        or context.get("previous_capability_intent") == CapabilityIntent.LIST_EVENTS.value
+    )
+
+    if re.search(r"\bare there no events?\b", text) and re.search(
+        r"\b(?:happening|scheduled|listed)\b", text,
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.FACTUAL_TOOL_QUERY,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.LIST_EVENTS,
+            priority=125,
+        )
+
+    if re.search(r"\bevents?\b", text) and re.search(
+        r"\bnot scheduled anywhere\b", text,
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.UNSATISFIABLE,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.UNBOUNDED_NEGATION,
+            direct_response=(
+                "That request is not well-defined because there are countless events that are not scheduled. "
+                "Are you asking about canceled events or events happening outside a particular time period?"
+            ),
+            priority=125,
+        )
+
+    if (
+        re.search(r"\bevents?\b", text)
+        and re.search(r"\bnot happening\b", text)
+        and re.search(r"\b(?:don't|dont|do not)\s+(?:say|list|show|include)\b", text)
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.UNSATISFIABLE,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.UNBOUNDED_NEGATION,
+            trusted_reference_target=TrustedReferenceTarget.NONE,
+            direct_response=(
+                "That request is not well-defined because there are countless events that are not "
+                "scheduled next week. Are you asking about canceled events or events happening outside next week?"
+            ),
+            priority=120,
+        )
+
+    if (
+        previous_event
+        and summary.get("kind") == "EVENT_LIST"
+        and summary.get("status") == "NO_EVENTS"
+        and re.search(r"\b(?:if|when)\b.*\bevents?\b.*\b(?:done|over|finished)\b", text)
+        and re.search(r"\b(?:just say|say that|tell me)\b", text)
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.RESPONSE_REPHRASE,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.FOLLOW_UP,
+            response_strategy=ResponseStrategy.REPHRASE_PREVIOUS_RESULT,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            trusted_reference_target=TrustedReferenceTarget.PREVIOUS_EVENT_RESULT,
+            direct_response="The listed events for this week are over.",
+            priority=110,
+        )
+
+    if previous_event and re.fullmatch(
+        r"(?:no,?\s*)?(?:i\s+)?meant next calendar week[.!]?", text
+    ):
+        return DomainHint(
+            turn_kind=TurnKind.CORRECTION,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.CORRECTION,
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.LIST_EVENTS,
+            trusted_reference_target=TrustedReferenceTarget.PREVIOUS_EVENT_RESULT,
+            priority=105,
+        )
+
+    if is_direct_event_list_request(message):
+        return DomainHint(
+            turn_kind=TurnKind.FACTUAL_TOOL_QUERY,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.STANDALONE,
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.LIST_EVENTS,
+            priority=90,
+        )
+    return None
 
 
 def is_historical_event_intent(message: str, time_range: Optional[CanonicalTimeRange]) -> bool:
@@ -422,7 +546,11 @@ def plan_event_query(
         if not explicit_topic:
             return None
         plan_reasons.append(EventPlanReason.EXPLICIT_EVENTS_TOPIC)
-    elif relation in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}:
+    elif relation in {
+        ConversationRelationship.REFINEMENT,
+        ConversationRelationship.FOLLOW_UP,
+        ConversationRelationship.CORRECTION,
+    }:
         if state.active_topic is not CanonicalTopic.EVENTS and not explicit_topic:
             return None
         plan_reasons.append(
@@ -500,7 +628,11 @@ def plan_event_query(
     elif explicit_location is not None:
         location = explicit_location
         plan_reasons.append(EventPlanReason.EXPLICIT_LOCATION)
-    elif relation in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}:
+    elif relation in {
+        ConversationRelationship.REFINEMENT,
+        ConversationRelationship.FOLLOW_UP,
+        ConversationRelationship.CORRECTION,
+    }:
         if state.location is not None:
             location = state.location
             plan_reasons.append(EventPlanReason.RETAINED_LOCATION)
@@ -523,7 +655,11 @@ def plan_event_query(
     elif explicit_time is not None:
         time_range = explicit_time
         plan_reasons.append(EventPlanReason.EXPLICIT_TIME)
-    elif relation in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}:
+    elif relation in {
+        ConversationRelationship.REFINEMENT,
+        ConversationRelationship.FOLLOW_UP,
+        ConversationRelationship.CORRECTION,
+    }:
         if state.time_range is not None:
             time_range = state.time_range
             plan_reasons.append(EventPlanReason.RETAINED_TIME)
@@ -551,7 +687,11 @@ def plan_event_query(
     # Retain modality from prior event state when refining time/location only.
     if (
         modality is None
-        and relation in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}
+        and relation in {
+            ConversationRelationship.REFINEMENT,
+            ConversationRelationship.FOLLOW_UP,
+            ConversationRelationship.CORRECTION,
+        }
         and state.filters is not None
         and state.filters.modality is ModalityFilter.VIRTUAL
     ):

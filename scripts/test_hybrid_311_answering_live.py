@@ -81,6 +81,7 @@ def _thread_snapshot(thread_id: str) -> Dict[str, Any]:
         return {
             "raw": row.get("thread_state_json"),
             "civic_311_context": envelope.civic_311_context,
+            "dialogue_context": envelope.dialogue_context,
             "state": envelope.conversation_state.to_dict(),
         }
     finally:
@@ -258,7 +259,8 @@ def run(base_url: str) -> None:
     fifth = _turn(client, category_thread, "E_category_overview", "Most common 311 street problems this month?")
     check(fifth["payload"]["assistant_message"]["response_mode"] == "structured_311", "E must use structured_311")
     _assert_resident_safe(fifth["answer"])
-    check("common supported street-related 311 service requests" in fifth["answer"].lower(), "E category answer")
+    check("common street-related 311 service requests" in fifth["answer"].lower(), "E category answer")
+    check("available categories" in fifth["answer"].lower(), "E category coverage wording")
 
     flooding_thread = client.create_thread("Hybrid 311 freshness verification")
     sixth = _turn(client, flooding_thread, "F_flooding_freshness", "How serious is current flooding near Fields Corner?")

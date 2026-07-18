@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import urljoin
@@ -154,6 +155,7 @@ from conversation_state import (  # noqa: E402
 from request_budget import use_request_deadline  # noqa: E402
 from civic_311 import (  # noqa: E402
     Civic311Result,
+    build_311_dialogue_hint,
     is_311_candidate,
     process_311_question,
 )
@@ -161,6 +163,20 @@ from answering_kernel import (  # noqa: E402
     GlobalDeadline,
     HybridRuntimeMode,
     ModelRuntimePolicy,
+)
+from semantic_dialogue_controller import (  # noqa: E402
+    CapabilityIntent,
+    ClarificationReason,
+    DialogueDecision,
+    DialogueDomain,
+    DialogueRelationship,
+    DomainHint,
+    ResponseStrategy,
+    TrustedReferenceTarget,
+    TurnKind,
+    decide_dialogue_turn,
+    next_dialogue_context,
+    safe_direct_response,
 )
 from conversation_transitions import (  # noqa: E402
     CacheAction,
@@ -183,6 +199,7 @@ from event_query_context import (  # noqa: E402
     EventPlanStatus,
     EventQueryDimension,
     EventQueryPlan,
+    build_event_dialogue_hint,
     build_event_cache,
     cached_event_result,
     compose_event_answer,
@@ -2155,6 +2172,8 @@ def _merge_locked_thread_state(
     invalidate_retrieval_cache: bool = False,
     next_civic_311_context: Optional[Mapping[str, Any]] = None,
     update_civic_311_context: bool = False,
+    next_dialogue_context: Optional[Mapping[str, Any]] = None,
+    update_dialogue_context: bool = False,
 ) -> Dict[str, Any]:
     """Merge cache/state after the caller has locked the parent thread row."""
     cursor = conn.cursor(dictionary=True)
@@ -2184,6 +2203,8 @@ def _merge_locked_thread_state(
             force_cache_update=invalidate_retrieval_cache,
             next_civic_311_context=next_civic_311_context,
             update_civic_311_context=update_civic_311_context,
+            next_dialogue_context=next_dialogue_context,
+            update_dialogue_context=update_dialogue_context,
         )
         if not merged.cache_update_applied:
             print(
@@ -2234,6 +2255,8 @@ def _persist_conversation_turn(
     set_initial_title: bool,
     next_civic_311_context: Optional[Mapping[str, Any]] = None,
     update_civic_311_context: bool = False,
+    next_dialogue_context: Optional[Mapping[str, Any]] = None,
+    update_dialogue_context: bool = False,
     interaction_log_enabled: bool = True,
     expected_last_message_at: Optional[datetime.datetime] = None,
     turn_reservation: Optional[Any] = None,
@@ -2303,6 +2326,8 @@ def _persist_conversation_turn(
             invalidate_retrieval_cache=invalidate_retrieval_cache,
             next_civic_311_context=next_civic_311_context,
             update_civic_311_context=update_civic_311_context,
+            next_dialogue_context=next_dialogue_context,
+            update_dialogue_context=update_dialogue_context,
         )
         refreshed_thread = _fetch_thread(conn, user_id, thread_id)
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
@@ -3287,7 +3312,11 @@ def _state_aware_event_candidate(
         or relationship is None
         or dimensions is None
         or relationship.relationship
-        not in {ConversationRelationship.REFINEMENT, ConversationRelationship.FOLLOW_UP}
+        not in {
+            ConversationRelationship.REFINEMENT,
+            ConversationRelationship.FOLLOW_UP,
+            ConversationRelationship.CORRECTION,
+        }
     ):
         return False
     reason_values = {reason.value for reason in dimensions.reason_codes}
@@ -3513,6 +3542,227 @@ def _civic_311_runtime_policy() -> ModelRuntimePolicy:
 
 _CIVIC_PROVIDER_LOCK = threading.Lock()
 _CIVIC_PROVIDER_DISABLED_UNTIL = 0.0
+
+
+def _zoning_dialogue_hint(message: str) -> Optional[DomainHint]:
+    text = re.sub(r"\s+", " ", str(message or "")).strip().lower()
+    if not (
+        re.search(r"\bzoning\b", text)
+        and re.search(r"\b(?:mixed[- ]use|development|proposal|property|parcel)\b", text)
+    ):
+        return None
+    return DomainHint(
+        turn_kind=TurnKind.FACTUAL_TOOL_QUERY,
+        domain=DialogueDomain.ZONING_AND_DEVELOPMENT,
+        relationship=DialogueRelationship.STANDALONE,
+        response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+        tool_required=False,
+        capability_intent=CapabilityIntent.NONE,
+        clarification_reason=ClarificationReason.REQUIRED_LOCATION,
+        direct_response=(
+            "Exact zoning requirements depend on the property's zoning district and any applicable "
+            "overlays. Which Dorchester address or intersection are you asking about?"
+        ),
+        priority=90,
+    )
+
+
+def _selected_event_dialogue_hint(
+    event_context: Optional[ValidatedEventContext],
+) -> Optional[DomainHint]:
+    if event_context is None:
+        return None
+    return DomainHint(
+        turn_kind=TurnKind.FACTUAL_TOOL_QUERY,
+        domain=DialogueDomain.EVENTS,
+        relationship=DialogueRelationship.STANDALONE,
+        response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+        tool_required=True,
+        capability_intent=CapabilityIntent.EVENT_DETAILS,
+        trusted_reference_target=TrustedReferenceTarget.ACTIVE_EVENT,
+        priority=115,
+    )
+
+
+def _active_event_dialogue_hint(
+    message: str,
+    state: ConversationState,
+) -> Optional[DomainHint]:
+    property_name = detect_event_property(message)
+    if property_name is None:
+        return None
+    active_entity = state.active_entity
+    if active_entity is None or active_entity.entity_type != "event":
+        return DomainHint(
+            turn_kind=TurnKind.AMBIGUOUS,
+            domain=DialogueDomain.EVENTS,
+            relationship=DialogueRelationship.FOLLOW_UP,
+            response_strategy=ResponseStrategy.ASK_CLARIFICATION,
+            tool_required=False,
+            capability_intent=CapabilityIntent.NONE,
+            clarification_reason=ClarificationReason.UNTRUSTED_CONTEXT,
+            direct_response=MISSING_EVENT_REFERENCE_MESSAGE,
+            priority=112,
+        )
+    return DomainHint(
+        turn_kind=TurnKind.CONTEXTUAL_TOOL_FOLLOWUP,
+        domain=DialogueDomain.EVENTS,
+        relationship=DialogueRelationship.FOLLOW_UP,
+        response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+        tool_required=True,
+        capability_intent=CapabilityIntent.EVENT_DETAILS,
+        trusted_reference_target=TrustedReferenceTarget.ACTIVE_EVENT,
+        priority=112,
+    )
+
+
+def _semantic_dialogue_llm_enabled() -> bool:
+    configured = bool(str(os.getenv("GEMINI_API_KEY", "") or "").strip())
+    raw = os.getenv("SEMANTIC_DIALOGUE_CONTROLLER_LLM_ENABLED")
+    requested = True if raw is None else str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return configured and requested
+
+
+def _semantic_dialogue_llm_call(prompt: str, timeout_seconds: float) -> str:
+    return _bounded_civic_311_model_call(prompt, timeout_seconds, json_response=True)
+
+
+def _decide_semantic_dialogue(
+    message: str,
+    *,
+    state_envelope: ThreadStateEnvelope,
+    event_context: Optional[ValidatedEventContext],
+    thread_id: str,
+    request_started_at: Optional[float],
+) -> DialogueDecision:
+    controller_started = time.perf_counter()
+    deadline = GlobalDeadline.from_started_at(
+        request_started_at or time.perf_counter(), hard_ceiling_seconds=15.0,
+    )
+    hints = tuple(
+        hint
+        for hint in (
+            _selected_event_dialogue_hint(event_context),
+            _active_event_dialogue_hint(message, state_envelope.conversation_state),
+            build_311_dialogue_hint(message, state_envelope.civic_311_context),
+            build_event_dialogue_hint(
+                message,
+                dialogue_context=state_envelope.dialogue_context,
+            ),
+            _zoning_dialogue_hint(message),
+        )
+        if hint is not None
+    )
+    decision = decide_dialogue_turn(
+        message,
+        trusted_context=state_envelope.dialogue_context,
+        rule_hints=hints,
+        llm_classifier=(
+            _semantic_dialogue_llm_call if _semantic_dialogue_llm_enabled() else None
+        ),
+        deadline=deadline,
+    )
+    decision = replace(
+        decision,
+        controller_latency_ms=(time.perf_counter() - controller_started) * 1000.0,
+    )
+    print(
+        json_dumps({
+            "event": "semantic_dialogue_controller",
+            "thread_id": thread_id,
+            "worker_pid": os.getpid(),
+            **decision.to_dict(),
+        }),
+        file=sys.stderr,
+        flush=True,
+    )
+    return decision
+
+
+def _direct_dialogue_agent_result(
+    decision: DialogueDecision,
+    retrieval_cache: Mapping[str, Any],
+    dialogue_context: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    answer = safe_direct_response(decision, dialogue_context).strip()
+    return {
+        "answer": answer,
+        "mode": "conversation_direct",
+        "sources": [],
+        "result": {"answer": answer, "direct_conversation": True},
+        "retrieval_cache": copy.deepcopy(dict(retrieval_cache)),
+        "model_name": (
+            os.getenv("GEMINI_FAST_MODEL", os.getenv("GEMINI_MODEL", "")) or None
+            if decision.controller_call_count
+            else None
+        ),
+        "llm_calls": decision.controller_call_count,
+        "execution_degraded": False,
+    }
+
+
+def _next_dialogue_context_for_turn(
+    *,
+    previous: Optional[Mapping[str, Any]],
+    decision: DialogueDecision,
+    agent_result: Mapping[str, Any],
+    event_query_plan: Optional[EventQueryPlan],
+) -> Dict[str, Any]:
+    canonical: Optional[Dict[str, Any]] = None
+    summary: Optional[Dict[str, Any]] = None
+    pending_type: Optional[str] = None
+    pending_domain: Optional[DialogueDomain] = None
+
+    civic_context = agent_result.get("civic_311_context")
+    if isinstance(civic_context, Mapping):
+        canonical = {
+            "issue_scope": civic_context.get("issue_scope"),
+            "issue_family": civic_context.get("issue_family"),
+            "geography": copy.deepcopy(civic_context.get("geography") or {}),
+            "period": copy.deepcopy(civic_context.get("executed_period") or {}),
+        }
+        trusted_summary = agent_result.get("trusted_result_summary")
+        summary = (
+            copy.deepcopy(dict(trusted_summary))
+            if isinstance(trusted_summary, Mapping)
+            else {
+                "kind": "CIVIC_311",
+                "status": str(civic_context.get("coverage_status") or "UNKNOWN"),
+            }
+        )
+        if civic_context.get("coverage_status") == "PENDING_CLARIFICATION":
+            pending_type = "311_ISSUE_SCOPE"
+            pending_domain = DialogueDomain.CIVIC_311
+    elif event_query_plan is not None:
+        result = agent_result.get("result")
+        result = result if isinstance(result, Mapping) else {}
+        rows = result.get("rows")
+        rows = rows if isinstance(rows, list) else []
+        canonical = {
+            "start_date": event_query_plan.start_date,
+            "end_date_exclusive": event_query_plan.end_date_exclusive,
+            "semantic_time": event_query_plan.semantic_label_code,
+            "location_id": (
+                event_query_plan.location.id if event_query_plan.location is not None else None
+            ),
+        }
+        summary = {
+            "kind": "EVENT_LIST",
+            "status": "NO_EVENTS" if not rows and result.get("event_retrieval_matched") else "EVENTS_FOUND",
+            "returned_count": len(rows),
+        }
+    elif decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}:
+        canonical = {}
+        summary = {}
+
+    return next_dialogue_context(
+        previous,
+        decision=decision,
+        canonical_parameters=canonical,
+        previous_result_summary=summary,
+        pending_clarification_type=pending_type,
+        pending_clarification_domain=pending_domain,
+    )
 
 
 def _bounded_civic_311_model_call(
@@ -3838,6 +4088,7 @@ def _user_message_metadata(
     emergency_decision: Optional[EmergencyDecision] = None,
     event_query_plan: Optional[EventQueryPlan] = None,
     civic_311_diagnostics: Optional[Mapping[str, Any]] = None,
+    dialogue_decision: Optional[DialogueDecision] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
@@ -3879,6 +4130,8 @@ def _user_message_metadata(
             for key in allowed
             if key in civic_311_diagnostics
         }
+    if dialogue_decision is not None:
+        metadata["semantic_dialogue_controller"] = dialogue_decision.to_dict()
     return metadata or None
 
 
@@ -4586,6 +4839,8 @@ def post_conversation_message(thread_id: str):
         civic_311_request = False
         event_query_plan = None
         stale_active_event = False
+        dialogue_decision = None
+        direct_dialogue_result = None
         # Emergency detection uses only the current message. Skip history load so
         # prior turns cannot influence response wiring; title uses the thread row.
         if not emergency_decision.is_active_emergency:
@@ -4596,7 +4851,13 @@ def post_conversation_message(thread_id: str):
             except EventContextValidationError as exc:
                 print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
                 return _json_error("Invalid UI context.", 400, "invalid_ui_context")
-            event_resolution = _resolve_validated_event_context(conn, event_context)
+            dialogue_decision = _decide_semantic_dialogue(
+                message,
+                state_envelope=state_envelope,
+                event_context=event_context,
+                thread_id=thread_id,
+                request_started_at=getattr(g, "request_started_at", None),
+            )
             relationship = _classify_relationship_shadow(
                 message,
                 history_rows,
@@ -4608,41 +4869,49 @@ def post_conversation_message(thread_id: str):
                 thread_id=thread_id,
                 conversation_state=conversation_state,
                 event_list_context=(
-                    _explicit_event_list_request(message)
+                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                    or _explicit_event_list_request(message)
                     or bool(
                         conversation_state.active_topic is CanonicalTopic.EVENTS
-                        and relationship
+                        and relationship is not None
                         and relationship.relationship
                         in {
                             ConversationRelationship.REFINEMENT,
                             ConversationRelationship.FOLLOW_UP,
+                            ConversationRelationship.CORRECTION,
                         }
                     )
                 ),
             )
-            if event_resolution is None:
-                active_event_result, stale_active_event = _resolve_active_event_request(
-                    conn,
-                    message,
-                    state=conversation_state,
-                    relationship=relationship,
-                    retrieval_cache=retrieval_cache,
+            if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
+                direct_dialogue_result = _direct_dialogue_agent_result(
+                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
                 )
-                if active_event_result is None:
-                    state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+            else:
+                event_resolution = _resolve_validated_event_context(conn, event_context)
+                if event_resolution is None:
+                    active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
-                        message=message,
+                        message,
                         state=conversation_state,
                         relationship=relationship,
-                        dimensions=dimensions,
                         retrieval_cache=retrieval_cache,
                     )
-            civic_311_request = bool(
-                event_resolution is None
-                and active_event_result is None
-                and state_aware_event_result is None
-                and is_311_candidate(message, state_envelope.civic_311_context)
-            )
+                    if active_event_result is None:
+                        state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+                            conn,
+                            message=message,
+                            state=conversation_state,
+                            relationship=relationship,
+                            dimensions=dimensions,
+                            retrieval_cache=retrieval_cache,
+                        )
+                civic_311_request = bool(
+                    event_resolution is None
+                    and active_event_result is None
+                    and state_aware_event_result is None
+                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
+                )
         conn.close()
         conn = None
 
@@ -4654,6 +4923,14 @@ def post_conversation_message(thread_id: str):
                 emergency_decision,
                 retrieval_cache,
                 detector_latency_ms=detector_latency_ms,
+            )
+        elif direct_dialogue_result is not None:
+            agent_result = direct_dialogue_result
+            _log_agent_metrics(
+                mode=agent_result["mode"],
+                thread_id=thread_id,
+                streaming=False,
+                extra={"semantic_dialogue_direct": True, "llm_calls": dialogue_decision.controller_call_count},
             )
         elif active_event_result is not None or state_aware_event_result is not None:
             agent_result = active_event_result or state_aware_event_result
@@ -4723,6 +5000,8 @@ def post_conversation_message(thread_id: str):
         civic_311_next_context = agent_result.get("civic_311_context")
         if (
             not civic_311_request
+            and dialogue_decision is not None
+            and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
             and _clear_civic_311_context_for_message(
                 message,
                 active_context=state_envelope.civic_311_context,
@@ -4730,6 +5009,16 @@ def post_conversation_message(thread_id: str):
         ):
             civic_311_context_update = True
             civic_311_next_context = None
+        dialogue_next_context = (
+            _next_dialogue_context_for_turn(
+                previous=state_envelope.dialogue_context,
+                decision=dialogue_decision,
+                agent_result=agent_result,
+                event_query_plan=event_query_plan,
+            )
+            if dialogue_decision is not None
+            else None
+        )
 
         persisted = _persist_conversation_turn(
             thread_id=thread_id,
@@ -4741,6 +5030,8 @@ def post_conversation_message(thread_id: str):
             invalidate_retrieval_cache=invalidate_retrieval_cache,
             next_civic_311_context=civic_311_next_context,
             update_civic_311_context=civic_311_context_update,
+            next_dialogue_context=dialogue_next_context,
+            update_dialogue_context=dialogue_next_context is not None,
             user_content=message,
             user_meta=_user_message_metadata(
                 event_context=event_context,
@@ -4751,6 +5042,7 @@ def post_conversation_message(thread_id: str):
                 emergency_decision=emergency_decision,
                 event_query_plan=event_query_plan,
                 civic_311_diagnostics=agent_result.get("civic_311_diagnostics"),
+                dialogue_decision=dialogue_decision,
             ),
             assistant_content=answer,
             assistant_mode=mode,
@@ -4970,6 +5262,8 @@ def post_conversation_message_stream(thread_id: str):
         civic_311_request = False
         event_query_plan = None
         stale_active_event = False
+        dialogue_decision = None
+        direct_dialogue_result = None
         # Emergency detection uses only the current message. Skip history load so
         # prior turns cannot influence response wiring; title uses the thread row.
         if not emergency_decision.is_active_emergency:
@@ -4980,7 +5274,13 @@ def post_conversation_message_stream(thread_id: str):
             except EventContextValidationError as exc:
                 print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
                 return _json_error("Invalid UI context.", 400, "invalid_ui_context")
-            event_resolution = _resolve_validated_event_context(conn, event_context)
+            dialogue_decision = _decide_semantic_dialogue(
+                message,
+                state_envelope=state_envelope,
+                event_context=event_context,
+                thread_id=thread_id,
+                request_started_at=getattr(g, "request_started_at", None),
+            )
             relationship = _classify_relationship_shadow(
                 message,
                 history_rows,
@@ -4992,41 +5292,49 @@ def post_conversation_message_stream(thread_id: str):
                 thread_id=thread_id,
                 conversation_state=conversation_state,
                 event_list_context=(
-                    _explicit_event_list_request(message)
+                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                    or _explicit_event_list_request(message)
                     or bool(
                         conversation_state.active_topic is CanonicalTopic.EVENTS
-                        and relationship
+                        and relationship is not None
                         and relationship.relationship
                         in {
                             ConversationRelationship.REFINEMENT,
                             ConversationRelationship.FOLLOW_UP,
+                            ConversationRelationship.CORRECTION,
                         }
                     )
                 ),
             )
-            if event_resolution is None:
-                active_event_result, stale_active_event = _resolve_active_event_request(
-                    conn,
-                    message,
-                    state=conversation_state,
-                    relationship=relationship,
-                    retrieval_cache=retrieval_cache,
+            if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
+                direct_dialogue_result = _direct_dialogue_agent_result(
+                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
                 )
-                if active_event_result is None:
-                    state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+            else:
+                event_resolution = _resolve_validated_event_context(conn, event_context)
+                if event_resolution is None:
+                    active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
-                        message=message,
+                        message,
                         state=conversation_state,
                         relationship=relationship,
-                        dimensions=dimensions,
                         retrieval_cache=retrieval_cache,
                     )
-            civic_311_request = bool(
-                event_resolution is None
-                and active_event_result is None
-                and state_aware_event_result is None
-                and is_311_candidate(message, state_envelope.civic_311_context)
-            )
+                    if active_event_result is None:
+                        state_aware_event_result, event_query_plan = _state_aware_event_agent_result(
+                            conn,
+                            message=message,
+                            state=conversation_state,
+                            relationship=relationship,
+                            dimensions=dimensions,
+                            retrieval_cache=retrieval_cache,
+                        )
+                civic_311_request = bool(
+                    event_resolution is None
+                    and active_event_result is None
+                    and state_aware_event_result is None
+                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
+                )
     except Exception as exc:
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
             fail_turn(
@@ -5057,6 +5365,8 @@ def post_conversation_message_stream(thread_id: str):
 
     def _generate():
         reset_request_metrics()
+        if dialogue_decision is not None and dialogue_decision.controller_call_count:
+            increment_llm_call_counter(dialogue_decision.controller_call_count)
         full_answer = ""
         mode = "hybrid"
         result_payload: Dict[str, Any] = {}
@@ -5065,8 +5375,10 @@ def post_conversation_message_stream(thread_id: str):
         active_event_request = active_event_result is not None
         state_aware_event_request = state_aware_event_result is not None
         civic_311_structured_request = civic_311_request
+        direct_dialogue_request = direct_dialogue_result is not None
         deterministic_request = (
             emergency_request
+            or direct_dialogue_request
             or selected_request
             or active_event_request
             or state_aware_event_request
@@ -5110,6 +5422,8 @@ def post_conversation_message_stream(thread_id: str):
                     retrieval_cache,
                     detector_latency_ms=detector_latency_ms,
                 )
+            elif direct_dialogue_request:
+                deterministic_result = direct_dialogue_result
             elif active_event_request:
                 deterministic_result = active_event_result
             elif state_aware_event_request:
@@ -5317,6 +5631,8 @@ def post_conversation_message_stream(thread_id: str):
             civic_311_next_context = transition_result.get("civic_311_context")
             if (
                 not civic_311_structured_request
+                and dialogue_decision is not None
+                and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
                 and _clear_civic_311_context_for_message(
                     message,
                     active_context=state_envelope.civic_311_context,
@@ -5324,6 +5640,16 @@ def post_conversation_message_stream(thread_id: str):
             ):
                 civic_311_context_update = True
                 civic_311_next_context = None
+            dialogue_next_context = (
+                _next_dialogue_context_for_turn(
+                    previous=state_envelope.dialogue_context,
+                    decision=dialogue_decision,
+                    agent_result=transition_result,
+                    event_query_plan=event_query_plan,
+                )
+                if dialogue_decision is not None
+                else None
+            )
             persisted = _persist_conversation_turn(
                 thread_id=thread_id,
                 user_id=user_id,
@@ -5334,6 +5660,8 @@ def post_conversation_message_stream(thread_id: str):
                 invalidate_retrieval_cache=invalidate_retrieval_cache,
                 next_civic_311_context=civic_311_next_context,
                 update_civic_311_context=civic_311_context_update,
+                next_dialogue_context=dialogue_next_context,
+                update_dialogue_context=dialogue_next_context is not None,
                 user_content=message,
                 user_meta=_user_message_metadata(
                     event_context=event_context,
@@ -5344,6 +5672,7 @@ def post_conversation_message_stream(thread_id: str):
                     emergency_decision=emergency_decision,
                     event_query_plan=event_query_plan,
                     civic_311_diagnostics=transition_result.get("civic_311_diagnostics"),
+                    dialogue_decision=dialogue_decision,
                 ),
                 assistant_content=full_answer,
                 assistant_mode=mode,

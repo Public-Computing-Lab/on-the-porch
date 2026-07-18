@@ -43,6 +43,7 @@ from conversation_dimensions import (
     TimeLabelCode,
     TimeOfDayFilter,
 )
+from semantic_dialogue_controller import validate_dialogue_context
 
 
 ENVELOPE_VERSION = 1
@@ -52,12 +53,15 @@ MAX_CONVERSATION_STATE_BYTES = 8_192
 MAX_TIME_RANGE_DAYS = 366
 MAX_MESSAGE_ID_CHARS = 128
 
-_ENVELOPE_KEYS = frozenset({"version", "retrieval_cache", "conversation_state", "civic_311_context"})
+_ENVELOPE_KEYS = frozenset(
+    {"version", "retrieval_cache", "conversation_state", "civic_311_context", "dialogue_context"}
+)
 _ENVELOPE_REQUIRED_KEYS = frozenset({"version", "retrieval_cache"})
 _CIVIC_311_CONTEXT_KEYS = frozenset(
     {
         "domain",
         "issue_family",
+        "issue_scope",
         "geography",
         "period_kind",
         "executed_period",
@@ -69,6 +73,7 @@ _CIVIC_311_CONTEXT_KEYS = frozenset(
         "semantic_revision",
     }
 )
+_LEGACY_CIVIC_311_CONTEXT_KEYS = _CIVIC_311_CONTEXT_KEYS - {"issue_scope"}
 _CIVIC_311_GEOGRAPHY_KEYS = frozenset({"label", "kind", "street", "subarea", "filterable"})
 _CIVIC_311_PERIOD_KEYS = frozenset({"kind", "label", "start_date", "end_date_exclusive"})
 MAX_CIVIC_311_CONTEXT_BYTES = 2_048
@@ -283,15 +288,24 @@ def _validate_civic_311_context(value: Any) -> Optional[Dict[str, Any]]:
     """
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) != _CIVIC_311_CONTEXT_KEYS:
+    if not isinstance(value, Mapping) or frozenset(value) not in {
+        _CIVIC_311_CONTEXT_KEYS,
+        _LEGACY_CIVIC_311_CONTEXT_KEYS,
+    }:
         raise ConversationStateError("civic_311_context has an invalid schema")
     if value.get("domain") != "311" or value.get("source_key") != "service_requests_311":
         raise ConversationStateError("civic_311_context has an invalid source")
     if isinstance(value.get("semantic_revision"), bool) or value.get("semantic_revision") != 1:
         raise ConversationStateError("civic_311_context has an invalid revision")
     issue_family = value.get("issue_family")
-    if not isinstance(issue_family, str) or not re.fullmatch(r"[A-Z_]{3,64}", issue_family):
-        raise ConversationStateError("civic_311_context has an invalid issue family")
+    issue_scope = value.get("issue_scope", "SPECIFIC_FAMILY")
+    if issue_scope not in {"SPECIFIC_FAMILY", "ALL_311", "UNSPECIFIED"}:
+        raise ConversationStateError("civic_311_context has an invalid issue scope")
+    if issue_scope == "SPECIFIC_FAMILY":
+        if not isinstance(issue_family, str) or not re.fullmatch(r"[A-Z_]{3,64}", issue_family):
+            raise ConversationStateError("civic_311_context has an invalid issue family")
+    elif issue_family is not None:
+        raise ConversationStateError("aggregate civic_311_context cannot carry an issue family")
     geography = value.get("geography")
     period = value.get("executed_period")
     if not isinstance(geography, Mapping) or set(geography) != _CIVIC_311_GEOGRAPHY_KEYS:
@@ -336,6 +350,7 @@ def _validate_civic_311_context(value: Any) -> Optional[Dict[str, Any]]:
     ):
         raise ConversationStateError("civic_311_context has invalid outputs")
     copied = copy.deepcopy(dict(value))
+    copied["issue_scope"] = issue_scope
     encoded = json.dumps(copied, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(encoded) > MAX_CIVIC_311_CONTEXT_BYTES:
         raise ConversationStateError("civic_311_context exceeds the size limit")
@@ -353,6 +368,7 @@ class ThreadStateEnvelope:
         repr=False,
     )
     civic_311_context: Optional[Dict[str, Any]] = field(default=None, compare=True, repr=False)
+    dialogue_context: Optional[Dict[str, Any]] = field(default=None, compare=True, repr=False)
 
     def __post_init__(self) -> None:
         if self.version != ENVELOPE_VERSION:
@@ -363,6 +379,12 @@ class ThreadStateEnvelope:
             raise ConversationStateError("conversation_state must be canonical")
         object.__setattr__(self, "retrieval_cache", copy.deepcopy(dict(self.retrieval_cache)))
         object.__setattr__(self, "civic_311_context", _validate_civic_311_context(self.civic_311_context))
+        if self.dialogue_context is not None:
+            try:
+                dialogue_context = validate_dialogue_context(self.dialogue_context)
+            except (TypeError, ValueError) as exc:
+                raise ConversationStateError("dialogue_context has an invalid schema") from exc
+            object.__setattr__(self, "dialogue_context", dialogue_context)
 
     @property
     def is_legacy(self) -> bool:
@@ -376,6 +398,8 @@ class ThreadStateEnvelope:
         }
         if self.civic_311_context is not None:
             value["civic_311_context"] = copy.deepcopy(self.civic_311_context)
+        if self.dialogue_context is not None:
+            value["dialogue_context"] = copy.deepcopy(self.dialogue_context)
         return value
 
 
@@ -779,11 +803,18 @@ def load_thread_state(
             # Optional derived state must never become a trusted fact merely
             # because an older or malformed row happened to contain it.
             civic_context = None
+    dialogue_context = parsed.get("dialogue_context")
+    if dialogue_context is not None:
+        try:
+            dialogue_context = validate_dialogue_context(dialogue_context)
+        except (TypeError, ValueError):
+            dialogue_context = None
     return ThreadStateEnvelope(
         copy.deepcopy(cache),
         state,
         source_form=form,
         civic_311_context=civic_context,
+        dialogue_context=dialogue_context,
     )
 
 
@@ -802,11 +833,12 @@ def with_retrieval_cache(
     if not isinstance(retrieval_cache, Mapping):
         raise ConversationStateError("retrieval_cache must be an object")
     return ThreadStateEnvelope(
-        copy.deepcopy(dict(retrieval_cache)),
-        envelope.conversation_state,
-        envelope.version,
-        envelope.source_form,
-        envelope.civic_311_context,
+        retrieval_cache=copy.deepcopy(dict(retrieval_cache)),
+        conversation_state=envelope.conversation_state,
+        version=envelope.version,
+        source_form=envelope.source_form,
+        civic_311_context=envelope.civic_311_context,
+        dialogue_context=envelope.dialogue_context,
     )
 
 
@@ -817,11 +849,12 @@ def with_conversation_state(
     if not isinstance(state, ConversationState):
         raise ConversationStateError("conversation_state must be canonical")
     return ThreadStateEnvelope(
-        envelope.retrieval_cache,
-        state,
-        envelope.version,
-        ThreadStateForm.ENVELOPE_V1_STATE_V2,
-        envelope.civic_311_context,
+        retrieval_cache=envelope.retrieval_cache,
+        conversation_state=state,
+        version=envelope.version,
+        source_form=ThreadStateForm.ENVELOPE_V1_STATE_V2,
+        civic_311_context=envelope.civic_311_context,
+        dialogue_context=envelope.dialogue_context,
     )
 
 
@@ -830,11 +863,26 @@ def with_civic_311_context(
     civic_311_context: Optional[Mapping[str, Any]],
 ) -> ThreadStateEnvelope:
     return ThreadStateEnvelope(
-        envelope.retrieval_cache,
-        envelope.conversation_state,
-        envelope.version,
-        envelope.source_form,
-        dict(civic_311_context) if civic_311_context is not None else None,
+        retrieval_cache=envelope.retrieval_cache,
+        conversation_state=envelope.conversation_state,
+        version=envelope.version,
+        source_form=envelope.source_form,
+        civic_311_context=dict(civic_311_context) if civic_311_context is not None else None,
+        dialogue_context=envelope.dialogue_context,
+    )
+
+
+def with_dialogue_context(
+    envelope: ThreadStateEnvelope,
+    dialogue_context: Optional[Mapping[str, Any]],
+) -> ThreadStateEnvelope:
+    return ThreadStateEnvelope(
+        retrieval_cache=envelope.retrieval_cache,
+        conversation_state=envelope.conversation_state,
+        version=envelope.version,
+        source_form=envelope.source_form,
+        civic_311_context=envelope.civic_311_context,
+        dialogue_context=dict(dialogue_context) if dialogue_context is not None else None,
     )
 
 
@@ -910,6 +958,8 @@ def serialize_thread_state(envelope: ThreadStateEnvelope) -> str:
     }
     if envelope.civic_311_context is not None:
         value["civic_311_context"] = _validate_civic_311_context(envelope.civic_311_context)
+    if envelope.dialogue_context is not None:
+        value["dialogue_context"] = validate_dialogue_context(envelope.dialogue_context)
     encoded = json.dumps(
         value,
         ensure_ascii=True,
@@ -970,6 +1020,8 @@ def merge_for_commit(
     force_cache_update: bool = False,
     next_civic_311_context: Optional[Mapping[str, Any]] = None,
     update_civic_311_context: bool = False,
+    next_dialogue_context: Optional[Mapping[str, Any]] = None,
+    update_dialogue_context: bool = False,
 ) -> CommitMergeResult:
     """Merge one request result without overwriting newer state or cache data."""
     current_state = current.conversation_state
@@ -995,6 +1047,8 @@ def merge_for_commit(
     envelope = with_conversation_state(envelope, next_state)
     if update_civic_311_context:
         envelope = with_civic_311_context(envelope, next_civic_311_context)
+    if update_dialogue_context:
+        envelope = with_dialogue_context(envelope, next_dialogue_context)
     return CommitMergeResult(
         envelope=envelope,
         transition_applied=transition.action is not TransitionAction.PRESERVE,
