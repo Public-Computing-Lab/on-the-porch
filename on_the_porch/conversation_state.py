@@ -52,8 +52,26 @@ MAX_CONVERSATION_STATE_BYTES = 8_192
 MAX_TIME_RANGE_DAYS = 366
 MAX_MESSAGE_ID_CHARS = 128
 
-_ENVELOPE_KEYS = frozenset({"version", "retrieval_cache", "conversation_state"})
+_ENVELOPE_KEYS = frozenset({"version", "retrieval_cache", "conversation_state", "civic_311_context"})
 _ENVELOPE_REQUIRED_KEYS = frozenset({"version", "retrieval_cache"})
+_CIVIC_311_CONTEXT_KEYS = frozenset(
+    {
+        "domain",
+        "issue_family",
+        "geography",
+        "period_kind",
+        "executed_period",
+        "data_through_date",
+        "freshness_status",
+        "coverage_status",
+        "outputs",
+        "source_key",
+        "semantic_revision",
+    }
+)
+_CIVIC_311_GEOGRAPHY_KEYS = frozenset({"label", "kind", "street", "subarea", "filterable"})
+_CIVIC_311_PERIOD_KEYS = frozenset({"kind", "label", "start_date", "end_date_exclusive"})
+MAX_CIVIC_311_CONTEXT_BYTES = 2_048
 _V1_CONVERSATION_STATE_KEYS = frozenset(
     {
         "state_version",
@@ -255,6 +273,75 @@ class ConversationState:
         return value
 
 
+def _validate_civic_311_context(value: Any) -> Optional[Dict[str, Any]]:
+    """Validate the compact trusted 311 follow-up context stored in a thread.
+
+    This is deliberately a narrow data contract, not a second general-purpose
+    conversation state.  It contains canonical outputs from a completed
+    structured query only; resident text, raw rows, and model output are never
+    persisted here.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _CIVIC_311_CONTEXT_KEYS:
+        raise ConversationStateError("civic_311_context has an invalid schema")
+    if value.get("domain") != "311" or value.get("source_key") != "service_requests_311":
+        raise ConversationStateError("civic_311_context has an invalid source")
+    if isinstance(value.get("semantic_revision"), bool) or value.get("semantic_revision") != 1:
+        raise ConversationStateError("civic_311_context has an invalid revision")
+    issue_family = value.get("issue_family")
+    if not isinstance(issue_family, str) or not re.fullmatch(r"[A-Z_]{3,64}", issue_family):
+        raise ConversationStateError("civic_311_context has an invalid issue family")
+    geography = value.get("geography")
+    period = value.get("executed_period")
+    if not isinstance(geography, Mapping) or set(geography) != _CIVIC_311_GEOGRAPHY_KEYS:
+        raise ConversationStateError("civic_311_context has an invalid geography")
+    if not isinstance(period, Mapping) or set(period) != _CIVIC_311_PERIOD_KEYS:
+        raise ConversationStateError("civic_311_context has an invalid period")
+    if not isinstance(geography.get("label"), str) or len(geography["label"]) > 96:
+        raise ConversationStateError("civic_311_context geography is invalid")
+    if not isinstance(geography.get("kind"), str) or len(geography["kind"]) > 32:
+        raise ConversationStateError("civic_311_context geography is invalid")
+    if not isinstance(geography.get("filterable"), bool):
+        raise ConversationStateError("civic_311_context geography is invalid")
+    for optional_key, maximum in (("street", 96), ("subarea", 64)):
+        optional_value = geography.get(optional_key)
+        if optional_value is not None and (not isinstance(optional_value, str) or len(optional_value) > maximum):
+            raise ConversationStateError("civic_311_context geography is invalid")
+    for key, maximum in (("kind", 32), ("label", 192), ("start_date", 10), ("end_date_exclusive", 10)):
+        item = period.get(key)
+        if not isinstance(item, str) or not item or len(item) > maximum:
+            raise ConversationStateError("civic_311_context period is invalid")
+    try:
+        date.fromisoformat(period["start_date"])
+        date.fromisoformat(period["end_date_exclusive"])
+    except ValueError as exc:
+        raise ConversationStateError("civic_311_context period is invalid") from exc
+    for key, maximum in (("period_kind", 32), ("freshness_status", 32), ("coverage_status", 32)):
+        item = value.get(key)
+        if not isinstance(item, str) or not item or len(item) > maximum:
+            raise ConversationStateError("civic_311_context is invalid")
+    data_through = value.get("data_through_date")
+    if data_through is not None:
+        if not isinstance(data_through, str) or len(data_through) != 10:
+            raise ConversationStateError("civic_311_context has an invalid coverage date")
+        try:
+            date.fromisoformat(data_through)
+        except ValueError as exc:
+            raise ConversationStateError("civic_311_context has an invalid coverage date") from exc
+    outputs = value.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) > 7 or any(
+        not isinstance(item, str) or not re.fullmatch(r"[A-Z_]{3,48}", item)
+        for item in outputs
+    ):
+        raise ConversationStateError("civic_311_context has invalid outputs")
+    copied = copy.deepcopy(dict(value))
+    encoded = json.dumps(copied, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > MAX_CIVIC_311_CONTEXT_BYTES:
+        raise ConversationStateError("civic_311_context exceeds the size limit")
+    return copied
+
+
 @dataclass(frozen=True)
 class ThreadStateEnvelope:
     retrieval_cache: Dict[str, Any]
@@ -265,6 +352,7 @@ class ThreadStateEnvelope:
         compare=False,
         repr=False,
     )
+    civic_311_context: Optional[Dict[str, Any]] = field(default=None, compare=True, repr=False)
 
     def __post_init__(self) -> None:
         if self.version != ENVELOPE_VERSION:
@@ -274,17 +362,21 @@ class ThreadStateEnvelope:
         if not isinstance(self.conversation_state, ConversationState):
             raise ConversationStateError("conversation_state must be canonical")
         object.__setattr__(self, "retrieval_cache", copy.deepcopy(dict(self.retrieval_cache)))
+        object.__setattr__(self, "civic_311_context", _validate_civic_311_context(self.civic_311_context))
 
     @property
     def is_legacy(self) -> bool:
         return self.source_form is not ThreadStateForm.ENVELOPE_V1_STATE_V2
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        value = {
             "version": self.version,
             "retrieval_cache": copy.deepcopy(self.retrieval_cache),
             "conversation_state": self.conversation_state.to_dict(),
         }
+        if self.civic_311_context is not None:
+            value["civic_311_context"] = copy.deepcopy(self.civic_311_context)
+        return value
 
 
 @dataclass(frozen=True)
@@ -679,7 +771,20 @@ def load_thread_state(
     if not isinstance(cache, dict):
         raise ConversationStateError("retrieval_cache must be an object")
     state = migrate_conversation_state(parsed.get("conversation_state"))
-    return ThreadStateEnvelope(copy.deepcopy(cache), state, source_form=form)
+    civic_context = parsed.get("civic_311_context")
+    if civic_context is not None:
+        try:
+            civic_context = _validate_civic_311_context(civic_context)
+        except ConversationStateError:
+            # Optional derived state must never become a trusted fact merely
+            # because an older or malformed row happened to contain it.
+            civic_context = None
+    return ThreadStateEnvelope(
+        copy.deepcopy(cache),
+        state,
+        source_form=form,
+        civic_311_context=civic_context,
+    )
 
 
 def extract_retrieval_cache(envelope: ThreadStateEnvelope) -> Dict[str, Any]:
@@ -701,6 +806,7 @@ def with_retrieval_cache(
         envelope.conversation_state,
         envelope.version,
         envelope.source_form,
+        envelope.civic_311_context,
     )
 
 
@@ -715,6 +821,20 @@ def with_conversation_state(
         state,
         envelope.version,
         ThreadStateForm.ENVELOPE_V1_STATE_V2,
+        envelope.civic_311_context,
+    )
+
+
+def with_civic_311_context(
+    envelope: ThreadStateEnvelope,
+    civic_311_context: Optional[Mapping[str, Any]],
+) -> ThreadStateEnvelope:
+    return ThreadStateEnvelope(
+        envelope.retrieval_cache,
+        envelope.conversation_state,
+        envelope.version,
+        envelope.source_form,
+        dict(civic_311_context) if civic_311_context is not None else None,
     )
 
 
@@ -783,12 +903,15 @@ def serialize_thread_state(envelope: ThreadStateEnvelope) -> str:
     """Serialize deterministically with independent semantic/envelope size limits."""
     state = envelope.conversation_state.to_dict()
     _validate_state_mapping_size(state)
+    value = {
+        "version": envelope.version,
+        "retrieval_cache": copy.deepcopy(envelope.retrieval_cache),
+        "conversation_state": state,
+    }
+    if envelope.civic_311_context is not None:
+        value["civic_311_context"] = _validate_civic_311_context(envelope.civic_311_context)
     encoded = json.dumps(
-        {
-            "version": envelope.version,
-            "retrieval_cache": copy.deepcopy(envelope.retrieval_cache),
-            "conversation_state": state,
-        },
+        value,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
@@ -845,6 +968,8 @@ def merge_for_commit(
     transition: ProposedTransition,
     last_substantive_message_id: str,
     force_cache_update: bool = False,
+    next_civic_311_context: Optional[Mapping[str, Any]] = None,
+    update_civic_311_context: bool = False,
 ) -> CommitMergeResult:
     """Merge one request result without overwriting newer state or cache data."""
     current_state = current.conversation_state
@@ -868,6 +993,8 @@ def merge_for_commit(
         last_substantive_message_id=last_substantive_message_id,
     )
     envelope = with_conversation_state(envelope, next_state)
+    if update_civic_311_context:
+        envelope = with_civic_311_context(envelope, next_civic_311_context)
     return CommitMergeResult(
         envelope=envelope,
         transition_applied=transition.action is not TransitionAction.PRESERVE,

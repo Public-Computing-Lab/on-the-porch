@@ -933,6 +933,75 @@ def case_62_no_generated_artifacts_committed() -> None:
     assert not offenders, offenders
 
 
+def case_63_civic_hybrid_mode_validation() -> None:
+    disabled = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(CIVIC_311_HYBRID_MODE="disabled", GEMINI_API_KEY=""),
+    )
+    assert disabled.ok, disabled.errors
+
+    automatic = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(CIVIC_311_HYBRID_MODE="auto", GEMINI_API_KEY=""),
+    )
+    assert automatic.ok, automatic.errors
+
+    required_missing = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(CIVIC_311_HYBRID_MODE="required", GEMINI_API_KEY=""),
+    )
+    assert not required_missing.ok
+    assert any("CIVIC_311_HYBRID_MODE=required" in error for error in required_missing.errors)
+
+    required_configured = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(
+            CIVIC_311_HYBRID_MODE="required",
+            GEMINI_API_KEY="configured-test-provider-key",
+        ),
+    )
+    assert required_configured.ok, required_configured.errors
+
+    invalid = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(CIVIC_311_HYBRID_MODE="sometimes"),
+    )
+    assert not invalid.ok
+    assert any("disabled, auto, or required" in error for error in invalid.errors)
+
+
+def case_64_civic_hybrid_runtime_policy_is_authoritative() -> None:
+    import api_v2
+
+    with api_v2._CIVIC_PROVIDER_LOCK:
+        api_v2._CIVIC_PROVIDER_DISABLED_UNTIL = 0.0
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GEMINI_API_KEY": "configured-test-provider-key",
+            "CIVIC_311_PLANNER_ENABLED": "true",
+            "CIVIC_311_SYNTHESIS_ENABLED": "true",
+        },
+        clear=False,
+    ), mock.patch.object(api_v2.Config, "CIVIC_311_HYBRID_MODE", "disabled"):
+        disabled = api_v2._civic_311_runtime_policy()
+        assert not disabled.planner_enabled and not disabled.synthesis_enabled
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "GEMINI_API_KEY": "configured-test-provider-key",
+            "CIVIC_311_PLANNER_ENABLED": "false",
+            "CIVIC_311_SYNTHESIS_ENABLED": "false",
+        },
+        clear=False,
+    ), mock.patch.object(api_v2.Config, "CIVIC_311_HYBRID_MODE", "required"):
+        required = api_v2._civic_311_runtime_policy()
+        assert required.planner_enabled and required.synthesis_enabled
+        safe = required.to_safe_dict()
+        assert "GEMINI_API_KEY" not in safe and "configured-test-provider-key" not in json.dumps(safe)
+
+
 def main() -> int:
     cases = [
         ("01_valid_production_config", case_01_valid_production_config),
@@ -997,6 +1066,8 @@ def main() -> int:
         ("60_startup_validator_paths_share_contract", case_60_startup_validator_paths_share_contract),
         ("61_cleanup_replay_horizon_documented", case_61_cleanup_replay_horizon_documented),
         ("62_no_generated_artifacts_committed", case_62_no_generated_artifacts_committed),
+        ("63_civic_hybrid_mode_validation", case_63_civic_hybrid_mode_validation),
+        ("64_civic_hybrid_runtime_policy_is_authoritative", case_64_civic_hybrid_runtime_policy_is_authoritative),
     ]
     print(f"Running {len(cases)} launch-runtime hardening cases...\n")
     for name, fn in cases:

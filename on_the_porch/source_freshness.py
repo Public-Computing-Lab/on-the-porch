@@ -487,12 +487,20 @@ def format_structured_count_answer(
         FreshnessStatus.DELAYED,
     }:
         if through:
+            if is_311:
+                return (
+                    "I can't reliably assess current conditions from the available official dataset. "
+                    f"The local 311 data contains records through {through}, "
+                    "so it does not describe what is happening right now."
+                )
             return (
                 f"I can't reliably assess current conditions from the available official dataset. "
                 f"The local {'311' if is_311 else 'crime'} data contains records through {through}, "
                 f"so it does not describe what is happening right now. "
                 f"For an immediate emergency, call 911."
             )
+        if is_311:
+            return "I can't reliably assess current conditions from the available official dataset."
         return (
             "I can't reliably assess current conditions from the available official dataset. "
             "For an immediate emergency, call 911."

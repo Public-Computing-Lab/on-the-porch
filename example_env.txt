@@ -20,6 +20,13 @@ GEMINI_EMBED_MODEL=models/gemini-embedding-001
 GEMINI_REQUEST_TIMEOUT=25
 GEMINI_STREAM_TIMEOUT=30
 GEMINI_MAX_ATTEMPTS=2
+# Structured 311 model policy: disabled, auto, or required.
+# auto enables planner/synthesis only when GEMINI_API_KEY is configured.
+CIVIC_311_HYBRID_MODE=auto
+# Optional overrides. Omit them to follow CIVIC_311_HYBRID_MODE.
+# CIVIC_311_PLANNER_ENABLED=true
+# CIVIC_311_SYNTHESIS_ENABLED=true
+CIVIC_311_PROVIDER_COOLDOWN_SECONDS=60
 REQUEST_BUDGET_SECONDS=30
 CHROMA_MAX_ATTEMPTS=2
 DYNAMIC_SQL_ENABLED=false

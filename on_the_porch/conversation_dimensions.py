@@ -1089,7 +1089,9 @@ def _extract_topic(
     if natural_event_discovery and location is None:
         return CanonicalTopic.EVENTS, ReasonCode.EXPLICIT_EVENTS_TOPIC
     city_service = re.search(
-        r"\b(?:311|potholes?|trash|garbage|streetlights?|missed pickup|city services?)\b",
+        r"\b(?:311|potholes?|trash|garbage|streetlights?|missed pickup|city services?|"
+        r"drains?|catchbasins?|flooding|standing water|road conditions?|roadway repair|"
+        r"pavement|illegal dumping|dumping)\b",
         normalized,
     )
     if city_service:

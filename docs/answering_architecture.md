@@ -75,7 +75,11 @@ Rules handle emergencies, exact UI entities, clear follow-ups, explicit dates an
 supported canonical concepts, and common factual requests. The planner is allowed only for
 ambiguous decomposition or multi-capability selection. It receives bounded state, may select
 only registered tools, and cannot generate SQL, names, loops, state mutations, or retries.
-Structured civic requests permit at most one planner call and one synthesis call.
+Structured civic requests permit at most one planner call, one primary synthesis call, and
+one repair call. The current 311 slice uses no planner for exact counts, clear issue/status/
+top-street follow-ups, comparisons, category overviews, or other rule-resolved requests.
+It uses the planner only for ambiguous compound 311 requests that rules cannot safely
+decompose.
 
 ## 8. Allowlisted tool registry
 
@@ -147,6 +151,10 @@ persistence. These are shares of one deadline, not independent allowances. Emerg
 replay, and clarification should normally finish below 0.5 seconds; simple structured facts
 below 3 seconds; enriched answers below 10 seconds; every controlled case below 15 seconds.
 
+The 311 kernel enforces its own 15-second hard ceiling even when the wider API request budget
+is configured above 15 seconds. Provider calls receive only the remaining kernel budget and
+leave a persistence reserve.
+
 ## 16. Partial evidence and timeout behavior
 
 Independent tools run concurrently and return completed evidence when an optional tool
@@ -154,6 +162,29 @@ times out. The sufficiency evaluator marks partial, stale, conflicting, or unava
 Composition states what is confirmed and what could not be checked. Planner, retrieval, or
 synthesis timeout uses a grounded deterministic fallback before the deadline. A timed-out
 task cannot mutate the returned response or conversation state afterward.
+
+### Current 311 model policy
+
+`CIVIC_311_HYBRID_MODE` controls only the structured 311 model assistance:
+
+- `disabled` always uses the deterministic planner and deterministic composers;
+- `auto` enables the configured planner and synthesis provider when credentials are
+  available, while allowing either feature to be explicitly disabled;
+- `required` requires provider credentials at production launch and enables available model
+  assistance at runtime.
+
+Exact counts remain zero-model. Clear status and top-street follow-ups also remain zero-model.
+Rule-resolved recent-report, street-status, comparison, and category-overview plans may use
+one evidence-bounded synthesis call. Ambiguous compound requests may use one planner call;
+after clarification, the completed plan may use one synthesis call. Provider absence,
+timeout, malformed planner output, failed claim validation, or insufficient remaining budget
+returns a grounded deterministic clarification or answer.
+
+The focused and golden suites validate deterministic behavior. Model-path tests use mocked
+providers to exercise timeout, malformed output, unavailable-provider, validation, repair,
+and call-limit branches. Isolated local demo tests additionally exercise the configured
+hosted Gemini provider for real planning and synthesis; those results do not certify
+production credentials, production data, or DreamHost latency.
 
 ## 17. Atomic persistence and replay
 
