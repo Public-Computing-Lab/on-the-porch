@@ -146,6 +146,7 @@ class StrictToolPlan:
     clarification_message: Optional[str]
     confidence: float
     planner_source: PlannerSource
+    issue_scope: str = "SPECIFIC_FAMILY"
 
     def __post_init__(self) -> None:
         if self.domain != "311":
@@ -154,6 +155,14 @@ class StrictToolPlan:
             raise ValueError("plan intent must be bounded")
         if self.issue_family is not None and len(self.issue_family) > 64:
             raise ValueError("issue family must be bounded")
+        if self.issue_scope not in {"SPECIFIC_FAMILY", "ALL_311", "UNSPECIFIED"}:
+            raise ValueError("plan issue scope is invalid")
+        if self.issue_scope == "SPECIFIC_FAMILY" and self.issue_family is None:
+            raise ValueError("specific-family plans require an issue family")
+        if self.issue_scope == "ALL_311" and self.issue_family is not None:
+            raise ValueError("aggregate 311 plans cannot carry an issue family")
+        if self.issue_scope == "UNSPECIFIED" and self.issue_family is not None:
+            raise ValueError("unspecified issue scope cannot carry an issue family")
         if not isinstance(self.geography, Mapping) or not isinstance(self.period, Mapping):
             raise ValueError("plan geography and period must be objects")
         if len(self.outputs) > 7 or len(self.tools) > 7:
@@ -170,6 +179,7 @@ class StrictToolPlan:
             "domain": self.domain,
             "intent": self.intent,
             "issue_family": self.issue_family,
+            "issue_scope": self.issue_scope,
             "geography": dict(self.geography),
             "period": dict(self.period),
             "outputs": list(self.outputs),

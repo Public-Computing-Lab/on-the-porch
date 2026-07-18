@@ -32,6 +32,16 @@ from answering_kernel import (
     bounded_strings,
 )
 from resident_response import internal_terms
+from semantic_dialogue_controller import (
+    CapabilityIntent,
+    ClarificationReason,
+    DialogueDomain,
+    DialogueRelationship,
+    DomainHint,
+    ResponseStrategy,
+    TrustedReferenceTarget,
+    TurnKind,
+)
 from source_freshness import (
     CoverageStatus,
     FreshnessStatus,
@@ -55,6 +65,12 @@ class IssueFamily(str, Enum):
     STREET_AND_PAVEMENT_CONDITION = "STREET_AND_PAVEMENT_CONDITION"
     TRASH_AND_ILLEGAL_DUMPING = "TRASH_AND_ILLEGAL_DUMPING"
     STREETLIGHT = "STREETLIGHT"
+
+
+class IssueScope(str, Enum):
+    SPECIFIC_FAMILY = "SPECIFIC_FAMILY"
+    ALL_311 = "ALL_311"
+    UNSPECIFIED = "UNSPECIFIED"
 
 
 class ToolName(str, Enum):
@@ -213,7 +229,7 @@ class CivicGeography:
 class Active311FactContext:
     """Small, trusted context stored in the MySQL thread-state envelope."""
 
-    issue_family: str
+    issue_family: Optional[str]
     geography: CivicGeography
     period_kind: str
     executed_period: CivicPeriod
@@ -221,6 +237,7 @@ class Active311FactContext:
     freshness_status: str
     coverage_status: str
     outputs: Tuple[str, ...]
+    issue_scope: str = IssueScope.SPECIFIC_FAMILY.value
     source_key: str = SOURCE_311
     semantic_revision: int = 1
 
@@ -228,6 +245,7 @@ class Active311FactContext:
         value = {
             "domain": "311",
             "issue_family": self.issue_family,
+            "issue_scope": self.issue_scope,
             "geography": self.geography.to_dict(),
             "period_kind": self.period_kind,
             "executed_period": self.executed_period.to_dict(),
@@ -250,8 +268,13 @@ class Active311FactContext:
         if not isinstance(raw, Mapping) or raw.get("domain") != "311":
             return None
         try:
-            family = str(raw.get("issue_family") or "")
-            if family not in _FAMILY_BY_ID:
+            family = str(raw.get("issue_family") or "") or None
+            scope = str(raw.get("issue_scope") or IssueScope.SPECIFIC_FAMILY.value)
+            if scope not in {item.value for item in IssueScope}:
+                return None
+            if scope == IssueScope.SPECIFIC_FAMILY.value and family not in _FAMILY_BY_ID:
+                return None
+            if scope != IssueScope.SPECIFIC_FAMILY.value and family is not None:
                 return None
             geo_raw = raw.get("geography")
             period_raw = raw.get("executed_period")
@@ -285,6 +308,7 @@ class Active311FactContext:
                 freshness_status=_bounded_optional_text(raw.get("freshness_status"), 32) or "UNKNOWN",
                 coverage_status=_bounded_optional_text(raw.get("coverage_status"), 32) or "UNKNOWN",
                 outputs=outputs,
+                issue_scope=scope,
                 source_key=SOURCE_311,
                 semantic_revision=int(raw.get("semantic_revision") or 1),
             )
@@ -432,8 +456,123 @@ def _is_reference_only(message: str) -> bool:
         _is_status_followup(message)
         or _is_top_streets_followup(message)
         or re.search(r"\b(?:these|those|the)\s+(?:311\s+)?(?:reports|requests|complaints)\b", text)
-        or text in {"what about last month", "what about this month", "what about last week"}
+        or text in {
+            "what about last month",
+            "what about this month",
+            "what about last week",
+            "what about the month before",
+            "the month before",
+            "what types were most common",
+            "which types were most common",
+            "what about overall",
+        }
     )
+
+
+_ALL_311_RESPONSES = frozenset(
+    {
+        "overall",
+        "all",
+        "all of them",
+        "every issue",
+        "all 311 requests",
+        "total",
+        "regardless of issue",
+        "any issue",
+        "the overall count",
+    }
+)
+
+
+def _is_all_311_response(message: str) -> bool:
+    return _normalized(message).strip(" .,!?:;") in _ALL_311_RESPONSES
+
+
+def _is_explicit_all_311(message: str) -> bool:
+    text = _normalized(message)
+    has_311_noun = bool(
+        re.search(r"\b311\s+(?:requests?|cases?|reports?)\b", text)
+        or re.search(r"\b(?:city|service)\s+requests?\b", text)
+        or (re.search(r"\brequests?\b", text) and re.search(r"\b(?:regardless of issue|any issue)\b", text))
+    )
+    aggregate_language = bool(
+        re.search(r"\b(?:how many|count|number|total|overall|all|regardless of issue|any issue)\b", text)
+    )
+    return bool(has_311_noun and aggregate_language and family_for_message(message) is None)
+
+
+def _is_month_before_followup(message: str) -> bool:
+    return bool(re.search(r"\b(?:what about )?(?:the )?month before\b", _normalized(message)))
+
+
+def _is_category_distribution_followup(message: str) -> bool:
+    text = _normalized(message)
+    return bool(re.search(r"\b(?:what|which) (?:types|categories) (?:were|are) most common\b", text))
+
+
+def build_311_dialogue_hint(
+    message: str,
+    active_context: Optional[Mapping[str, Any]],
+) -> Optional[DomainHint]:
+    """Return a reviewed semantic hint without exposing a tool implementation."""
+    active = Active311FactContext.from_mapping(active_context)
+    pending_scope = bool(active and active.coverage_status == "PENDING_CLARIFICATION")
+    if pending_scope and _is_all_311_response(message):
+        return DomainHint(
+            turn_kind=TurnKind.CLARIFICATION_RESPONSE,
+            domain=DialogueDomain.CIVIC_311,
+            relationship=DialogueRelationship.FOLLOW_UP,
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.COUNT_311,
+            trusted_reference_target=TrustedReferenceTarget.PENDING_311_ISSUE_SCOPE,
+            priority=100,
+        )
+    if _is_explicit_all_311(message) or (active and _normalized(message).strip(" .,!?:;") in {"what about overall", "overall"}):
+        return DomainHint(
+            turn_kind=(TurnKind.CONTEXTUAL_TOOL_FOLLOWUP if active else TurnKind.FACTUAL_TOOL_QUERY),
+            domain=DialogueDomain.CIVIC_311,
+            relationship=(DialogueRelationship.REFINEMENT if active else DialogueRelationship.STANDALONE),
+            response_strategy=ResponseStrategy.EXECUTE_CAPABILITY,
+            tool_required=True,
+            capability_intent=CapabilityIntent.COUNT_311,
+            trusted_reference_target=(TrustedReferenceTarget.ACTIVE_311_CONTEXT if active else TrustedReferenceTarget.NONE),
+            priority=95,
+        )
+    if active and active.issue_scope == IssueScope.ALL_311.value and _is_month_before_followup(message):
+        return DomainHint(
+            TurnKind.CONTEXTUAL_TOOL_FOLLOWUP,
+            DialogueDomain.CIVIC_311,
+            DialogueRelationship.FOLLOW_UP,
+            ResponseStrategy.EXECUTE_CAPABILITY,
+            True,
+            CapabilityIntent.COUNT_311,
+            trusted_reference_target=TrustedReferenceTarget.ACTIVE_311_CONTEXT,
+            priority=95,
+        )
+    if active and active.issue_scope == IssueScope.ALL_311.value and _is_category_distribution_followup(message):
+        return DomainHint(
+            TurnKind.CONTEXTUAL_TOOL_FOLLOWUP,
+            DialogueDomain.CIVIC_311,
+            DialogueRelationship.FOLLOW_UP,
+            ResponseStrategy.EXECUTE_CAPABILITY,
+            True,
+            CapabilityIntent.DISTRIBUTE_311_CATEGORIES,
+            trusted_reference_target=TrustedReferenceTarget.ACTIVE_311_CONTEXT,
+            priority=95,
+        )
+    if is_311_candidate(message, active_context):
+        return DomainHint(
+            TurnKind.FACTUAL_TOOL_QUERY if active is None else TurnKind.CONTEXTUAL_TOOL_FOLLOWUP,
+            DialogueDomain.CIVIC_311,
+            DialogueRelationship.STANDALONE if active is None else DialogueRelationship.FOLLOW_UP,
+            ResponseStrategy.EXECUTE_CAPABILITY,
+            True,
+            CapabilityIntent.QUERY_311,
+            trusted_reference_target=(TrustedReferenceTarget.ACTIVE_311_CONTEXT if active else TrustedReferenceTarget.NONE),
+            priority=80,
+        )
+    return None
 
 
 def _contains_311_signal(message: str) -> bool:
@@ -448,7 +587,7 @@ def _contains_311_signal(message: str) -> bool:
 
 def is_311_candidate(message: str, active_context: Optional[Mapping[str, Any]]) -> bool:
     """Return true only for the reviewed civic family or a trusted reference."""
-    if _contains_311_signal(message):
+    if _contains_311_signal(message) or _is_explicit_all_311(message):
         return True
     # A bare reference is still a civic request.  Without trusted context the
     # planner returns a clarification instead of letting an unrelated agent
@@ -535,7 +674,11 @@ def _needs_street(message: str) -> bool:
 
 
 def _is_contextual_followup(message: str) -> bool:
-    return _is_reference_only(message) or _street_from_message(message) is not None
+    return (
+        _is_reference_only(message)
+        or _is_all_311_response(message)
+        or _street_from_message(message) is not None
+    )
 
 
 def _requires_semantic_planner(message: str) -> bool:
@@ -591,6 +734,35 @@ def _geography_from_context(
 
 
 def _planned_outputs(message: str, family: Optional[IssueFamily], active: Optional[Active311FactContext]) -> Tuple[Tuple[str, ...], Tuple[str, ...], str]:
+    if active and (
+        _is_month_before_followup(message)
+        or _is_all_311_response(message)
+        or _normalized(message).strip(" .,!?:;") == "what about overall"
+    ):
+        outputs = active.outputs or (
+            OutputName.ISSUE_COUNT.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        )
+        output_set = set(outputs)
+        if OutputName.CATEGORY_DISTRIBUTION.value in output_set:
+            intent = "category_overview"
+        elif OutputName.PERIOD_COMPARISON.value in output_set:
+            intent = "period_comparison"
+        elif OutputName.STATUS_BREAKDOWN.value in output_set and OutputName.ISSUE_COUNT.value not in output_set:
+            intent = "status_followup"
+        elif OutputName.TOP_STREETS.value in output_set:
+            intent = "top_streets"
+        elif OutputName.RECENT_EXAMPLES.value in output_set:
+            intent = "street_status"
+        else:
+            intent = "exact_count"
+        return outputs, _tools_for_outputs(outputs), intent
+    if _is_category_distribution_followup(message):
+        return (
+            (OutputName.CATEGORY_DISTRIBUTION.value, OutputName.SOURCE_FRESHNESS.value),
+            (ToolName.CATEGORY_DISTRIBUTION.value, ToolName.SOURCE_FRESHNESS.value),
+            "category_overview",
+        )
     if _is_category_overview(message):
         return (
             (OutputName.CATEGORY_DISTRIBUTION.value, OutputName.SOURCE_FRESHNESS.value),
@@ -669,6 +841,15 @@ def _planned_outputs(message: str, family: Optional[IssueFamily], active: Option
 
 
 def _default_period_from_context(message: str, active: Optional[Active311FactContext], *, today: date) -> CivicPeriod:
+    if active and _is_month_before_followup(message):
+        end = active.executed_period.start.replace(day=1)
+        start = (end - timedelta(days=1)).replace(day=1)
+        return CivicPeriod(
+            "CALENDAR_MONTH",
+            f"the month before ({start.strftime('%B %Y')})",
+            start,
+            end,
+        )
     text = _normalized(message)
     if active and _is_contextual_followup(message) and not re.search(r"\b(?:last|this|recent|\d+ days?)\b", text):
         return active.executed_period
@@ -696,6 +877,11 @@ def _clarification_plan(
         clarification_message=clarification,
         confidence=0.98,
         planner_source=PlannerSource.RULE,
+        issue_scope=(
+            IssueScope.SPECIFIC_FAMILY.value
+            if family is not None
+            else IssueScope.UNSPECIFIED.value
+        ),
     )
 
 
@@ -868,8 +1054,36 @@ def plan_311_question(
     today = now or date.today()
     active = Active311FactContext.from_mapping(active_context)
     family = family_for_message(message)
-    if family is None and active and _is_contextual_followup(message):
-        family = IssueFamily(active.issue_family)
+    aggregate_refinement = bool(
+        active
+        and _normalized(message).strip(" .,!?:;") in {"overall", "what about overall"}
+    )
+    if (
+        family is None
+        and active
+        and active.issue_scope == IssueScope.SPECIFIC_FAMILY.value
+        and _is_contextual_followup(message)
+        and not aggregate_refinement
+    ):
+        family = IssueFamily(str(active.issue_family))
+    issue_scope = (
+        IssueScope.ALL_311
+        if (
+            _is_explicit_all_311(message)
+            or aggregate_refinement
+            or (
+                active
+                and active.issue_scope == IssueScope.ALL_311.value
+                and _is_contextual_followup(message)
+            )
+            or (
+                active
+                and active.coverage_status == "PENDING_CLARIFICATION"
+                and _is_all_311_response(message)
+            )
+        )
+        else (IssueScope.SPECIFIC_FAMILY if family is not None else IssueScope.UNSPECIFIED)
+    )
     geography = _geography_from_context(message, active_context=active, state_location=state_location)
     period = _default_period_from_context(message, active, today=today)
     outputs, tools, intent = _planned_outputs(message, family, active)
@@ -896,9 +1110,10 @@ def plan_311_question(
             clarification_message=None,
             confidence=0.99 if family or _is_category_overview(message) else 0.4,
             planner_source=PlannerSource.RULE,
+            issue_scope=issue_scope.value,
         )
     )
-    semantic_value = not (family is None and _is_reference_only(message)) and (
+    semantic_value = issue_scope is not IssueScope.ALL_311 and not (family is None and _is_reference_only(message)) and (
         (family is None and not _is_category_overview(message))
         or _requires_semantic_planner(message)
     )
@@ -944,7 +1159,7 @@ def plan_311_question(
                 planner_stats["failure"] = "provider_failure"
     if missing_street:
         return fallback
-    if family is None and not _is_category_overview(message):
+    if issue_scope is IssueScope.UNSPECIFIED and not _is_category_overview(message):
         if _is_status_followup(message):
             return _clarification_plan(
                 message=message,
@@ -1076,6 +1291,11 @@ def _status_and_period(
         return fresh, requested, EvidenceStatus.DEPENDENCY_UNAVAILABLE, ["The source coverage could not be verified."]
     if assessment.coverage_status is CoverageStatus.OUTSIDE:
         through = _date_phrase(assessment.data_through_date.isoformat()) or assessment.data_through_date.isoformat()
+        if plan.intent == "exact_count":
+            limitations.append(
+                f"The local data only runs through {through}, so it does not cover {requested.label}."
+            )
+            return fresh, requested, EvidenceStatus.OUTSIDE_COVERAGE, limitations
         limitations.append(
             f"The local data only runs through {through}, so it does not describe current conditions."
         )
@@ -1124,6 +1344,7 @@ def _where_clause(
     geography: CivicGeography,
     period: CivicPeriod,
     include_street: bool = True,
+    all_311: bool = False,
 ) -> Tuple[str, List[Any]]:
     clauses = [
         "(neighborhood = %s OR police_district = %s)",
@@ -1131,10 +1352,11 @@ def _where_clause(
         "open_date < %s",
     ]
     params: List[Any] = ["Dorchester", "C11", period.start.isoformat(), period.end_exclusive.isoformat()]
-    family_clause, family_params = _family_filter(family)
-    if family_clause:
-        clauses.append(f"({family_clause})")
-        params.extend(family_params)
+    if not all_311:
+        family_clause, family_params = _family_filter(family)
+        if family_clause:
+            clauses.append(f"({family_clause})")
+            params.extend(family_params)
     if geography.street and include_street:
         clauses.append("LOWER(REPLACE(TRIM(COALESCE(street_name, '')), '.', '')) = %s")
         params.append(geography.street)
@@ -1175,13 +1397,21 @@ def _optional_nonnegative_int(value: Any) -> Optional[int]:
     return parsed if parsed >= 0 else None
 
 
-def _tool_issue_count(connection_factory: ConnectionFactory, family: Optional[IssueFamily], geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
+def _tool_issue_count(
+    connection_factory: ConnectionFactory,
+    family: Optional[IssueFamily],
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
     if geography.street:
         where, params = _where_clause(
             family=family,
             geography=geography,
             period=period,
             include_street=False,
+            all_311=all_311,
         )
         rows = _query(
             connection_factory,
@@ -1201,13 +1431,24 @@ def _tool_issue_count(connection_factory: ConnectionFactory, family: Optional[Is
             "addressable_count": addressable_count,
             "street_coverage_unavailable": total_matching > 0 and addressable_count == 0,
         }
-    where, params = _where_clause(family=family, geography=geography, period=period)
+    where, params = _where_clause(
+        family=family, geography=geography, period=period, all_311=all_311,
+    )
     rows = _query(connection_factory, f"SELECT COUNT(*) AS count FROM service_requests_311 WHERE {where}", params, limit=1)
     return {"count": _int_value(rows[0].get("count") if rows else 0)}
 
 
-def _tool_status_breakdown(connection_factory: ConnectionFactory, family: Optional[IssueFamily], geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
-    where, params = _where_clause(family=family, geography=geography, period=period)
+def _tool_status_breakdown(
+    connection_factory: ConnectionFactory,
+    family: Optional[IssueFamily],
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
+    where, params = _where_clause(
+        family=family, geography=geography, period=period, all_311=all_311,
+    )
     rows = _query(
         connection_factory,
         f"SELECT COALESCE(NULLIF(case_status, ''), 'Unknown') AS status, COUNT(*) AS count "
@@ -1221,8 +1462,17 @@ def _tool_status_breakdown(connection_factory: ConnectionFactory, family: Option
     return {"statuses": normalized, "open_count": open_count, "closed_count": closed_count}
 
 
-def _tool_top_streets(connection_factory: ConnectionFactory, family: Optional[IssueFamily], geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
-    where, params = _where_clause(family=family, geography=geography, period=period)
+def _tool_top_streets(
+    connection_factory: ConnectionFactory,
+    family: Optional[IssueFamily],
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
+    where, params = _where_clause(
+        family=family, geography=geography, period=period, all_311=all_311,
+    )
     rows = _query(
         connection_factory,
         f"SELECT street_name, COUNT(*) AS count FROM service_requests_311 WHERE {where} "
@@ -1239,8 +1489,17 @@ def _tool_top_streets(connection_factory: ConnectionFactory, family: Optional[Is
     }
 
 
-def _tool_recent_examples(connection_factory: ConnectionFactory, family: Optional[IssueFamily], geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
-    where, params = _where_clause(family=family, geography=geography, period=period)
+def _tool_recent_examples(
+    connection_factory: ConnectionFactory,
+    family: Optional[IssueFamily],
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
+    where, params = _where_clause(
+        family=family, geography=geography, period=period, all_311=all_311,
+    )
     rows = _query(
         connection_factory,
         f"SELECT case_id, open_date, service_name, case_topic, street_name, case_status "
@@ -1261,12 +1520,23 @@ def _tool_recent_examples(connection_factory: ConnectionFactory, family: Optiona
     }
 
 
-def _tool_compare_periods(connection_factory: ConnectionFactory, family: Optional[IssueFamily], geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
+def _tool_compare_periods(
+    connection_factory: ConnectionFactory,
+    family: Optional[IssueFamily],
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
     prior_end = period.start
     prior_start = prior_end - timedelta(days=period.days)
     prior = CivicPeriod("COMPARISON_BASELINE", f"the preceding {period.days}-day period", prior_start, prior_end)
-    current = _tool_issue_count(connection_factory, family, geography, period)["count"]
-    previous = _tool_issue_count(connection_factory, family, geography, prior)["count"]
+    current = _tool_issue_count(
+        connection_factory, family, geography, period, all_311=all_311,
+    )["count"]
+    previous = _tool_issue_count(
+        connection_factory, family, geography, prior, all_311=all_311,
+    )["count"]
     difference = current - previous
     percentage = None if previous == 0 else round((difference / previous) * 100.0, 1)
     return {
@@ -1278,8 +1548,37 @@ def _tool_compare_periods(connection_factory: ConnectionFactory, family: Optiona
     }
 
 
-def _tool_category_distribution(connection_factory: ConnectionFactory, geography: CivicGeography, period: CivicPeriod) -> Dict[str, Any]:
-    where, params = _where_clause(family=None, geography=geography, period=period)
+def _tool_category_distribution(
+    connection_factory: ConnectionFactory,
+    geography: CivicGeography,
+    period: CivicPeriod,
+    *,
+    all_311: bool = False,
+) -> Dict[str, Any]:
+    where, params = _where_clause(
+        family=None, geography=geography, period=period, all_311=all_311,
+    )
+    if all_311:
+        rows = _query(
+            connection_factory,
+            "SELECT COALESCE(NULLIF(TRIM(service_name), ''), NULLIF(TRIM(case_topic), ''), 'Other') AS category, "
+            f"COUNT(*) AS count FROM service_requests_311 WHERE {where} "
+            "GROUP BY COALESCE(NULLIF(TRIM(service_name), ''), NULLIF(TRIM(case_topic), ''), 'Other') "
+            "ORDER BY count DESC, category ASC LIMIT 8",
+            params,
+            limit=8,
+        )
+        return {
+            "categories": [
+                {
+                    "family": None,
+                    "label": str(row.get("category") or "Other").strip(),
+                    "count": _int_value(row.get("count")),
+                }
+                for row in rows
+                if str(row.get("category") or "").strip()
+            ]
+        }
     rows = _query(
         connection_factory,
         f"SELECT service_name, case_topic, COUNT(*) AS count FROM service_requests_311 WHERE {where} "
@@ -1311,21 +1610,34 @@ def _execute_tool(
     geography: CivicGeography,
     period: CivicPeriod,
     freshness: Mapping[str, Any],
+    all_311: bool,
 ) -> Dict[str, Any]:
     if name == ToolName.SOURCE_FRESHNESS.value:
         return {"freshness": dict(freshness)}
     if name == ToolName.ISSUE_COUNT.value:
-        return _tool_issue_count(connection_factory, family, geography, period)
+        return _tool_issue_count(
+            connection_factory, family, geography, period, all_311=all_311,
+        )
     if name == ToolName.STATUS_BREAKDOWN.value:
-        return _tool_status_breakdown(connection_factory, family, geography, period)
+        return _tool_status_breakdown(
+            connection_factory, family, geography, period, all_311=all_311,
+        )
     if name == ToolName.TOP_STREETS.value:
-        return _tool_top_streets(connection_factory, family, geography, period)
+        return _tool_top_streets(
+            connection_factory, family, geography, period, all_311=all_311,
+        )
     if name == ToolName.RECENT_EXAMPLES.value:
-        return _tool_recent_examples(connection_factory, family, geography, period)
+        return _tool_recent_examples(
+            connection_factory, family, geography, period, all_311=all_311,
+        )
     if name == ToolName.PERIOD_COMPARISON.value:
-        return _tool_compare_periods(connection_factory, family, geography, period)
+        return _tool_compare_periods(
+            connection_factory, family, geography, period, all_311=all_311,
+        )
     if name == ToolName.CATEGORY_DISTRIBUTION.value:
-        return _tool_category_distribution(connection_factory, geography, period)
+        return _tool_category_distribution(
+            connection_factory, geography, period, all_311=all_311,
+        )
     raise ValueError("unregistered 311 tool")
 
 
@@ -1345,6 +1657,7 @@ def _execute_tools(
     results: Dict[str, Any] = {}
     failures: List[str] = []
     timeout_stage: Optional[str] = None
+    all_311 = plan.issue_scope == IssueScope.ALL_311.value
     executor = ThreadPoolExecutor(max_workers=min(MAX_TOOL_WORKERS, len(plan.tools)), thread_name_prefix="civic311")
     futures: Dict[Future[Dict[str, Any]], str] = {}
     try:
@@ -1360,6 +1673,7 @@ def _execute_tools(
                 geography=geography,
                 period=period,
                 freshness=freshness,
+                all_311=all_311,
             )] = name
         wait_seconds = min(3.0, deadline.remaining(reserve_for_persistence=True))
         if wait_seconds > 0 and futures:
@@ -1444,7 +1758,11 @@ def _bundle_from_execution(
         question_scope={
             "domain": "311",
             "intent": plan.intent,
-            "issue_label": _family_label(plan.issue_family) if plan.issue_family else None,
+            "issue_scope": plan.issue_scope,
+            "issue_label": _family_label(
+                plan.issue_family,
+                all_311=plan.issue_scope == IssueScope.ALL_311.value,
+            ),
             "requested_outputs": list(plan.outputs),
         },
         issue_family=family.value if family else None,
@@ -1474,12 +1792,16 @@ def _date_phrase(value: Optional[str]) -> Optional[str]:
         return None
 
 
-def _family_label(family: Optional[str]) -> str:
+def _family_label(family: Optional[str], *, all_311: bool = False) -> str:
+    if all_311:
+        return "all 311 service requests"
     definition = _FAMILY_BY_ID.get(str(family or ""))
     return definition.label if definition else "street-service"
 
 
-def _request_label(family: Optional[str]) -> str:
+def _request_label(family: Optional[str], *, all_311: bool = False) -> str:
+    if all_311:
+        return "311 service requests"
     labels = {
         IssueFamily.ROAD_SURFACE_POTHOLE.value: "pothole-related 311 service requests",
         IssueFamily.DRAINAGE_AND_FLOODING.value: "drainage- or flooding-related 311 service requests",
@@ -1490,8 +1812,8 @@ def _request_label(family: Optional[str]) -> str:
     return labels.get(str(family or ""), "street-related 311 service requests")
 
 
-def _counted_request_label(count: int, family: Optional[str]) -> str:
-    plural = _request_label(family)
+def _counted_request_label(count: int, family: Optional[str], *, all_311: bool = False) -> str:
+    plural = _request_label(family, all_311=all_311)
     return plural[:-1] if count == 1 else plural
 
 
@@ -1551,9 +1873,22 @@ def _period_intro(bundle: EvidenceBundle) -> str:
         if range_text and _normalized(range_text) not in _normalized(executed):
             rendered_period = f"{executed} ({range_text})"
         used = f" I used {rendered_period}." if executed != requested else ""
+        missing = ""
+        try:
+            requested_end = date.fromisoformat(str(bundle.requested_period["end_date_exclusive"]))
+            executed_end = date.fromisoformat(str(bundle.executed_period["end_date_exclusive"]))
+            if executed_end < requested_end:
+                missing_end = requested_end - timedelta(days=1)
+                missing = (
+                    f" {executed_end.strftime('%B')} {executed_end.day} through "
+                    f"{missing_end.strftime('%B')} {missing_end.day} are not covered and are not treated as zero."
+                )
+        except (KeyError, TypeError, ValueError):
+            missing = ""
         return (
             f"The local data only runs through {through or 'the latest recorded date'}, so it covers only part of {requested}."
             + used
+            + missing
         )
     if executed != requested:
         return f"The local data only runs through {through or 'the latest recorded date'}, so it does not describe current conditions."
@@ -1581,8 +1916,18 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             "I could not load the available Boston 311 service-request data right now, so I cannot confirm a count.",
             AnswerMode.DETERMINISTIC_FALLBACK,
         )
-    family_label = _family_label(bundle.issue_family)
-    request_label = _request_label(bundle.issue_family)
+    if bundle.evidence_status is EvidenceStatus.OUTSIDE_COVERAGE:
+        requested = str(bundle.requested_period.get("label") or "that period")
+        through = _date_phrase(bundle.freshness.get("data_through_date"))
+        return (
+            f"I can't provide a reliable count for {requested} from the current local dataset. "
+            f"The available 311 service-request data contains records only through "
+            f"{through or 'the latest recorded date'}.",
+            AnswerMode.DETERMINISTIC_FALLBACK,
+        )
+    all_311 = plan.issue_scope == IssueScope.ALL_311.value
+    family_label = _family_label(bundle.issue_family, all_311=all_311)
+    request_label = _request_label(bundle.issue_family, all_311=all_311)
     period = bundle.executed_period.get("label", "the selected period")
     geo = bundle.geography
     street_label = str(geo.get("street") or "").title()
@@ -1612,10 +1957,12 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
     if plan.intent == "category_overview":
         categories = (bundle.facts.get(ToolName.CATEGORY_DISTRIBUTION.value) or {}).get("categories") or []
         if not categories:
-            lines.append(f"I did not find matching street-related 311 service requests in the available categories in Dorchester for {period}.")
+            scope_label = "311 service requests" if all_311 else "street-related 311 service requests in the available categories"
+            lines.append(f"I did not find matching {scope_label} in Dorchester for {period}.")
         else:
             listed = "; ".join(f"{item['label']} ({_int_value(item['count'])})" for item in categories)
-            lines.append(f"For {period}, the most common street-related 311 service requests in the available categories in Dorchester were {listed}.")
+            scope_label = "311 service-request categories" if all_311 else "street-related 311 service requests in the available categories"
+            lines.append(f"For {period}, the most common {scope_label} in Dorchester were {listed}.")
         _append_period_context(lines, prefix, bundle)
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_ENRICHED
@@ -1694,7 +2041,7 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
         lines.append(f"Source: {SOURCE_LABEL}.")
         return "\n\n".join(lines), AnswerMode.DETERMINISTIC_FALLBACK
     if plan.intent == "recent_reports" and count > 0:
-        request_word = _counted_request_label(count, bundle.issue_family)
+        request_word = _counted_request_label(count, bundle.issue_family, all_311=all_311)
         lines.append(
             f"During {period}, there {'was' if count == 1 else 'were'} {count} {request_word} {place_scope}."
         )
@@ -1719,7 +2066,10 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             )
         lines.append("Request records or their absence do not determine whether the physical condition was addressed.")
     else:
-        lines.append(f"I found {count} {_counted_request_label(count, bundle.issue_family)} {place_scope} for {period}.")
+        lines.append(
+            f"I found {count} {_counted_request_label(count, bundle.issue_family, all_311=all_311)} "
+            f"{place_scope} for {period}."
+        )
         lines.append(
             "These are service requests, not a verified count of distinct physical conditions."
         )
@@ -1786,7 +2136,10 @@ def _answer_task_projection(question: str, plan: StrictToolPlan, bundle: Evidenc
     }
     payload["scope"] = {
         "intent": plan.intent,
-        "issue_label": bundle.question_scope.get("issue_label") or _family_label(bundle.issue_family),
+        "issue_label": bundle.question_scope.get("issue_label") or _family_label(
+            bundle.issue_family,
+            all_311=plan.issue_scope == IssueScope.ALL_311.value,
+        ),
     }
     payload["task"] = {
         "requested_information": [key.replace("_", " ") for key in sorted(fact_keys)],
@@ -1827,7 +2180,7 @@ def _synthesis_prompt(question: str, bundle: EvidenceBundle, plan: StrictToolPla
         "Do not mention an evidence type, missing field, ranking, or limitation unless it appears in the answer task below. "
         + intent_instruction
         + "For a percentage change, use the absolute magnitude with the direction word increase or decrease; do not write a signed percentage. "
-        f"Call the records '{_request_label(bundle.issue_family)}', not complaints or reports. "
+        f"Call the records '{_request_label(bundle.issue_family, all_311=plan.issue_scope == IssueScope.ALL_311.value)}', not complaints or reports. "
         "Say that service requests are not necessarily distinct verified physical conditions. "
         "Use count-aware grammar: one request is recorded as open; multiple requests are recorded as open. "
         "Use the resident-friendly issue_family label from the evidence; never emit an all-caps enum or underscore identifier. "
@@ -1952,6 +2305,13 @@ def _bundle_date_ranges(bundle: EvidenceBundle) -> set[Tuple[date, date]]:
             )
         except (KeyError, TypeError, ValueError):
             continue
+    try:
+        requested_end = date.fromisoformat(str(bundle.requested_period["end_date_exclusive"]))
+        executed_end = date.fromisoformat(str(bundle.executed_period["end_date_exclusive"]))
+        if executed_end < requested_end:
+            ranges.add((executed_end, requested_end - timedelta(days=1)))
+    except (KeyError, TypeError, ValueError):
+        pass
     return ranges
 
 
@@ -2283,11 +2643,12 @@ def compose_311_answer(
 
 
 def _context_from_bundle(bundle: EvidenceBundle, plan: StrictToolPlan) -> Optional[Dict[str, Any]]:
-    if not plan.issue_family or plan.needs_clarification:
+    if plan.needs_clarification or plan.issue_scope == IssueScope.UNSPECIFIED.value:
         return None
     try:
         context = Active311FactContext(
             issue_family=plan.issue_family,
+            issue_scope=plan.issue_scope,
             geography=_geography_from_plan(plan),
             period_kind=str(bundle.executed_period.get("kind") or "RECENT"),
             executed_period=CivicPeriod(
@@ -2308,12 +2669,13 @@ def _context_from_bundle(bundle: EvidenceBundle, plan: StrictToolPlan) -> Option
 
 def _pending_context_from_plan(plan: StrictToolPlan) -> Optional[Dict[str, Any]]:
     """Persist only validated canonical scope needed to answer a clarification."""
-    if not plan.issue_family or not plan.needs_clarification:
+    if not plan.needs_clarification:
         return None
     try:
         period = _period_from_plan(plan)
         return Active311FactContext(
             issue_family=plan.issue_family,
+            issue_scope=plan.issue_scope,
             geography=_geography_from_plan(plan),
             period_kind=period.kind,
             executed_period=period,
@@ -2389,15 +2751,25 @@ def process_311_question(
     )
     family = IssueFamily(plan.issue_family) if plan.issue_family else None
     geography = _geography_from_plan(plan)
-    results, failures, tool_ms, timeout_stage = _execute_tools(
-        plan,
-        connection_factory=connection_factory,
-        family=family,
-        geography=geography,
-        period=executed,
-        freshness=fresh,
-        deadline=deadline,
-    )
+    if evidence_status is EvidenceStatus.OUTSIDE_COVERAGE:
+        results = {
+            ToolName.SOURCE_FRESHNESS.value: {"freshness": dict(fresh)},
+        }
+        failures: List[str] = []
+        tool_ms = 0
+        timeout_stage = None
+        executed_tool_count = 1
+    else:
+        results, failures, tool_ms, timeout_stage = _execute_tools(
+            plan,
+            connection_factory=connection_factory,
+            family=family,
+            geography=geography,
+            period=executed,
+            freshness=fresh,
+            deadline=deadline,
+        )
+        executed_tool_count = len(plan.tools)
     bundle = _bundle_from_execution(
         message=message, plan=plan, freshness=fresh, requested=requested, executed=executed,
         initial_status=evidence_status, limitations=limitations, results=results, failures=failures,
@@ -2419,7 +2791,7 @@ def process_311_question(
         planner_source=plan.planner_source,
         planner_ms=planner_ms,
         tool_execution_ms=tool_ms,
-        tool_count=len(plan.tools),
+        tool_count=executed_tool_count,
         synthesis_ms=composition.synthesis_ms,
         validation_ms=composition.validation_ms,
         repair_ms=composition.repair_ms,
