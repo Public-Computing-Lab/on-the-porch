@@ -17,6 +17,7 @@ for path in (str(ROOT), str(PORCH)):
 
 from answering_kernel import AnswerMode, EvidenceBundle, EvidenceStatus, GlobalDeadline, PlannerSource, StrictToolPlan  # noqa: E402
 from civic_311 import (  # noqa: E402
+    _answer_task_projection,
     CivicGeography,
     CivicPeriod,
     IssueFamily,
@@ -36,24 +37,66 @@ def check(condition: bool, message: str) -> None:
 
 
 def plan(intent: str = "recent_reports") -> StrictToolPlan:
+    outputs_by_intent = {
+        "recent_reports": (
+            OutputName.ISSUE_COUNT.value,
+            OutputName.STATUS_BREAKDOWN.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        ),
+        "street_status": (
+            OutputName.MATCHING_REQUESTS.value,
+            OutputName.STATUS_BREAKDOWN.value,
+            OutputName.RECENT_EXAMPLES.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        ),
+        "period_comparison": (
+            OutputName.PERIOD_COMPARISON.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        ),
+        "category_overview": (
+            OutputName.CATEGORY_DISTRIBUTION.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        ),
+        "top_streets": (
+            OutputName.TOP_STREETS.value,
+            OutputName.ISSUE_COUNT.value,
+            OutputName.SOURCE_FRESHNESS.value,
+        ),
+    }
+    tools_by_intent = {
+        "recent_reports": (
+            ToolName.ISSUE_COUNT.value,
+            ToolName.STATUS_BREAKDOWN.value,
+            ToolName.SOURCE_FRESHNESS.value,
+        ),
+        "street_status": (
+            ToolName.ISSUE_COUNT.value,
+            ToolName.STATUS_BREAKDOWN.value,
+            ToolName.RECENT_EXAMPLES.value,
+            ToolName.SOURCE_FRESHNESS.value,
+        ),
+        "period_comparison": (
+            ToolName.PERIOD_COMPARISON.value,
+            ToolName.SOURCE_FRESHNESS.value,
+        ),
+        "category_overview": (
+            ToolName.CATEGORY_DISTRIBUTION.value,
+            ToolName.SOURCE_FRESHNESS.value,
+        ),
+        "top_streets": (
+            ToolName.TOP_STREETS.value,
+            ToolName.ISSUE_COUNT.value,
+            ToolName.SOURCE_FRESHNESS.value,
+        ),
+    }
     return StrictToolPlan(
         domain="311",
         intent=intent,
         issue_family=IssueFamily.ROAD_SURFACE_POTHOLE.value,
         geography=CivicGeography().to_dict(),
         period=CivicPeriod("RECENT", "the last 7 days", date(2026, 7, 11), date(2026, 7, 18)).to_dict(),
-        outputs=(
-            OutputName.ISSUE_COUNT.value,
-            OutputName.STATUS_BREAKDOWN.value,
-            OutputName.TOP_STREETS.value,
-            OutputName.SOURCE_FRESHNESS.value,
-        ),
-        tools=(
-            ToolName.ISSUE_COUNT.value,
-            ToolName.STATUS_BREAKDOWN.value,
-            ToolName.TOP_STREETS.value,
-            ToolName.SOURCE_FRESHNESS.value,
-        ),
+        outputs=outputs_by_intent[intent],
+        tools=tools_by_intent[intent],
         needs_clarification=False,
         clarification_message=None,
         confidence=0.99,
@@ -61,9 +104,13 @@ def plan(intent: str = "recent_reports") -> StrictToolPlan:
     )
 
 
-def bundle() -> EvidenceBundle:
+def bundle(intent: str = "recent_reports") -> EvidenceBundle:
     return EvidenceBundle(
-        question_scope={"domain": "311", "intent": "recent_reports"},
+        question_scope={
+            "domain": "311",
+            "intent": intent,
+            "requested_outputs": list(plan(intent).outputs),
+        },
         issue_family=IssueFamily.ROAD_SURFACE_POTHOLE.value,
         geography=CivicGeography().to_dict(),
         requested_period={
@@ -250,12 +297,13 @@ def test_grounded_synthesis_uses_one_call_and_sanitized_evidence() -> None:
         check("pothole" in prompt.lower(), "resident-friendly issue label must reach synthesis")
         check("end_date_exclusive" not in prompt, "half-open storage date must not reach synthesis")
         check("end_date_inclusive" in prompt, "model evidence needs inclusive date semantics")
+        check("top_streets" not in prompt and "category_distribution" not in prompt, "off-task facts must not reach synthesis")
         return valid_synthesized_answer()
 
     outcome = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=GlobalDeadline.now(),
         synthesis_llm=synth,
         repair_llm=synth,
@@ -274,8 +322,8 @@ def test_synthesis_timeout_and_provider_unavailable_fall_back() -> None:
 
     timed_out = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=GlobalDeadline.now(),
         synthesis_llm=timeout,
     )
@@ -285,8 +333,8 @@ def test_synthesis_timeout_and_provider_unavailable_fall_back() -> None:
 
     unavailable = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=GlobalDeadline.now(),
     )
     check(unavailable.fallback_used and unavailable.synthesis_call_count == 0, "provider unavailable fallback")
@@ -323,8 +371,8 @@ def test_validation_failure_repairs_once_then_stops() -> None:
 
     repaired = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=GlobalDeadline.now(),
         synthesis_llm=bad,
         repair_llm=repair,
@@ -335,8 +383,8 @@ def test_validation_failure_repairs_once_then_stops() -> None:
 
     failed = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=GlobalDeadline.now(),
         synthesis_llm=bad,
         repair_llm=bad,
@@ -350,8 +398,8 @@ def test_deadline_pressure_skips_synthesis() -> None:
     deadline = GlobalDeadline.from_started_at(time.perf_counter() - 14.0)
     outcome = compose_311_answer(
         "Have people complained about potholes recently?",
-        bundle=bundle(),
-        plan=plan(),
+        bundle=bundle("street_status"),
+        plan=plan("street_status"),
         deadline=deadline,
         synthesis_llm=lambda *_args: calls.append(True) or valid_synthesized_answer(),
     )
@@ -377,6 +425,114 @@ def test_zero_result_uses_cautious_deterministic_answer() -> None:
     check("I did not find matching" in outcome.answer, "zero result needs cautious wording")
     check("There were no" not in outcome.answer and "I found 0" not in outcome.answer, "zero overclaim")
     check("formatted differently" in outcome.answer, "street normalization limitation")
+
+
+def test_task_scoped_projection_relevance_and_mode_policy() -> None:
+    recent = bundle()
+    recent.facts[ToolName.CATEGORY_DISTRIBUTION.value] = {
+        "categories": [{"label": "pothole", "count": 50}],
+    }
+    recent.model_facts = None
+    recent_projection = _answer_task_projection(
+        "Have people complained about potholes recently?",
+        plan(),
+        recent,
+    )
+    check(
+        set(recent_projection["facts"]) == {"issue_count", "status_breakdown"},
+        "recent projection must exclude street and category facts",
+    )
+    calls = []
+    recent_outcome = compose_311_answer(
+        "Have people complained about potholes recently?",
+        bundle=recent,
+        plan=plan(),
+        deadline=GlobalDeadline.now(),
+        synthesis_llm=lambda *_args: calls.append(True) or valid_synthesized_answer(),
+    )
+    check(not calls, "clear recent count/status answer must stay zero-model")
+    check(recent_outcome.mode is AnswerMode.DETERMINISTIC_ENRICHED, "recent deterministic mode")
+    check("street breakdown" not in recent_outcome.answer.lower(), "recent answer leaked street commentary")
+    check("most common" not in recent_outcome.answer.lower(), "recent answer leaked category ranking")
+
+    comparison = bundle("period_comparison")
+    comparison.facts = {
+        ToolName.PERIOD_COMPARISON.value: {
+            "current_count": 5,
+            "previous_count": 12,
+            "difference": -7,
+            "percentage_change": -58.3,
+        },
+        ToolName.CATEGORY_DISTRIBUTION.value: {
+            "categories": [{"label": "pothole", "count": 50}],
+        },
+    }
+    comparison.model_facts = None
+    comparison_projection = _answer_task_projection(
+        "Are pothole complaints getting worse?",
+        plan("period_comparison"),
+        comparison,
+    )
+    check(set(comparison_projection["facts"]) == {"period_comparison"}, "comparison projection scope")
+    comparison_calls = []
+    comparison_outcome = compose_311_answer(
+        "Are pothole complaints getting worse?",
+        bundle=comparison,
+        plan=plan("period_comparison"),
+        deadline=GlobalDeadline.now(),
+        synthesis_llm=lambda *_args: comparison_calls.append(True) or valid_synthesized_answer(),
+    )
+    check(not comparison_calls, "simple comparison must stay zero-model")
+    check(comparison_outcome.mode is AnswerMode.DETERMINISTIC_ENRICHED, "comparison deterministic mode")
+    check("decreased from 12 to 5" in comparison_outcome.answer, "comparison counts")
+    check("58.3%" in comparison_outcome.answer, "comparison percentage")
+    check("most common" not in comparison_outcome.answer.lower(), "comparison leaked category ranking")
+
+    category = bundle("category_overview")
+    category.facts = {
+        ToolName.CATEGORY_DISTRIBUTION.value: {
+            "categories": [{"label": "pothole", "count": 50}],
+        },
+    }
+    category.model_facts = None
+    category_projection = _answer_task_projection(
+        "What street problems are people reporting around Dorchester?",
+        plan("category_overview"),
+        category,
+    )
+    check(set(category_projection["facts"]) == {"category_distribution"}, "category projection retained")
+
+    street = bundle("street_status")
+    street.geography = CivicGeography(street="dorchester ave").to_dict()
+    street.limitations.append("The matching records do not include usable street fields.")
+    street_projection = _answer_task_projection(
+        "Has anything been done about drainage on Dorchester Ave?",
+        plan("street_status"),
+        street,
+    )
+    check("status_breakdown" in street_projection["facts"], "status evidence retained")
+    check(any("street fields" in item for item in street_projection["limitations"]), "street limitation retained")
+
+    top_projection = _answer_task_projection(
+        "Which streets have the most pothole requests?",
+        plan("top_streets"),
+        recent,
+    )
+    check("top_streets" in top_projection["facts"], "top-street evidence retained")
+
+    recent_answer = recent_outcome.answer
+    valid, issues = validate_claims(
+        recent_answer + " Pothole requests were most common.",
+        recent,
+        plan(),
+    )
+    check(not valid and "irrelevant_category_ranking" in issues, "off-task ranking must fail")
+    valid, issues = validate_claims(
+        recent_answer + " A usable street breakdown was not available.",
+        recent,
+        plan(),
+    )
+    check(not valid and "irrelevant_street_commentary" in issues, "off-task street comment must fail")
 
 
 def test_validator_rejects_unsupported_claims() -> None:
@@ -475,6 +631,7 @@ def main() -> None:
         test_validation_failure_repairs_once_then_stops,
         test_deadline_pressure_skips_synthesis,
         test_zero_result_uses_cautious_deterministic_answer,
+        test_task_scoped_projection_relevance_and_mode_policy,
         test_validator_rejects_unsupported_claims,
     ]
     for test in tests:

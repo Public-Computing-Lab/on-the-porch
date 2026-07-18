@@ -106,6 +106,15 @@ def test_aliases_and_rule_plans() -> None:
     overview = plan_311_question("Most common 311 street problems this month?", now=date(2026, 7, 17))
     check(overview.intent == "category_overview", "category overview must be deterministic")
     check(overview.tools == (ToolName.CATEGORY_DISTRIBUTION.value, ToolName.SOURCE_FRESHNESS.value), "overview tools")
+    overview_bundle = _bundle()
+    overview_bundle.facts = {
+        ToolName.CATEGORY_DISTRIBUTION.value: {
+            "categories": [{"label": "pothole", "count": 5}],
+        },
+    }
+    overview_answer, _ = deterministic_answer(overview_bundle, overview)
+    check("available categories" in overview_answer, "category wording must explain bounded coverage")
+    check("supported street-related" not in overview_answer, "internal capability wording must stay hidden")
 
     streets = plan_311_question("Which streets have the most pothole reports?", now=date(2026, 7, 17))
     check(streets.intent == "top_streets", "top-streets question must keep its intent")
@@ -177,7 +186,8 @@ def test_latest_usable_period_and_safe_answer() -> None:
     check(executed.start == date(2026, 6, 21), "latest usable rolling period")
     answer, _mode = deterministic_answer(_bundle(), _plan(family=IssueFamily.ROAD_SURFACE_POTHOLE))
     check("911" not in answer, "ordinary 311 answer must not use emergency wording")
-    check("closed request does not verify" in answer.lower(), "status caveat must remain")
+    check("not necessarily distinct verified physical conditions" in answer.lower(), "service-request caveat must remain")
+    check("street" not in answer.lower(), "recent answer must not volunteer street rankings")
     valid, issues = validate_claims(answer, _bundle())
     check(valid, f"deterministic answer should validate: {issues}")
     unsafe, unsafe_issues = validate_claims("The 12 reports were fixed. Call 911.", _bundle())

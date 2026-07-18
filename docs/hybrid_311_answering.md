@@ -24,9 +24,11 @@ The path is rule-first, with optional model assistance controlled by
   `CIVIC_311_SYNTHESIS_ENABLED`;
 - `required`: production startup requires provider credentials.
 
-Exact counts, clear top-street follow-ups, and clear status follow-ups use zero model calls.
-Rule-resolved recent-report, street-status, comparison, and category-overview questions may
-use one synthesis call when the structured evidence benefits from natural composition.
+Exact counts, recent count/status summaries, simple period comparisons, category rankings,
+clear top-street follow-ups, and clear status follow-ups use zero model calls. Synthesis is
+used only when it adds semantic or communicative value beyond the deterministic evidence
+composer, such as a compound street-status request that combines matching records, status,
+examples, and a physical-completion caveat.
 The planner runs only for ambiguous compound 311 requests that deterministic rules cannot
 safely decompose. Model output is limited to a strict, allowlisted plan; it cannot supply
 SQL, arbitrary tool names, source identifiers, or resident-facing facts.
@@ -38,6 +40,12 @@ SQL, arbitrary tool names, source identifiers, or resident-facing facts.
 - All database parameters are bound values and every query is from a fixed
   tool registry.
 - The source freshness and covered date range are included in evidence.
+- Optional synthesis receives a task-scoped projection of the full evidence bundle. Facts
+  about categories, streets, status, or comparisons are included only when the plan asks
+  for that information; the full bundle remains available for validation and diagnostics.
+- Deterministic validation rejects supported but irrelevant category rankings, street-data
+  commentary, status claims, comparison claims, and work-completion caveats outside their
+  requested answer task.
 - Requests outside available coverage use the latest comparable usable period
   and say so rather than imply live data.
 - A source that lacks street fields produces an explicit street-coverage
