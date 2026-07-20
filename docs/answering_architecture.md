@@ -271,9 +271,11 @@ coverage is visible to sufficiency and composition; it is never collapsed into z
 
 ## 20. Minimal target module arrangement
 
-Keep the Flask endpoints thin. `model_led_orchestrator.py` owns the provider-neutral decision
-contract, normalization, and prompt. `civic_tool_catalog.py` owns the generic typed registry.
-`model_call_ledger.py` owns the one-orchestrator/one-synthesis invariant.
+Keep the Flask endpoints thin. `model_led_orchestrator.py` retains shared normalization and the
+provider-neutral foundation. `semantic_planner.py` owns the compact non-executable first-call
+contract and prompt. `semantic_plan_compiler.py` maps validated semantic tasks to the generic
+typed registry in `civic_tool_catalog.py`. `model_call_ledger.py` owns the
+one-orchestrator/one-synthesis invariant.
 `civic_evidence.py` owns the domain-neutral tool-result envelope. Cohesive domain capabilities
 for events, 311, crime, and document retrieval continue to execute deterministic operations.
 Reuse existing state, idempotency, persistence, freshness, request-budget, and provider
@@ -319,6 +321,17 @@ default, or certify worker counts without RSS and concurrency measurements.
 4. **Legacy retirement and tuning:** remove replaced semantic rules, planner/repair paths, and
    duplicated orchestration only after caller/import/runtime proof. Tune model choice, pools,
    caches, and worker topology from measured production-like behavior.
+
+The July 19, 2026 executable-plan development gate did not identify an adequate candidate. The
+follow-up design replaced executable tool requests with compact semantic tasks and a deterministic
+compiler, reduced the prompt by about 76%, and moved offline evaluation to the maintained Gemini
+SDK. The final 21-case Flash Lite plain-JSON smoke still reached only 95.24% provider success and
+90.48% schema compliance, with one unsupported direct civic fact. Pro failed the required native
+enum health check. No candidate became eligible for full semantic development evaluation, no
+model was selected, and the sealed holdout was not run. Phase 2 cutover remains blocked until an
+operational candidate clears smoke and development gates. Any future shadow diagnostic must be
+post-response/offline or independently capped below one second so it cannot delay the
+authoritative resident answer.
 
 ## 25. Semantic debt and deprecation map
 

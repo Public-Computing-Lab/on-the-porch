@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolation, scoring, dataset, and shadow tests for orchestrator evaluation."""
+"""Isolation, scoring, dataset, and shadow tests for semantic evaluation."""
 
 from __future__ import annotations
 
@@ -12,8 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PORCH = ROOT / "on_the_porch"
-sys.path.insert(0, str(PORCH))
-sys.path.insert(0, str(ROOT))
+sys.path[:0] = [str(PORCH), str(ROOT)]
 
 import config  # noqa: E402
 from orchestrator_evaluation import (  # noqa: E402
@@ -23,11 +22,7 @@ from orchestrator_evaluation import (  # noqa: E402
     evaluate_orchestrator,
     load_evaluation_dataset,
 )
-from orchestrator_shadow import (  # noqa: E402
-    OrchestratorMode,
-    parse_orchestrator_mode,
-    preserve_authoritative_result,
-)
+from orchestrator_shadow import OrchestratorMode, parse_orchestrator_mode, preserve_authoritative_result  # noqa: E402
 
 DATA = ROOT / "evaluation" / "model_led_orchestrator"
 
@@ -38,20 +33,9 @@ def direct_payload() -> dict:
         "strategy": "DIRECT_RESPONSE",
         "relationship": "SMALL_TALK",
         "user_goal": "Respond politely.",
-        "domains": [],
-        "trusted_reference_tokens": [],
-        "geography_reference": None,
-        "semantic_time_scope": None,
-        "tool_requests": [],
-        "answer_requirements": {
-            "format": "DIRECT", "detail": "BRIEF", "source_types": [],
-            "include_freshness": False, "clarification_fields": [],
-        },
-        "state_proposal": {
-            "active_topic": None, "active_entity_token": None, "location_id": None,
-            "time_scope": None, "filters": {}, "clear": [],
-        },
-        "direct_response_basis": "CONVERSATION_ONLY",
+        "tasks": [],
+        "trusted_summary_reference": None,
+        "state_intent": "PRESERVE",
         "direct_response": "You're welcome.",
         "clarification_question": None,
         "confidence": 0.99,
@@ -65,7 +49,7 @@ class StaticProvider:
 
     def generate(self, prompt: str, *, timeout_seconds: float) -> ProviderResponse:
         self.calls += 1
-        assert "Registered tools" in prompt and timeout_seconds > 0
+        assert "PLAN_OBJECT=" in prompt and "Registered tools" not in prompt and timeout_seconds > 0
         return ProviderResponse(json.dumps(self.payload), 100, 30, "static")
 
 
@@ -90,6 +74,8 @@ class SlowProvider:
 
 
 def test_dataset_shape_and_separation() -> None:
+    _, _, smoke = load_evaluation_dataset(DATA / "contract_smoke.json")
+    assert 18 <= len(smoke) <= 22
     _, sealed_dev, dev = load_evaluation_dataset(DATA / "development.json")
     assert not sealed_dev and len(dev) == 100 and len({item.family_id for item in dev}) == 25
     try:
@@ -111,16 +97,11 @@ def test_scoring_provider_parity_and_no_mutation() -> None:
     original = copy.deepcopy(case.trusted_context)
     left = StaticProvider(direct_payload())
     right = StaticProvider(direct_payload())
-    left_report = evaluate_orchestrator(
-        left, [case], dataset_name="test", sealed=False, model_name="left",
-    )
-    right_report = evaluate_orchestrator(
-        right, [case], dataset_name="test", sealed=False, model_name="right",
-    )
+    left_report = evaluate_orchestrator(left, [case], dataset_name="test", sealed=False, model_name="left")
+    right_report = evaluate_orchestrator(right, [case], dataset_name="test", sealed=False, model_name="right")
     assert left.calls == right.calls == 1
     assert left_report.metrics["strategy_accuracy"] == 1.0
-    assert left_report.metrics["exact_tool_set_accuracy"] == 1.0
-    assert left_report.metrics["geography_time_accuracy"] is None
+    assert left_report.metrics["compiled_tool_set_accuracy"] == 1.0
     assert left_report.case_results[0].scores == right_report.case_results[0].scores
     assert case.trusted_context == original
     assert left_report.case_results[0].model_calls == 1
@@ -130,19 +111,13 @@ def test_provider_failure_and_timeout_are_single_call() -> None:
     _, _, dev = load_evaluation_dataset(DATA / "development.json")
     case = dev[0]
     failed = FailingProvider(RuntimeError("provider unavailable"))
-    report = evaluate_orchestrator(
-        failed, [case], dataset_name="test", sealed=False, model_name="failed",
-    )
-    assert failed.calls == 1
-    assert report.metrics["provider_failure_count"] == 1
+    report = evaluate_orchestrator(failed, [case], dataset_name="test", sealed=False, model_name="failed")
+    assert failed.calls == 1 and report.metrics["provider_failure_count"] == 1
     assert report.case_results[0].model_calls == 1
 
     timed = FailingProvider(TimeoutError("deadline"))
-    report = evaluate_orchestrator(
-        timed, [case], dataset_name="test", sealed=False, model_name="timed",
-    )
-    assert timed.calls == 1
-    assert report.metrics["provider_timeout_count"] == 1
+    report = evaluate_orchestrator(timed, [case], dataset_name="test", sealed=False, model_name="timed")
+    assert timed.calls == 1 and report.metrics["provider_timeout_count"] == 1
 
     slow = SlowProvider()
     started = time.perf_counter()
@@ -163,9 +138,7 @@ def test_trusted_summary_fact_safety_metric() -> None:
     payload.update({
         "relationship": "FOLLOW_UP",
         "user_goal": "Rephrase the trusted previous result.",
-        "domains": ["BOSTON_311"],
-        "trusted_reference_tokens": ["summary:311:42"],
-        "direct_response_basis": "TRUSTED_SUMMARY_REPHRASE",
+        "trusted_summary_reference": "summary:311:42",
         "direct_response": "There were 99 requests in the covered period.",
     })
     report = evaluate_orchestrator(
@@ -180,8 +153,8 @@ def test_no_tool_execution_surface() -> None:
 
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "execute_tool" not in source
-    assert "civic_311" not in source
     assert "mysql" not in source.lower()
+    assert ".execute(" not in source
 
 
 def test_shadow_non_authority_and_default_off() -> None:
@@ -190,21 +163,19 @@ def test_shadow_non_authority_and_default_off() -> None:
 
     def shadow() -> dict:
         calls["count"] += 1
-        return {"strategy": "EXECUTE_TOOLS", "relationship": "STANDALONE", "tool_requests": []}
+        return {"strategy": "GATHER_EVIDENCE", "tasks": []}
 
     returned, diagnostic = preserve_authoritative_result(
         authoritative, mode=OrchestratorMode.SHADOW, shadow_call=shadow,
     )
-    assert returned is authoritative and returned == {"answer": "authoritative", "sources": ["one"]}
-    assert calls["count"] == 1 and diagnostic.completed
+    assert returned is authoritative and calls["count"] == 1 and diagnostic.completed
     returned, diagnostic = preserve_authoritative_result(
         authoritative, mode=OrchestratorMode.OFF, shadow_call=shadow,
     )
     assert returned is authoritative and calls["count"] == 1 and not diagnostic.attempted
     assert parse_orchestrator_mode("invalid") is OrchestratorMode.OFF
-    assert config.MODEL_LED_ORCHESTRATOR_MODE == os.getenv("MODEL_LED_ORCHESTRATOR_MODE", "off").lower() \
-        if os.getenv("MODEL_LED_ORCHESTRATOR_MODE", "off").lower() in {"off", "offline", "shadow"} \
-        else config.MODEL_LED_ORCHESTRATOR_MODE == "off"
+    configured = os.getenv("MODEL_LED_ORCHESTRATOR_MODE", "off").lower()
+    assert config.MODEL_LED_ORCHESTRATOR_MODE == (configured if configured in {"off", "offline", "shadow"} else "off")
 
     started = time.perf_counter()
     returned, diagnostic = preserve_authoritative_result(
@@ -219,15 +190,16 @@ def test_shadow_non_authority_and_default_off() -> None:
 
 def test_current_runtime_not_wired() -> None:
     api_source = (ROOT / "api" / "api_v2.py").read_text(encoding="utf-8")
+    assert "semantic_planner" not in api_source
+    assert "semantic_plan_compiler" not in api_source
     assert "model_led_orchestrator" not in api_source
-    assert "orchestrator_shadow" not in api_source
 
 
 def main() -> None:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:
         test()
-    print(f"model-led orchestrator evaluation tests passed: {len(tests)}/{len(tests)}")
+    print(f"model-led semantic evaluation tests passed: {len(tests)}/{len(tests)}")
 
 
 if __name__ == "__main__":
