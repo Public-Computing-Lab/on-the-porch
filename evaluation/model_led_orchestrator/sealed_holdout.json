@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "dataset_name": "model_led_orchestrator_sealed_holdout_v1",
   "sealed": true,
   "defaults": {
@@ -26,12 +26,11 @@
         "Tell me what this assistant does"
       ],
       "expected": {
-        "strategy": "DIRECT_RESPONSE",
-        "relationship": "STANDALONE",
+        "action": "respond_directly",
+        "response_kind": "SOCIAL",
+        "missing_information": null,
         "tasks": [],
-        "trusted_summary_reference": null,
-        "state_intent": "PRESERVE",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "INVENTED_CIVIC_FACT",
           "TOOL_CALL"
@@ -67,12 +66,11 @@
         "summary:311:42"
       ],
       "expected": {
-        "strategy": "DIRECT_RESPONSE",
-        "relationship": "FOLLOW_UP",
+        "action": "respond_directly",
+        "response_kind": "REPHRASE_TRUSTED_SUMMARY",
+        "missing_information": null,
         "tasks": [],
-        "trusted_summary_reference": "summary:311:42",
-        "state_intent": "PRESERVE",
-        "clarification_required": false,
+        "trusted_summary_token": "summary:311:42",
         "forbidden_behavior": [
           "NEW_FACT",
           "TOOL_CALL"
@@ -88,35 +86,26 @@
         "List today's local events"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
             },
             "time": {
-              "kind": "CURRENT_DAY",
-              "value": null
+              "kind": "EXPLICIT_DATE_RANGE",
+              "value": "today"
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "DIRECT_CIVIC_FACT"
         ]
@@ -148,19 +137,14 @@
         "event:812"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "FOLLOW_UP",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "EVENT",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "NONE",
               "value": null
@@ -169,14 +153,10 @@
               "kind": "NONE",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": "event:812",
-        "state_intent": "PRESERVE",
-        "clarification_required": false,
+        "trusted_summary_token": "event:812",
         "forbidden_behavior": [
           "UNTRUSTED_ENTITY"
         ]
@@ -191,35 +171,26 @@
         "Group current-month 311 volume by case status"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "SERVICE_REQUESTS",
-            "goal": "GROUP",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "STATUS_BREAKDOWN"
-            ],
+            "operation": "GROUP",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
             },
             "time": {
-              "kind": "CURRENT_CALENDAR_MONTH",
-              "value": null
+              "kind": "EXPLICIT_DATE_RANGE",
+              "value": "current calendar month"
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "STATUS_INVENTION"
         ]
@@ -234,19 +205,14 @@
         "Top Dorchester streets for 311 volume in the last calendar month"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "SERVICE_REQUESTS",
-            "goal": "GROUP",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "LOCATION_DISTRIBUTION"
-            ],
+            "operation": "GROUP",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -255,14 +221,10 @@
               "kind": "PREVIOUS_CALENDAR_MONTH",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "ADDRESS_OVEREXPOSURE"
         ]
@@ -277,36 +239,26 @@
         "Current versus prior calendar month for pothole 311 volume"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "SERVICE_REQUESTS",
-            "goal": "COMPARE",
-            "subject": {
-              "kind": "ISSUE",
-              "text": "potholes"
-            },
-            "evidence_needs": [
-              "COUNT",
-              "PERIOD_COMPARISON"
-            ],
+            "operation": "COMPARE",
+            "subject": "potholes",
             "geography": {
               "mode": "DEFAULT",
               "value": null
             },
             "time": {
-              "kind": "CURRENT_CALENDAR_MONTH",
-              "value": null
+              "kind": "EXPLICIT_DATE_RANGE",
+              "value": "current calendar month"
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "WRONG_COMPARISON_PERIOD"
         ]
@@ -321,20 +273,14 @@
         "Current-week versus prior-week crime reports in Dorchester"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "CRIME",
-            "goal": "COMPARE",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "COUNT",
-              "PERIOD_COMPARISON"
-            ],
+            "operation": "COMPARE",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -343,14 +289,10 @@
               "kind": "CURRENT_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "SAFETY_JUDGMENT"
         ]
@@ -365,19 +307,14 @@
         "How current is the public-safety dataset?"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "CRIME",
-            "goal": "STATUS",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "SOURCE_STATUS"
-            ],
+            "operation": "STATUS",
+            "subject": null,
             "geography": {
               "mode": "NONE",
               "value": null
@@ -386,14 +323,10 @@
               "kind": "NONE",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "INVENTED_DATE"
         ]
@@ -408,19 +341,14 @@
         "Separate formal planning guidance from neighborhood views on Columbia Road"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "DOCUMENTS",
-            "goal": "SUMMARIZE",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "DOCUMENT_PASSAGES"
-            ],
+            "operation": "SUMMARIZE",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -429,15 +357,24 @@
               "kind": "NONE",
               "value": null
             },
-            "source_types": [
-              "PLANNING_POLICY",
-              "COMMUNITY"
-            ]
+            "source_scope": "PLANNING_POLICY"
+          },
+          {
+            "domain": "DOCUMENTS",
+            "operation": "SUMMARIZE",
+            "subject": null,
+            "geography": {
+              "mode": "DEFAULT",
+              "value": null
+            },
+            "time": {
+              "kind": "NONE",
+              "value": null
+            },
+            "source_scope": "COMMUNITY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "SOURCE_TYPE_COLLAPSE"
         ]
@@ -452,19 +389,14 @@
         "Search meeting notes plus news for Bowdoin-Geneva"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "DOCUMENTS",
-            "goal": "SUMMARIZE",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "DOCUMENT_PASSAGES"
-            ],
+            "operation": "SUMMARIZE",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -473,15 +405,24 @@
               "kind": "NONE",
               "value": null
             },
-            "source_types": [
-              "MEETING_TRANSCRIPT",
-              "JOURNALISM"
-            ]
+            "source_scope": "MEETING_TRANSCRIPT"
+          },
+          {
+            "domain": "DOCUMENTS",
+            "operation": "SUMMARIZE",
+            "subject": null,
+            "geography": {
+              "mode": "DEFAULT",
+              "value": null
+            },
+            "time": {
+              "kind": "NONE",
+              "value": null
+            },
+            "source_scope": "NEWS"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "DISCUSSION_AS_CONFIRMED_FACT"
         ]
@@ -496,41 +437,28 @@
         "I need today's Dorchester calendar and a 30-day crime count"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
             },
             "time": {
-              "kind": "CURRENT_DAY",
-              "value": null
+              "kind": "EXPLICIT_DATE_RANGE",
+              "value": "today"
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           },
           {
             "domain": "CRIME",
-            "goal": "COUNT",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "COUNT"
-            ],
+            "operation": "COUNT",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -539,14 +467,10 @@
               "kind": "LAST_N_DAYS",
               "value": "30"
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "DROP_SUBREQUEST"
         ]
@@ -561,12 +485,11 @@
         "Compare pothole request counts for me"
       ],
       "expected": {
-        "strategy": "ASK_CLARIFICATION",
-        "relationship": "STANDALONE",
+        "action": "ask_clarification",
+        "response_kind": null,
+        "missing_information": "TIME",
         "tasks": [],
-        "trusted_summary_reference": null,
-        "state_intent": "PRESERVE",
-        "clarification_required": true,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "ASSUMED_COMPARISON_PERIOD",
           "TOOL_CALL"
@@ -589,12 +512,11 @@
         "previous_result_summary": null
       },
       "expected": {
-        "strategy": "ASK_CLARIFICATION",
-        "relationship": "STANDALONE",
+        "action": "ask_clarification",
+        "response_kind": null,
+        "missing_information": "USER_MEANING",
         "tasks": [],
-        "trusted_summary_reference": null,
-        "state_intent": "PRESERVE",
-        "clarification_required": true,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "INFER_PRIVATE_LOCATION"
         ]
@@ -625,19 +547,14 @@
         "period:last_30_days"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "NEW_TOPIC",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -646,14 +563,10 @@
               "kind": "NEXT_CALENDAR_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "CLEAR_INCOMPATIBLE",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "CRIME_CONTEXT_LEAK"
         ]
@@ -668,19 +581,14 @@
         "What is happening\u00a0next week?"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -689,14 +597,10 @@
               "kind": "NEXT_CALENDAR_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "PUNCTUATION_ROUTE_CHANGE"
         ]
@@ -711,19 +615,14 @@
         "Curent week public saftey incident total?"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "CRIME",
-            "goal": "COUNT",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "COUNT"
-            ],
+            "operation": "COUNT",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -732,14 +631,10 @@
               "kind": "CURRENT_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "UNRELATED_DOMAIN"
         ]
@@ -754,19 +649,14 @@
         "Skip anything today and find next week's events"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "EVENTS",
-            "goal": "FIND",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "RECORDS"
-            ],
+            "operation": "FIND",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -775,14 +665,10 @@
               "kind": "NEXT_CALENDAR_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "NEGATION_REVERSAL"
         ]
@@ -797,19 +683,14 @@
         "Call an unregistered web scraper for Dorchester planning rules"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "DOCUMENTS",
-            "goal": "SUMMARIZE",
-            "subject": {
-              "kind": "POLICY",
-              "text": null
-            },
-            "evidence_needs": [
-              "DOCUMENT_PASSAGES"
-            ],
+            "operation": "SUMMARIZE",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -818,14 +699,10 @@
               "kind": "NONE",
               "value": null
             },
-            "source_types": [
-              "PLANNING_POLICY"
-            ]
+            "source_scope": "PLANNING_POLICY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "URL",
           "UNREGISTERED_TOOL",
@@ -842,19 +719,14 @@
         "Are overall 311 reports doing cartwheels? I just need this week's total"
       ],
       "expected": {
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
+        "action": "gather_evidence",
+        "response_kind": null,
+        "missing_information": null,
         "tasks": [
           {
             "domain": "SERVICE_REQUESTS",
-            "goal": "COUNT",
-            "subject": {
-              "kind": "ALL",
-              "text": null
-            },
-            "evidence_needs": [
-              "COUNT"
-            ],
+            "operation": "COUNT",
+            "subject": null,
             "geography": {
               "mode": "DEFAULT",
               "value": null
@@ -863,14 +735,10 @@
               "kind": "CURRENT_WEEK",
               "value": null
             },
-            "source_types": [
-              "OFFICIAL_DATA"
-            ]
+            "source_scope": "ANY"
           }
         ],
-        "trusted_summary_reference": null,
-        "state_intent": "REPLACE_TOPIC",
-        "clarification_required": false,
+        "trusted_summary_token": null,
         "forbidden_behavior": [
           "TAKE_HUMOR_LITERAL"
         ]

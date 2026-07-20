@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Contract and deterministic compiler tests for semantic planning."""
+"""Contract and compiler tests for the three semantic planner actions."""
 
 from __future__ import annotations
 
 import copy
-import json
 import sys
 from pathlib import Path
 
@@ -14,39 +13,49 @@ sys.path[:0] = [str(PORCH), str(ROOT)]
 
 from model_led_orchestrator import OrchestratorContractError, normalize_resident_input  # noqa: E402
 from orchestrator_evaluation import _expected_plan, load_evaluation_dataset  # noqa: E402
-from semantic_plan_compiler import compile_semantic_plan  # noqa: E402
-from semantic_planner import SemanticPlan, build_semantic_planner_prompt, semantic_plan_response_schema  # noqa: E402
+from semantic_plan_compiler import DerivedStateEffect, compile_semantic_plan  # noqa: E402
+from semantic_planner import (  # noqa: E402
+    PlannerAction,
+    SemanticPlan,
+    SemanticSafetyError,
+    build_semantic_planner_prompt,
+    planner_function_declarations,
+)
 
 DATA = ROOT / "evaluation" / "model_led_orchestrator"
 CONTEXT = {
-    "default_geography": {"scope": "NEIGHBORHOOD", "location_id": "dorchester", "name": "Dorchester"},
-    "active_topic": None, "active_entity": None, "time_scope": None,
+    "default_geography": {
+        "scope": "NEIGHBORHOOD", "location_id": "dorchester", "name": "Dorchester",
+    },
+    "active_topic": None,
+    "active_entity": None,
+    "time_scope": None,
     "previous_result_summary": None,
 }
 
 
-def plan_payload(**changes) -> dict:
-    value = {
-        "schema_version": "1",
-        "strategy": "GATHER_EVIDENCE",
-        "relationship": "STANDALONE",
-        "user_goal": "Count service requests from the previous month.",
-        "tasks": [{
-            "domain": "SERVICE_REQUESTS", "goal": "COUNT",
-            "subject": {"kind": "ALL", "text": None},
-            "evidence_needs": ["COUNT"],
-            "geography": {"mode": "DEFAULT", "value": None},
-            "time": {"kind": "PREVIOUS_CALENDAR_MONTH", "value": None},
-            "source_types": ["OFFICIAL_DATA"],
-        }],
-        "trusted_summary_reference": None,
-        "state_intent": "REPLACE_TOPIC",
-        "direct_response": None,
-        "clarification_question": None,
-        "confidence": 0.95,
+def gather_payload(**changes) -> dict:
+    task = {
+        "domain": "SERVICE_REQUESTS",
+        "operation": "COUNT",
+        "subject": None,
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "PREVIOUS_CALENDAR_MONTH", "value": None},
+        "source_scope": "OFFICIAL",
     }
+    task.update(changes.pop("task", {}))
+    value = {"action": "gather_evidence", "arguments": {"tasks": [task]}}
     value.update(changes)
     return value
+
+
+def parse(value: dict, *, context=None, tokens=()) -> SemanticPlan:
+    return SemanticPlan.from_action(
+        value["action"],
+        value["arguments"],
+        trusted_context=context or CONTEXT,
+        available_trusted_reference_tokens=tokens,
+    )
 
 
 def assert_raises(exc_type, function, *args, **kwargs) -> None:
@@ -57,108 +66,121 @@ def assert_raises(exc_type, function, *args, **kwargs) -> None:
     raise AssertionError(f"expected {exc_type.__name__}")
 
 
-def test_strategy_cross_field_validation() -> None:
-    gather = SemanticPlan.from_mapping(plan_payload())
-    assert gather.strategy.value == "GATHER_EVIDENCE" and len(gather.tasks) == 1
-
-    direct = plan_payload(
-        strategy="DIRECT_RESPONSE", tasks=[], state_intent="PRESERVE",
-        direct_response="Happy to help.",
+def test_three_actions_and_generic_canonicalization() -> None:
+    gather = parse(gather_payload(action="GATHER-EVIDENCE"))
+    assert gather.action is PlannerAction.GATHER_EVIDENCE
+    direct = parse({
+        "action": "respond directly",
+        "arguments": {"response_kind": "acknowledgement", "response_text": "Thanks."},
+    })
+    assert direct.action is PlannerAction.RESPOND_DIRECTLY
+    clarify = parse({
+        "action": "ask_clarification",
+        "arguments": {"question": "Which area?", "missing_information": "geography"},
+    })
+    assert clarify.action is PlannerAction.ASK_CLARIFICATION
+    assert_raises(
+        OrchestratorContractError,
+        parse,
+        {"action": "gather_evidence", "arguments": {"tasks": [], "state": "replace"}},
     )
-    SemanticPlan.from_mapping(direct)
-    direct["tasks"] = copy.deepcopy(plan_payload()["tasks"])
-    assert_raises(OrchestratorContractError, SemanticPlan.from_mapping, direct)
 
-    clarify = plan_payload(
-        strategy="ASK_CLARIFICATION", tasks=[], state_intent="PRESERVE",
-        clarification_question="Which time periods should I compare?",
+
+def test_direct_response_fact_and_trusted_summary_safety() -> None:
+    assert_raises(SemanticSafetyError, parse, {
+        "action": "respond_directly",
+        "arguments": {
+            "response_kind": "SOCIAL",
+            "response_text": "Dorchester had 42 requests last month.",
+        },
+    })
+    context = copy.deepcopy(CONTEXT)
+    context["previous_result_summary"] = {
+        "token": "summary:311:42", "text": "The validated result found 42 requests in Dorchester.",
+    }
+    plan = parse({
+        "action": "respond_directly",
+        "arguments": {
+            "response_kind": "REPHRASE_TRUSTED_SUMMARY",
+            "response_text": "There were 42 requests in Dorchester.",
+            "trusted_summary_token": "summary:311:42",
+        },
+    }, context=context, tokens=("summary:311:42",))
+    assert_raises(
+        SemanticSafetyError,
+        parse,
+        gather_payload(task={"subject": "Use aggregate_311 directly"}),
     )
-    SemanticPlan.from_mapping(clarify)
-    clarify["direct_response"] = "I found facts."
-    assert_raises(OrchestratorContractError, SemanticPlan.from_mapping, clarify)
+    assert plan.trusted_summary_token == "summary:311:42"
+    assert_raises(SemanticSafetyError, parse, {
+        "action": "respond_directly",
+        "arguments": {
+            "response_kind": "REPHRASE_TRUSTED_SUMMARY",
+            "response_text": "There were 99 requests in Cambridge.",
+            "trusted_summary_token": "summary:311:42",
+        },
+    }, context=context, tokens=("summary:311:42",))
 
 
-def test_compiler_domain_evidence_mappings() -> None:
-    cases = [
-        (plan_payload(), ["aggregate_311"]),
-        (plan_payload(tasks=[{
-            "domain": "SERVICE_REQUESTS", "goal": "GROUP",
-            "subject": {"kind": "ALL", "text": None},
-            "evidence_needs": ["CATEGORY_DISTRIBUTION"],
-            "geography": {"mode": "DEFAULT", "value": None},
-            "time": {"kind": "CURRENT_CALENDAR_MONTH", "value": None},
-            "source_types": ["OFFICIAL_DATA"],
-        }]), ["aggregate_311"]),
-        (plan_payload(tasks=[{
-            "domain": "EVENTS", "goal": "FIND",
-            "subject": {"kind": "ALL", "text": None}, "evidence_needs": ["RECORDS"],
-            "geography": {"mode": "DEFAULT", "value": None},
-            "time": {"kind": "CURRENT_WEEK", "value": None},
-            "source_types": ["OFFICIAL_DATA"],
-        }]), ["query_events"]),
-        (plan_payload(tasks=[{
-            "domain": "CRIME", "goal": "COMPARE",
-            "subject": {"kind": "ALL", "text": None},
-            "evidence_needs": ["COUNT", "PERIOD_COMPARISON"],
-            "geography": {"mode": "DEFAULT", "value": None},
-            "time": {"kind": "CURRENT_WEEK", "value": None},
-            "source_types": ["OFFICIAL_DATA"],
-        }]), ["aggregate_crime"]),
-        (plan_payload(tasks=[{
-            "domain": "DOCUMENTS", "goal": "SUMMARIZE",
-            "subject": {"kind": "POLICY", "text": None},
-            "evidence_needs": ["DOCUMENT_PASSAGES"],
-            "geography": {"mode": "DEFAULT", "value": None},
-            "time": {"kind": "NONE", "value": None},
-            "source_types": ["PLANNING_POLICY"],
-        }]), ["search_documents"]),
+def test_compiler_derives_tools_status_and_state() -> None:
+    result = compile_semantic_plan(parse(gather_payload()), trusted_context=CONTEXT)
+    assert [item.tool_id.value for item in result.tool_requests] == [
+        "aggregate_311", "get_source_status",
     ]
-    for raw, expected in cases:
-        compiled = compile_semantic_plan(
-            SemanticPlan.from_mapping(raw), trusted_context=CONTEXT,
-        )
-        assert [item.tool_id.value for item in compiled.tool_requests] == expected
-        assert compiled.clarification_reason is None
+    assert result.derived_state_effect is DerivedStateEffect.REPLACE_TOPIC
+
+    same_topic = copy.deepcopy(CONTEXT)
+    same_topic["active_topic"] = "BOSTON_311"
+    result = compile_semantic_plan(parse(gather_payload()), trusted_context=same_topic)
+    assert result.derived_state_effect is DerivedStateEffect.REFINE
+
+    events = parse(gather_payload(task={
+        "domain": "EVENTS",
+        "operation": "CHECK_EXISTENCE",
+        "time": {"kind": "CURRENT_WEEK", "value": None},
+    }))
+    result = compile_semantic_plan(events, trusted_context=CONTEXT)
+    assert [item.tool_id.value for item in result.tool_requests] == [
+        "query_events", "get_source_status",
+    ]
 
 
-def test_compiler_is_paraphrase_independent() -> None:
-    raw = plan_payload()
-    one = SemanticPlan.from_mapping({**raw, "user_goal": "Count all requests last month."})
-    two = SemanticPlan.from_mapping({**raw, "user_goal": "How many cases came in during the prior month?"})
-    left = compile_semantic_plan(one, trusted_context=CONTEXT).to_safe_dict()
-    right = compile_semantic_plan(two, trusted_context=CONTEXT).to_safe_dict()
-    assert left["tool_requests"] == right["tool_requests"]
+def test_compiler_is_subject_paraphrase_independent_for_tool_selection() -> None:
+    one = parse(gather_payload(task={"subject": "potholes"}))
+    two = parse(gather_payload(task={"subject": "damaged road surfaces"}))
+    left = [item.tool_id.value for item in compile_semantic_plan(one, trusted_context=CONTEXT).tool_requests]
+    right = [item.tool_id.value for item in compile_semantic_plan(two, trusted_context=CONTEXT).tool_requests]
+    assert left == right == ["aggregate_311", "get_source_status"]
 
 
-def test_time_geography_and_clarification() -> None:
-    retained = plan_payload(tasks=[{
-        "domain": "SERVICE_REQUESTS", "goal": "FIND",
-        "subject": {"kind": "ALL", "text": None}, "evidence_needs": ["RECORDS"],
-        "geography": {"mode": "DEFAULT", "value": None},
-        "time": {"kind": "RETAIN_TRUSTED_PERIOD", "value": "period:week"},
-        "source_types": ["OFFICIAL_DATA"],
-    }])
-    plan = SemanticPlan.from_mapping(retained, available_trusted_reference_tokens=["period:week"])
-    compiled = compile_semantic_plan(
-        plan, trusted_context=CONTEXT, trusted_reference_tokens=["period:week"],
-    )
-    assert compiled.tool_requests[0].arguments["time_scope"]["trusted_reference_token"] == "period:week"
-
-    missing = plan_payload(tasks=[{
-        **copy.deepcopy(plan_payload()["tasks"][0]),
-        "geography": {"mode": "MISSING", "value": None},
-    }])
-    result = compile_semantic_plan(SemanticPlan.from_mapping(missing), trusted_context=CONTEXT)
+def test_time_geography_and_selected_event_are_deterministic() -> None:
+    missing = parse(gather_payload(task={"geography": {"mode": "MISSING", "value": None}}))
+    result = compile_semantic_plan(missing, trusted_context=CONTEXT)
     assert not result.tool_requests and "location" in (result.clarification_reason or "").lower()
 
-    explicit = plan_payload(tasks=[{
-        "domain": "LOCATION", "goal": "FIND", "subject": {"kind": "ALL", "text": None},
-        "evidence_needs": ["LOCATION_RESOLUTION"],
+    explicit = parse(gather_payload(task={
+        "domain": "LOCATION",
+        "operation": "FIND",
         "geography": {"mode": "EXPLICIT", "value": "Codman Square"},
-        "time": {"kind": "NONE", "value": None}, "source_types": [],
-    }])
-    result = compile_semantic_plan(SemanticPlan.from_mapping(explicit), trusted_context=CONTEXT)
+        "time": {"kind": "NONE", "value": None},
+        "source_scope": "ANY",
+    }))
+    result = compile_semantic_plan(explicit, trusted_context=CONTEXT)
     assert result.tool_requests[0].tool_id.value == "resolve_location"
+
+    selected_context = copy.deepcopy(CONTEXT)
+    selected_context["active_entity"] = {"token": "event:435", "title": "Parade"}
+    event = parse(gather_payload(task={
+        "domain": "EVENTS",
+        "operation": "FIND",
+        "subject": "parade",
+        "geography": {"mode": "NONE", "value": None},
+        "time": {"kind": "NONE", "value": None},
+    }))
+    result = compile_semantic_plan(
+        event, trusted_context=selected_context, trusted_reference_tokens=("event:435",),
+    )
+    assert result.tool_requests[0].arguments["entity_token"] == "event:435"
 
 
 def test_all_expected_labels_compile_without_execution() -> None:
@@ -173,35 +195,48 @@ def test_all_expected_labels_compile_without_execution() -> None:
             if case.family_id in seen:
                 continue
             seen.add(case.family_id)
-            plan = _expected_plan(case.expected, case.trusted_reference_tokens)
+            plan = _expected_plan(case.expected, case.trusted_context, case.trusted_reference_tokens)
             result = compile_semantic_plan(
                 plan,
                 trusted_context=case.trusted_context,
                 trusted_reference_tokens=case.trusted_reference_tokens,
             )
-            if plan.strategy.value == "GATHER_EVIDENCE":
+            if plan.action is PlannerAction.GATHER_EVIDENCE:
                 assert result.tool_requests, (filename, case.family_id, result.clarification_reason)
 
 
-def test_prompt_size_normalization_and_native_schema() -> None:
+def test_prompt_modes_size_privacy_and_function_catalog() -> None:
     straight = build_semantic_planner_prompt(
-        normalize_resident_input("What's happening next week?"), trusted_context=CONTEXT,
+        normalize_resident_input("What's happening next week?"),
+        trusted_context=CONTEXT,
+        output_mode="plain",
     )
     curly = build_semantic_planner_prompt(
-        normalize_resident_input("What’s happening next week?"), trusted_context=CONTEXT,
+        normalize_resident_input("What’s happening next week?"),
+        trusted_context=CONTEXT,
+        output_mode="plain",
+    )
+    function = build_semantic_planner_prompt(
+        normalize_resident_input("What's happening next week?"),
+        trusted_context=CONTEXT,
+        output_mode="function",
     )
     assert straight == curly
-    assert len(straight.encode("utf-8")) < 3_800
-    assert "aggregate_311" not in straight and "tool_id" not in straight
-    schema = semantic_plan_response_schema()
-    assert schema["type"] == "object" and set(schema["required"]) == set(schema["properties"])
+    assert len(straight.encode("utf-8")) < 3_300
+    assert len(function.encode("utf-8")) < 2_200
+    for text in (straight, function):
+        assert "aggregate_311" not in text and "tool_id" not in text and "state_intent" not in text
+    declarations = planner_function_declarations()
+    assert [item["name"] for item in declarations] == [
+        "respond_directly", "ask_clarification", "gather_evidence",
+    ]
 
 
 def main() -> None:
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:
         test()
-    print(f"semantic planner/compiler tests passed: {len(tests)}/{len(tests)}")
+    print(f"semantic action/compiler tests passed: {len(tests)}/{len(tests)}")
 
 
 if __name__ == "__main__":

@@ -294,7 +294,7 @@ def test_authoritative_location_filtering() -> None:
         ConversationRelationship.STANDALONE,
     )
     conn = _Connection([codman, dorchester, unknown, virtual, baby])
-    rows, candidates = retrieve_events(conn, plan)
+    rows, candidates = retrieve_events(conn, plan, now=NOW)
     assert [row["id"] for row in rows] == [436, 902]
     assert candidates == 5
     assert conn.cursor_value.params == ("2026-07-20", "2026-07-18", 100)

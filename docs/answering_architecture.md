@@ -62,12 +62,14 @@ Complex but bounded evidence may deserve one synthesis call.
 2. Apply deterministic emergency, authentication, rate-limit, and fixed policy interception.
 3. Load only bounded, server-owned MySQL conversation state and trusted reference tokens.
 4. Normalize the current resident message without discarding its original form.
-5. Reserve one `ORCHESTRATOR` call. The model chooses exactly `DIRECT_RESPONSE`,
-   `ASK_CLARIFICATION`, or `EXECUTE_TOOLS` using the strict provider-neutral schema.
-6. Reject unknown tools, incompatible domains, SQL, URLs, untrusted references, unrestricted
-   filters, provider objects, recursive actions, factual tool-plan prose, and oversized state.
-7. Execute one to four independent deterministic capabilities concurrently when tools were
-   selected. The model never selects tables, vector collections, or arbitrary functions.
+5. Reserve one `ORCHESTRATOR` call. The model chooses exactly `respond_directly`,
+   `ask_clarification`, or `gather_evidence` using the strict provider-neutral schema.
+6. Validate direct-response safety or compile one to three semantic evidence tasks. Reject SQL,
+   URLs, executable tools, source IDs, untrusted references, exact date boundaries, arbitrary
+   filters, relationship labels, state proposals, provider objects, and recursive actions.
+7. Execute the deterministic compiler's independent allowlisted capabilities concurrently. The
+   model never selects tables, vector collections, arbitrary functions, exact arguments, source
+   status checks, or state effects.
 8. Convert tool results to one domain-neutral evidence bundle with stable evidence and source
    IDs, explicit scope, freshness, coverage, limitations, missing evidence, and partial failures.
 9. If tools ran, reserve at most one `SYNTHESIS` call. Validate its factual claims, citations,
@@ -79,19 +81,25 @@ Complex but bounded evidence may deserve one synthesis call.
 
 ## 7. Model-led semantics and deterministic invariants
 
-The orchestrator owns semantic interpretation for ordinary free-form resident messages:
-goal, relationship, domains, trusted references, geography, semantic time, tool selection,
-answer requirements, and a bounded state proposal. It receives no unrestricted history and
-cannot establish civic facts. It uses semantic periods such as `CURRENT_WEEK`,
-`NEXT_CALENDAR_WEEK`, `LAST_N_DAYS`, or `RETAIN_TRUSTED_PERIOD`; deterministic code calculates
-dates and validates retained references.
+The proposed orchestrator owns only the smallest semantic interpretation needed for ordinary
+free-form resident messages: whether to respond directly, ask a clarification, or gather evidence;
+and, for evidence gathering, public domain, operation, bounded subject, semantic geography/time,
+and materially requested source scope. It receives no unrestricted history and cannot establish
+civic facts. It may use semantic periods such as `CURRENT_WEEK`, `NEXT_CALENDAR_WEEK`,
+`LAST_N_DAYS`, or `TRUSTED_REFERENCE`; deterministic code calculates dates and validates retained
+references.
+
+Relationship classification and state transitions remain server-owned. The compiler derives them
+from the selected action, trusted references actually used, compiled tasks, and existing state.
+The model does not propose evidence-needs lists, executable tools, exact arguments, source-status
+requests, filters, exact date boundaries, source IDs, relationship labels, or persistent state.
 
 Code remains authoritative for identity, thread ownership, emergency and fixed policy,
 idempotency, deadlines, call accounting, canonical IDs, date arithmetic, tool registration,
 domain compatibility, SQL prohibition, data access, source metadata, evidence sufficiency,
 citations, answer validation, persistence, and replay. Exact trusted UI references remain
-server-owned tokens. The model may rephrase a trusted summary but may not create a new civic
-claim through `DIRECT_RESPONSE`.
+server-owned tokens. The model may rephrase a trusted summary only with its exact token and may
+not create a new civic claim through `respond_directly`.
 
 Phase 1 introduces these contracts and offline evaluation only. Existing rule-first routing
 remains authoritative until later phases meet documented parity gates. Evaluation examples
@@ -322,16 +330,21 @@ default, or certify worker counts without RSS and concurrency measurements.
    duplicated orchestration only after caller/import/runtime proof. Tune model choice, pools,
    caches, and worker topology from measured production-like behavior.
 
-The July 19, 2026 executable-plan development gate did not identify an adequate candidate. The
-follow-up design replaced executable tool requests with compact semantic tasks and a deterministic
-compiler, reduced the prompt by about 76%, and moved offline evaluation to the maintained Gemini
-SDK. The final 21-case Flash Lite plain-JSON smoke still reached only 95.24% provider success and
-90.48% schema compliance, with one unsupported direct civic fact. Pro failed the required native
-enum health check. No candidate became eligible for full semantic development evaluation, no
-model was selected, and the sealed holdout was not run. Phase 2 cutover remains blocked until an
-operational candidate clears smoke and development gates. Any future shadow diagnostic must be
-post-response/offline or independently capped below one second so it cannot delay the
-authoritative resident answer.
+The July 19, 2026 executable-plan development gate did not identify an adequate candidate. A first
+semantic redesign reduced the prompt by about 76% but still gave the model evidence, relationship,
+and state responsibilities and failed smoke. The July 20 redesign now exposes only three public
+actions and compiles semantic tasks deterministically. It uses the maintained `google-genai` SDK
+for isolated evaluation of exact stable model IDs. Function prompts are 1.67-1.87 KB and plain
+JSON prompts are 3.00-3.20 KB on the smoke corpus.
+
+`gemini-3.1-flash-lite` passed repeated operational health, but its 63-call function smoke reached
+85.71% completed structural compliance, 94.44% action accuracy, 100% domain accuracy, 80%
+operation accuracy, 86.67% compiled-tool accuracy, three unsupported direct civic facts, and a
+4.76% unsafe action rate. Plain JSON reached only 14.29% structure. `gemini-3.5-flash` failed repeated operational
+health at 90% availability and 72.22% completed structure. No candidate passed smoke; development
+and sealed holdout were not run, no model or encoding was frozen, and Phase 2 remains blocked. Any
+future shadow diagnostic must be post-response/offline or independently capped below one second
+so it cannot delay the authoritative resident answer.
 
 ## 25. Semantic debt and deprecation map
 

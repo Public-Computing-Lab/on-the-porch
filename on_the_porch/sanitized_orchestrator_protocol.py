@@ -13,13 +13,13 @@ from semantic_planner import (
     audit_semantic_provider_payload,
     build_semantic_planner_prompt,
     build_semantic_provider_payload,
-    semantic_plan_response_schema,
+    planner_function_declarations,
 )
 
 
 PUBLIC_PROTOCOL_VERSION = SEMANTIC_PROTOCOL_VERSION
 PUBLIC_CAPABILITY_CATALOG_VERSION = "not-model-facing"
-PUBLIC_SCHEMA_VERSION = 1
+PUBLIC_SCHEMA_VERSION = 2
 PUBLIC_CONFIDENCE_THRESHOLD = 0.70
 
 
@@ -44,6 +44,11 @@ class OutboundPayloadAudit:
 class SanitizedPublicEvaluationProtocol:
     """Provider-neutral protocol used by the isolated evaluation runner."""
 
+    def __init__(self, *, output_mode: str = "plain") -> None:
+        if output_mode not in {"plain", "function"}:
+            raise ValueError("output mode must be function or plain")
+        self.output_mode = output_mode
+
     def build_prompt(
         self,
         resident_input: NormalizedResidentInput,
@@ -55,16 +60,19 @@ class SanitizedPublicEvaluationProtocol:
             resident_input,
             trusted_context=trusted_context,
             available_trusted_reference_tokens=available_trusted_reference_tokens,
+            output_mode=self.output_mode,
         )
 
     def parse_decision(
         self,
         raw: str,
         *,
+        trusted_context: Mapping[str, Any],
         available_trusted_reference_tokens: Iterable[str],
     ) -> SemanticPlan:
         return SemanticPlan.from_json(
             raw,
+            trusted_context=trusted_context,
             available_trusted_reference_tokens=available_trusted_reference_tokens,
         )
 
@@ -74,11 +82,13 @@ def build_sanitized_provider_payload(
     *,
     trusted_context: Mapping[str, Any],
     available_trusted_reference_tokens: Iterable[str] = (),
+    output_mode: str = "plain",
 ) -> Dict[str, Any]:
     return build_semantic_provider_payload(
         resident_input,
         trusted_context=trusted_context,
         available_trusted_reference_tokens=available_trusted_reference_tokens,
+        output_mode=output_mode,
     )
 
 
@@ -87,11 +97,13 @@ def build_sanitized_orchestrator_prompt(
     *,
     trusted_context: Mapping[str, Any],
     available_trusted_reference_tokens: Iterable[str] = (),
+    output_mode: str = "plain",
 ) -> str:
     return build_semantic_planner_prompt(
         resident_input,
         trusted_context=trusted_context,
         available_trusted_reference_tokens=available_trusted_reference_tokens,
+        output_mode=output_mode,
     )
 
 
@@ -121,24 +133,27 @@ def audit_sanitized_provider_payload(payload: Mapping[str, Any]) -> OutboundPayl
 def parse_sanitized_orchestrator_decision(
     raw: str,
     *,
+    trusted_context: Mapping[str, Any],
     available_trusted_reference_tokens: Iterable[str] = (),
 ) -> SemanticPlan:
     return SemanticPlan.from_json(
         raw,
+        trusted_context=trusted_context,
         available_trusted_reference_tokens=available_trusted_reference_tokens,
     )
 
 
-def sanitized_generation_config(*, output_mode: str = "native") -> Dict[str, Any]:
+def sanitized_generation_config(*, output_mode: str = "plain") -> Dict[str, Any]:
     config: Dict[str, Any] = {
         "temperature": 0,
-        "max_output_tokens": 1400,
-        "response_mime_type": "application/json",
+        "max_output_tokens": 900,
     }
-    if output_mode == "native":
-        config["response_schema"] = semantic_plan_response_schema()
-    elif output_mode != "plain":
-        raise ValueError("output mode must be native or plain")
+    if output_mode == "plain":
+        config["response_mime_type"] = "application/json"
+    elif output_mode == "function":
+        config["function_declarations"] = planner_function_declarations()
+    else:
+        raise ValueError("output mode must be function or plain")
     return config
 
 
@@ -154,5 +169,5 @@ __all__ = [
     "build_sanitized_provider_payload",
     "parse_sanitized_orchestrator_decision",
     "sanitized_generation_config",
-    "semantic_plan_response_schema",
+    "planner_function_declarations",
 ]

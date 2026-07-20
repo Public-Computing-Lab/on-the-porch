@@ -1,8 +1,8 @@
-"""Deterministically compile semantic tasks into the strict civic tool catalog.
+"""Compile high-level semantic actions into strict registered civic requests.
 
-The compiler contains no resident-phrase recognizers and executes nothing.  It
-maps validated domain, goal, evidence, geography, time, and source concepts to
-registered requests, then reuses the existing argument validators.
+The compiler sees validated semantic fields, not the resident message. It derives
+evidence requirements, source-status checks, argument shapes, and non-persistent
+state effects without executing tools or using resident-phrase recognizers.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from civic_tool_catalog import (
@@ -21,24 +22,28 @@ from civic_tool_catalog import (
     ToolId,
 )
 from semantic_planner import (
-    EvidenceNeed,
     GeographyMode,
-    PublicSourceType,
+    PlannerAction,
     SemanticDomain,
-    SemanticGoal,
+    SemanticOperation,
     SemanticPlan,
-    SemanticStrategy,
     SemanticTask,
     SemanticTimeKind,
-    SubjectKind,
+    SourceScope,
 )
 
 
-COMPILER_VERSION = "semantic-compiler-v1"
+COMPILER_VERSION = "semantic-compiler-v2"
 
 
 class SemanticCompilationError(ValueError):
-    """Raised when a valid semantic plan cannot map to a safe registered request."""
+    """Raised when a valid semantic action cannot map to a safe request."""
+
+
+class DerivedStateEffect(str, Enum):
+    PRESERVE = "PRESERVE"
+    REFINE = "REFINE"
+    REPLACE_TOPIC = "REPLACE_TOPIC"
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,7 @@ class CompiledSemanticPlan:
     compiler_version: str
     tool_requests: Tuple[RegisteredToolRequest, ...]
     clarification_reason: Optional[str]
+    derived_state_effect: DerivedStateEffect
     requires_location_resolution: bool = False
 
     def to_safe_dict(self) -> Dict[str, Any]:
@@ -53,6 +59,7 @@ class CompiledSemanticPlan:
             "compiler_version": self.compiler_version,
             "tool_requests": [item.to_dict() for item in self.tool_requests],
             "clarification_reason": self.clarification_reason,
+            "derived_state_effect": self.derived_state_effect.value,
             "requires_location_resolution": self.requires_location_resolution,
         }
 
@@ -63,47 +70,55 @@ def compile_semantic_plan(
     trusted_context: Mapping[str, Any],
     trusted_reference_tokens: Iterable[str] = (),
 ) -> CompiledSemanticPlan:
-    """Compile a semantic plan without executing a tool or mutating trusted state."""
-    if plan.strategy is SemanticStrategy.DIRECT_RESPONSE:
-        return CompiledSemanticPlan(COMPILER_VERSION, (), None)
-    if plan.strategy is SemanticStrategy.ASK_CLARIFICATION:
+    """Compile a validated semantic action without execution or state mutation."""
+    state_effect = _derive_state_effect(plan, trusted_context)
+    if plan.action is PlannerAction.RESPOND_DIRECTLY:
+        return CompiledSemanticPlan(COMPILER_VERSION, (), None, state_effect)
+    if plan.action is PlannerAction.ASK_CLARIFICATION:
         return CompiledSemanticPlan(
-            COMPILER_VERSION, (), plan.clarification_question or "More information is required.",
+            COMPILER_VERSION,
+            (),
+            plan.clarification_question or "More information is required.",
+            state_effect,
         )
 
     tokens = tuple(trusted_reference_tokens)
     pending: List[Tuple[ToolId, Dict[str, Any], Tuple[CivicDomain, ...]]] = []
-    source_status: List[str] = []
+    status_sources: List[str] = []
     requires_resolution = False
     for task in plan.tasks:
         try:
-            task_requests, task_status, task_resolution = _compile_task(
+            task_requests, task_sources, task_resolution = _compile_task(
                 task,
-                plan=plan,
                 trusted_context=trusted_context,
                 trusted_reference_tokens=tokens,
             )
         except SemanticCompilationError as exc:
-            return CompiledSemanticPlan(COMPILER_VERSION, (), str(exc))
+            return CompiledSemanticPlan(COMPILER_VERSION, (), str(exc), state_effect)
         pending.extend(task_requests)
-        source_status.extend(task_status)
+        status_sources.extend(task_sources)
         requires_resolution = requires_resolution or task_resolution
 
-    if source_status:
-        unique_sources = list(dict.fromkeys(source_status))
-        domains = tuple(_source_id_domain(item) for item in unique_sources)
+    if status_sources:
+        unique_sources = list(dict.fromkeys(status_sources))
         pending.append((
             ToolId.GET_SOURCE_STATUS,
             {"operation": "STATUS", "source_ids": unique_sources},
-            domains,
+            tuple(_source_id_domain(item) for item in unique_sources),
         ))
     if not pending:
         return CompiledSemanticPlan(
-            COMPILER_VERSION, (), "The semantic plan did not identify retrievable evidence.",
+            COMPILER_VERSION,
+            (),
+            "The semantic action did not identify retrievable evidence.",
+            state_effect,
         )
     if len(pending) > 4:
         return CompiledSemanticPlan(
-            COMPILER_VERSION, (), "The request needs more than four independent evidence operations.",
+            COMPILER_VERSION,
+            (),
+            "The request needs more than four independent evidence operations.",
+            state_effect,
         )
 
     compiled: List[RegisteredToolRequest] = []
@@ -126,6 +141,7 @@ def compile_semantic_plan(
         COMPILER_VERSION,
         tuple(compiled),
         None,
+        state_effect,
         requires_location_resolution=requires_resolution,
     )
 
@@ -133,7 +149,6 @@ def compile_semantic_plan(
 def _compile_task(
     task: SemanticTask,
     *,
-    plan: SemanticPlan,
     trusted_context: Mapping[str, Any],
     trusted_reference_tokens: Tuple[str, ...],
 ) -> Tuple[
@@ -145,24 +160,18 @@ def _compile_task(
         return ([
             (
                 ToolId.RESOLVE_LOCATION,
-                {
-                    "operation": "RESOLVE",
-                    "query": task.geography.value,
-                    "scope": None,
-                },
+                {"operation": "RESOLVE", "query": task.geography.value, "scope": None},
                 (CivicDomain.LOCATION,),
             )
         ], [], False)
-
-    status_sources = _status_sources(task) if EvidenceNeed.SOURCE_STATUS in task.evidence_needs else []
-    non_status_needs = tuple(
-        item for item in task.evidence_needs if item is not EvidenceNeed.SOURCE_STATUS
-    )
-    if not non_status_needs:
-        return [], status_sources, False
-
+    if task.operation is SemanticOperation.STATUS \
+            and task.geography.mode is GeographyMode.NONE \
+            and task.time.kind is SemanticTimeKind.NONE:
+        return [], _status_sources(task), False
     if task.geography.mode is GeographyMode.MISSING:
         raise SemanticCompilationError("A location is required before evidence can be gathered.")
+    if task.time.kind is SemanticTimeKind.MISSING:
+        raise SemanticCompilationError("A time period is required before evidence can be gathered.")
     if task.geography.mode is GeographyMode.EXPLICIT:
         return ([
             (
@@ -170,37 +179,43 @@ def _compile_task(
                 {"operation": "RESOLVE", "query": task.geography.value, "scope": None},
                 (CivicDomain.LOCATION,),
             )
-        ], status_sources, True)
+        ], [], True)
 
     location_id = _location_id(task, trusted_context, trusted_reference_tokens)
     time_scope = _time_scope(task, trusted_reference_tokens)
+    status_sources = _status_sources(task)
     if task.domain is SemanticDomain.EVENTS:
-        return _compile_events(task, plan, location_id, time_scope), status_sources, False
+        return _compile_events(task, trusted_context, location_id, time_scope), status_sources, False
     if task.domain is SemanticDomain.SERVICE_REQUESTS:
         return _compile_service_requests(task, location_id, time_scope), status_sources, False
     if task.domain is SemanticDomain.CRIME:
         return _compile_crime(task, location_id, time_scope), status_sources, False
     if task.domain is SemanticDomain.DOCUMENTS:
-        return _compile_documents(task, plan, location_id, time_scope), status_sources, False
+        return _compile_documents(task, location_id, time_scope), status_sources, False
     raise SemanticCompilationError("The semantic domain has no registered compiler mapping.")
 
 
 def _compile_events(
     task: SemanticTask,
-    plan: SemanticPlan,
+    trusted_context: Mapping[str, Any],
     location_id: Optional[str],
     time_scope: Optional[Dict[str, Any]],
 ) -> List[Tuple[ToolId, Dict[str, Any], Tuple[CivicDomain, ...]]]:
-    if task.subject.kind is SubjectKind.EVENT and plan.trusted_summary_reference:
+    active_entity = trusted_context.get("active_entity")
+    if task.operation is SemanticOperation.FIND \
+            and task.geography.mode is GeographyMode.NONE \
+            and task.time.kind is SemanticTimeKind.NONE \
+            and isinstance(active_entity, Mapping) \
+            and isinstance(active_entity.get("token"), str):
         return [(
             ToolId.QUERY_EVENTS,
-            {"operation": "DETAILS", "entity_token": plan.trusted_summary_reference},
+            {"operation": "DETAILS", "entity_token": active_entity["token"]},
             (CivicDomain.EVENTS,),
         )]
     if location_id is None:
-        raise SemanticCompilationError("An event listing requires a trusted location.")
+        raise SemanticCompilationError("An event search requires a trusted location.")
     if time_scope is None:
-        raise SemanticCompilationError("An event listing requires a time period.")
+        raise SemanticCompilationError("An event search requires a time period.")
     return [(
         ToolId.QUERY_EVENTS,
         {
@@ -222,16 +237,11 @@ def _compile_service_requests(
         raise SemanticCompilationError("Service-request evidence requires a trusted location.")
     if time_scope is None:
         raise SemanticCompilationError("Service-request evidence requires a time period.")
-    issue_id = _subject_id(task) if task.subject.kind is SubjectKind.ISSUE else None
-    if EvidenceNeed.RECORDS in task.evidence_needs and not any(
-        item in task.evidence_needs for item in (
-            EvidenceNeed.COUNT,
-            EvidenceNeed.STATUS_BREAKDOWN,
-            EvidenceNeed.CATEGORY_DISTRIBUTION,
-            EvidenceNeed.LOCATION_DISTRIBUTION,
-            EvidenceNeed.PERIOD_COMPARISON,
-        )
-    ):
+    issue_id = _subject_id(task.subject)
+    if task.operation in {
+        SemanticOperation.FIND, SemanticOperation.CHECK_EXISTENCE,
+        SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
+    }:
         return [(
             ToolId.SEARCH_311_RECORDS,
             {
@@ -243,14 +253,21 @@ def _compile_service_requests(
             },
             (CivicDomain.BOSTON_311,),
         )]
-    operation, group_by = _aggregate_operation(task, crime=False)
+    operation = {
+        SemanticOperation.COUNT: "COUNT",
+        SemanticOperation.GROUP: "GROUP",
+        SemanticOperation.COMPARE: "COMPARE",
+        SemanticOperation.STATUS: "STATUS",
+    }.get(task.operation)
+    if operation is None:
+        raise SemanticCompilationError("Service-request operation is unsupported.")
     arguments: Dict[str, Any] = {
         "operation": operation,
         "issue_scope": "SPECIFIC" if issue_id else "ALL",
         "issue_family_id": issue_id,
         "location_id": location_id,
         "time_scope": time_scope,
-        "group_by": group_by,
+        "group_by": "CATEGORY" if operation == "GROUP" else None,
         "limit": 10,
     }
     if operation == "COMPARE":
@@ -267,13 +284,23 @@ def _compile_crime(
         raise SemanticCompilationError("Crime evidence requires a trusted location.")
     if time_scope is None:
         raise SemanticCompilationError("Crime evidence requires a time period.")
-    operation, group_by = _aggregate_operation(task, crime=True)
+    operation = {
+        SemanticOperation.FIND: "COUNT",
+        SemanticOperation.CHECK_EXISTENCE: "COUNT",
+        SemanticOperation.COUNT: "COUNT",
+        SemanticOperation.GROUP: "GROUP",
+        SemanticOperation.COMPARE: "COMPARE",
+        SemanticOperation.SUMMARIZE: "GROUP",
+        SemanticOperation.EXPLAIN: "GROUP",
+    }.get(task.operation)
+    if operation is None:
+        raise SemanticCompilationError("Crime operation is unsupported.")
     arguments: Dict[str, Any] = {
         "operation": operation,
-        "offense_category_id": _subject_id(task) if task.subject.kind is SubjectKind.ISSUE else None,
+        "offense_category_id": _subject_id(task.subject),
         "location_id": location_id,
         "time_scope": time_scope,
-        "group_by": group_by,
+        "group_by": "OFFENSE" if operation == "GROUP" else None,
         "limit": 10,
     }
     if operation == "COMPARE":
@@ -283,22 +310,18 @@ def _compile_crime(
 
 def _compile_documents(
     task: SemanticTask,
-    plan: SemanticPlan,
     location_id: Optional[str],
     time_scope: Optional[Dict[str, Any]],
 ) -> List[Tuple[ToolId, Dict[str, Any], Tuple[CivicDomain, ...]]]:
-    corpora, domains = _document_corpora(task)
-    source_types = [
-        _DOCUMENT_SOURCE_TYPES[item].value
-        for item in task.source_types
-        if item in _DOCUMENT_SOURCE_TYPES
-    ]
-    query = task.subject.text or plan.user_goal
+    corpora, domains = _document_corpora(task.source_scope)
+    source_types = []
+    if task.source_scope in _DOCUMENT_SOURCE_TYPES:
+        source_types = [_DOCUMENT_SOURCE_TYPES[task.source_scope].value]
     return [(
         ToolId.SEARCH_DOCUMENTS,
         {
             "operation": "SEARCH",
-            "query": query,
+            "query": task.subject or "Dorchester civic information",
             "corpora": corpora,
             "location_id": location_id,
             "time_scope": time_scope,
@@ -307,23 +330,6 @@ def _compile_documents(
         },
         domains,
     )]
-
-
-def _aggregate_operation(task: SemanticTask, *, crime: bool) -> Tuple[str, Optional[str]]:
-    needs = set(task.evidence_needs)
-    if task.goal is SemanticGoal.COMPARE or EvidenceNeed.PERIOD_COMPARISON in needs:
-        return "COMPARE", None
-    if EvidenceNeed.STATUS_BREAKDOWN in needs:
-        if crime:
-            raise SemanticCompilationError("Crime status grouping is not a registered aggregate.")
-        return "GROUP", "STATUS"
-    if EvidenceNeed.CATEGORY_DISTRIBUTION in needs or task.goal is SemanticGoal.GROUP:
-        return "GROUP", "OFFENSE" if crime else "CATEGORY"
-    if EvidenceNeed.LOCATION_DISTRIBUTION in needs:
-        return "GROUP", "AREA" if crime else "STREET"
-    if task.goal is SemanticGoal.STATUS and not crime:
-        return "STATUS", None
-    return "COUNT", None
 
 
 def _location_id(
@@ -356,78 +362,87 @@ def _time_scope(
         return None
     if kind is SemanticTimeKind.LAST_N_DAYS:
         return {"period": SemanticPeriod.LAST_N_DAYS.value, "n_days": int(task.time.value or "0")}
-    if kind is SemanticTimeKind.EXPLICIT_DATE_RANGE:
-        start, end = (task.time.value or "").split("/", 1)
-        return {
-            "period": SemanticPeriod.EXPLICIT_DATE_RANGE.value,
-            "start_date": start,
-            "end_date_exclusive": end,
-        }
-    if kind is SemanticTimeKind.RETAIN_TRUSTED_PERIOD:
+    if kind is SemanticTimeKind.TRUSTED_REFERENCE:
         if task.time.value not in set(trusted_reference_tokens):
             raise SemanticCompilationError("The trusted time reference is unavailable.")
         return {
             "period": SemanticPeriod.RETAIN_TRUSTED_PERIOD.value,
             "trusted_reference_token": task.time.value,
         }
-    return {"period": SemanticPeriod(kind.value).value}
+    if kind is SemanticTimeKind.EXPLICIT_DATE_RANGE:
+        period = _semantic_range_period(task.time.value or "")
+        if period is None:
+            raise SemanticCompilationError("The semantic time range needs deterministic resolution.")
+        return {"period": period.value}
+    period = {
+        SemanticTimeKind.CURRENT_WEEK: SemanticPeriod.CURRENT_WEEK,
+        SemanticTimeKind.NEXT_CALENDAR_WEEK: SemanticPeriod.NEXT_CALENDAR_WEEK,
+        SemanticTimeKind.PREVIOUS_CALENDAR_MONTH: SemanticPeriod.PREVIOUS_CALENDAR_MONTH,
+    }.get(kind)
+    if period is None:
+        raise SemanticCompilationError("The semantic time period is unsupported.")
+    return {"period": period.value}
+
+
+def _semantic_range_period(value: str) -> Optional[SemanticPeriod]:
+    normalized = " ".join(value.casefold().replace("_", " ").split())
+    return {
+        "today": SemanticPeriod.CURRENT_DAY,
+        "this weekend": SemanticPeriod.CURRENT_WEEKEND,
+        "next weekend": SemanticPeriod.NEXT_WEEKEND,
+        "previous calendar week": SemanticPeriod.PREVIOUS_CALENDAR_WEEK,
+        "current calendar month": SemanticPeriod.CURRENT_CALENDAR_MONTH,
+    }.get(normalized)
 
 
 def _comparison_scope(current: Mapping[str, Any]) -> Dict[str, Any]:
-    period = current.get("period")
     previous = {
         SemanticPeriod.CURRENT_WEEK.value: SemanticPeriod.PREVIOUS_CALENDAR_WEEK.value,
         SemanticPeriod.CURRENT_CALENDAR_MONTH.value: SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value,
-    }.get(period)
+    }.get(current.get("period"))
     if previous is None:
         raise SemanticCompilationError("The requested comparison period is underspecified.")
     return {"period": previous}
 
 
-def _subject_id(task: SemanticTask) -> str:
-    text = task.subject.text
-    if not text:
-        raise SemanticCompilationError("A specific subject requires a bounded public concept.")
-    normalized = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+def _subject_id(subject: Optional[str]) -> Optional[str]:
+    if not subject:
+        return None
+    normalized = unicodedata.normalize("NFKD", subject).encode("ascii", "ignore").decode("ascii")
     value = re.sub(r"[^a-z0-9]+", "_", normalized.casefold()).strip("_")
     if not value:
         raise SemanticCompilationError("The subject cannot be canonicalized safely.")
     return value[:80]
 
 
-def _document_corpora(
-    task: SemanticTask,
-) -> Tuple[List[str], Tuple[CivicDomain, ...]]:
-    corpus_map = {
-        PublicSourceType.LAW_OR_REGULATION: ("POLICY", CivicDomain.POLICY),
-        PublicSourceType.PLANNING_POLICY: ("POLICY", CivicDomain.POLICY),
-        PublicSourceType.MEETING_TRANSCRIPT: ("TRANSCRIPT", CivicDomain.MEETING_TRANSCRIPTS),
-        PublicSourceType.JOURNALISM: ("NEWS", CivicDomain.NEWS),
-        PublicSourceType.COMMUNITY: ("COMMUNITY", CivicDomain.COMMUNITY_DOCUMENTS),
+def _document_corpora(scope: SourceScope) -> Tuple[List[str], Tuple[CivicDomain, ...]]:
+    mapping = {
+        SourceScope.LAW_OR_REGULATION: ("POLICY", CivicDomain.POLICY),
+        SourceScope.PLANNING_POLICY: ("POLICY", CivicDomain.POLICY),
+        SourceScope.MEETING_TRANSCRIPT: ("TRANSCRIPT", CivicDomain.MEETING_TRANSCRIPTS),
+        SourceScope.NEWS: ("NEWS", CivicDomain.NEWS),
+        SourceScope.COMMUNITY: ("COMMUNITY", CivicDomain.COMMUNITY_DOCUMENTS),
     }
-    pairs = [corpus_map[item] for item in task.source_types if item in corpus_map]
-    if not pairs:
-        subject_defaults = {
-            SubjectKind.POLICY: ("POLICY", CivicDomain.POLICY),
-            SubjectKind.MEETING: ("TRANSCRIPT", CivicDomain.MEETING_TRANSCRIPTS),
-            SubjectKind.NEWS: ("NEWS", CivicDomain.NEWS),
-            SubjectKind.COMMUNITY_TOPIC: ("COMMUNITY", CivicDomain.COMMUNITY_DOCUMENTS),
-        }
-        pair = subject_defaults.get(task.subject.kind)
-        if pair is None:
-            raise SemanticCompilationError("Document evidence requires a public source category.")
-        pairs = [pair]
-    corpora = list(dict.fromkeys(pair[0] for pair in pairs))
-    domains = tuple(dict.fromkeys(pair[1] for pair in pairs))
-    return corpora, domains
+    if scope in mapping:
+        corpus, domain = mapping[scope]
+        return [corpus], (domain,)
+    return (
+        ["POLICY", "TRANSCRIPT", "NEWS", "COMMUNITY"],
+        (
+            CivicDomain.POLICY,
+            CivicDomain.MEETING_TRANSCRIPTS,
+            CivicDomain.NEWS,
+            CivicDomain.COMMUNITY_DOCUMENTS,
+        ),
+    )
 
 
 _DOCUMENT_SOURCE_TYPES = {
-    PublicSourceType.LAW_OR_REGULATION: SourceTypeFilter.BINDING_LAW,
-    PublicSourceType.PLANNING_POLICY: SourceTypeFilter.PLANNING_POLICY,
-    PublicSourceType.MEETING_TRANSCRIPT: SourceTypeFilter.MEETING_DISCUSSION,
-    PublicSourceType.JOURNALISM: SourceTypeFilter.JOURNALISM,
-    PublicSourceType.COMMUNITY: SourceTypeFilter.COMMUNITY_OPINION,
+    SourceScope.LAW_OR_REGULATION: SourceTypeFilter.BINDING_LAW,
+    SourceScope.PLANNING_POLICY: SourceTypeFilter.PLANNING_POLICY,
+    SourceScope.MEETING_TRANSCRIPT: SourceTypeFilter.MEETING_DISCUSSION,
+    SourceScope.NEWS: SourceTypeFilter.JOURNALISM,
+    SourceScope.COMMUNITY: SourceTypeFilter.COMMUNITY_OPINION,
 }
 
 
@@ -439,7 +454,7 @@ def _status_sources(task: SemanticTask) -> List[str]:
     if task.domain is SemanticDomain.CRIME:
         return ["bpd_crime"]
     if task.domain is SemanticDomain.DOCUMENTS:
-        corpora, _ = _document_corpora(task)
+        corpora, _ = _document_corpora(task.source_scope)
         return [{
             "POLICY": "policy_documents",
             "TRANSCRIPT": "meeting_transcripts",
@@ -461,9 +476,36 @@ def _source_id_domain(source_id: str) -> CivicDomain:
     }[source_id]
 
 
+def _derive_state_effect(
+    plan: SemanticPlan,
+    trusted_context: Mapping[str, Any],
+) -> DerivedStateEffect:
+    if plan.action is not PlannerAction.GATHER_EVIDENCE:
+        return DerivedStateEffect.PRESERVE
+    if any(
+        task.geography.mode is GeographyMode.TRUSTED_REFERENCE
+        or task.time.kind is SemanticTimeKind.TRUSTED_REFERENCE
+        for task in plan.tasks
+    ):
+        return DerivedStateEffect.REFINE
+    active_topic = trusted_context.get("active_topic")
+    topic_domain = {
+        "EVENTS": SemanticDomain.EVENTS,
+        "BOSTON_311": SemanticDomain.SERVICE_REQUESTS,
+        "SERVICE_REQUESTS": SemanticDomain.SERVICE_REQUESTS,
+        "CRIME_AND_SAFETY": SemanticDomain.CRIME,
+        "CRIME": SemanticDomain.CRIME,
+    }.get(active_topic)
+    domains = {task.domain for task in plan.tasks}
+    if topic_domain is not None and domains == {topic_domain}:
+        return DerivedStateEffect.REFINE
+    return DerivedStateEffect.REPLACE_TOPIC
+
+
 __all__ = [
     "COMPILER_VERSION",
     "CompiledSemanticPlan",
+    "DerivedStateEffect",
     "SemanticCompilationError",
     "compile_semantic_plan",
 ]
