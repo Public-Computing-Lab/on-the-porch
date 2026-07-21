@@ -345,7 +345,60 @@ unsafe tools, fabricated references, context leakage, injection failures, and un
 clarifications were zero. `MODEL_LED_ORCHESTRATOR_MODE` remains off; Phase 2 begins with an
 isolated, non-default canary and does not change the current resident runtime.
 
-## 25. Semantic debt and deprecation map
+## 25. Phase 2A isolated turn-service canary
+
+Phase 2A implements the first executable vertical slice of the model-led architecture for
+direct conversation, clarification, event discovery/details, and aggregate Boston 311. The
+transport-neutral `ModelLedTurnService` receives a validated resident message, bounded trusted
+state, a request deadline, and an optional server-issued selected-entity token. It makes exactly
+one semantic-planner call, guards and deterministically compiles the result, executes only
+registered event or 311 capabilities, composes the answer from structured evidence without a
+synthesis model, and derives server-owned state transitions. The model cannot select physical
+tables, SQL, exact dates, arbitrary functions, source IDs, or persistent state.
+
+The maintained `google-genai` provider adapter is shared by the Phase 1 planner and Phase 2A turn
+service. Planner failures, invalid plans, unavailable capabilities, and deadline pressure fail
+closed to a bounded clarification or deterministic degraded answer. Emergency interception,
+identity and ownership checks, rate limiting, turn idempotency, atomic persistence, replay,
+request budgets, and JSON/SSE finalization remain in the existing API stack. The service does not
+implement a second transport, state store, cache, deadline, or planner.
+
+The canary is off by default. It is reachable only when
+`MODEL_LED_ORCHESTRATOR_MODE=isolated_canary`, the existing request uses an authenticated
+non-production environment, and the exact server-configured `X-On-The-Porch-Canary` value is
+present. The optional browser header is absent from normal frontend configuration. A selected
+event is accepted only through the existing validated UI event-resolution envelope and a matching
+server-issued trusted token; ordinary prior active-entity state cannot masquerade as a new
+selection.
+
+The final synthetic development evaluation used 138 privacy-audited cases and one frozen planner
+configuration. It recorded 138 planner calls, zero synthesis calls, 100% status, action, useful,
+and safe-outcome accuracy, 97.83% capability accuracy, zero unnecessary clarifications, p50
+latency of 0.733 seconds, p95 of 0.914 seconds, and a 1.109-second maximum. Every established Phase
+2A gate passed and every case completed below 15 seconds. The general semantic contract now marks
+an evidence task as `DOMAIN_ONLY` when the civic domain is recognizable but the requested evidence
+operation is not; the compiler converts that state to a targeted clarification with no tool. Clear
+event discovery remains executable with the deterministic upcoming default, Boston 311 freshness
+compiles to source status without an invented time filter, and selected-event detail aspects are
+compiler-owned allowlisted fields. No resident phrase or exact question was added to runtime code.
+
+An isolated two-worker local-demo API run exercised one planner call and zero synthesis calls per turn across
+direct responses, clarifications, selected-event details, event follow-ups, event-to-311 topic
+switches, 311 aggregates/categories/source policy, emergency precedence, JSON/SSE parity,
+concurrent idempotent replay, and two-worker concurrency. The final live run completed ten factual
+turns and three expected clarifications with no unexpected tool calls; event and 311 capabilities
+ran exactly once when required. Live p50/p95/max latency was 0.871/1.024/1.024 seconds. Browser
+acceptance on isolated ports verified event cards, trusted selected-event details, `Where is it?`,
+311 follow-ups, evidence-policy responses, source rendering, and CORS preflight for the canary
+header. These results used only `sentiment_demo`; they do not certify production data, credentials,
+DreamHost networking, or resident traffic. The normal runtime was not restarted or reconfigured.
+
+Phase 2B should make this lifecycle authoritative for direct conversation, clarification, events,
+and Boston 311; preserve explicit transitional handoff for not-yet-migrated civic domains; and
+retire the replaced legacy interpretation authority only after transport, state, idempotency,
+provider-failure, and caller-removal proof.
+
+## 26. Semantic debt and deprecation map
 
 | Current path | Future disposition | Replacement phase | Parity gate before removal |
 | --- | --- | --- | --- |

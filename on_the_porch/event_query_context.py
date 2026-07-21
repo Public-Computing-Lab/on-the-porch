@@ -22,6 +22,7 @@ from conversation_dimensions import (
     ReasonCode as DimensionReasonCode,
     TimeLabelCode,
     TimeGranularity,
+    resolve_registered_geography,
     resolve_app_now,
 )
 from conversation_relationship import (
@@ -898,6 +899,91 @@ def discover_events(
         candidate_count=candidate_count,
         sources=tuple(build_event_sources(rows)),
         limitations=limitations,
+    )
+
+
+def event_plan_from_compiled_scope(
+    *,
+    location_id: str,
+    semantic_start_date: str,
+    semantic_end_date_exclusive: str,
+    semantic_label_code: str,
+    upcoming: bool,
+    modality: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> EventQueryPlan:
+    """Build an event execution plan from compiler-owned canonical arguments.
+
+    The caller has already interpreted the resident turn. This adapter only
+    validates registry IDs and applies the existing event date-floor semantics.
+    """
+    location = resolve_registered_geography(location_id)
+    if location is None:
+        raise ValueError("compiled event location is not registered")
+    try:
+        label = TimeLabelCode(semantic_label_code)
+        semantic_time = CanonicalTimeRange(
+            label_code=label,
+            start_date=semantic_start_date,
+            end_date_exclusive=semantic_end_date_exclusive,
+            timezone="America/New_York",
+            granularity={
+                TimeLabelCode.TODAY: TimeGranularity.DAY,
+                TimeLabelCode.THIS_WEEK: TimeGranularity.WEEK,
+                TimeLabelCode.THIS_CALENDAR_WEEK: TimeGranularity.WEEK,
+                TimeLabelCode.NEXT_CALENDAR_WEEK: TimeGranularity.WEEK,
+                TimeLabelCode.LAST_WEEK: TimeGranularity.WEEK,
+                TimeLabelCode.THIS_WEEKEND: TimeGranularity.RANGE,
+                TimeLabelCode.NEXT_WEEKEND: TimeGranularity.RANGE,
+                TimeLabelCode.THIS_MONTH: TimeGranularity.MONTH,
+                TimeLabelCode.LAST_MONTH: TimeGranularity.MONTH,
+                TimeLabelCode.ROLLING_DAYS: TimeGranularity.RANGE,
+                TimeLabelCode.ROLLING_7_DAYS: TimeGranularity.RANGE,
+                TimeLabelCode.ROLLING_30_DAYS: TimeGranularity.RANGE,
+                TimeLabelCode.EXPLICIT_RANGE: TimeGranularity.RANGE,
+            }.get(label, TimeGranularity.RANGE),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("compiled event time scope is invalid") from exc
+    local_now = resolve_app_now(now)
+    effective_start, effective_end, floored = _effective_range(
+        semantic_time,
+        today=local_now.date(),
+        historical=not upcoming,
+    )
+    reasons = [
+        EventPlanReason.EXPLICIT_EVENTS_TOPIC,
+        EventPlanReason.EXPLICIT_TIME,
+        EventPlanReason.EXPLICIT_LOCATION,
+    ]
+    if floored and upcoming:
+        reasons.append(EventPlanReason.UPCOMING_FLOOR_APPLIED)
+    if not upcoming:
+        reasons.append(EventPlanReason.HISTORICAL_QUERY)
+    if modality:
+        reasons.append(EventPlanReason.EXPLICIT_MODALITY)
+    applied = [
+        EventQueryDimension.TOPIC,
+        EventQueryDimension.TIME_RANGE,
+        EventQueryDimension.LOCATION,
+    ]
+    if modality:
+        applied.append(EventQueryDimension.FILTERS)
+    return EventQueryPlan(
+        status=EventPlanStatus.READY,
+        topic=CanonicalTopic.EVENTS,
+        start_date=effective_start,
+        end_date_exclusive=effective_end,
+        location=location,
+        applied_dimensions=tuple(applied),
+        unapplied_dimensions=(),
+        requires_clarification=False,
+        reason_codes=tuple(reasons),
+        semantic_start_date=semantic_start_date,
+        semantic_end_date_exclusive=semantic_end_date_exclusive,
+        semantic_label_code=semantic_label_code,
+        modality=modality,
+        upcoming_intent=upcoming,
     )
 
 

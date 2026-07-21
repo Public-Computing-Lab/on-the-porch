@@ -296,6 +296,46 @@ def geography_name(location_id: str) -> Optional[str]:
     return entry.name if entry else None
 
 
+def resolve_registered_geography(value: Any) -> Optional["CanonicalLocation"]:
+    """Resolve one semantic place value against the reviewed geography registry.
+
+    This accepts a compiler-produced place concept, not a resident turn, and
+    therefore does not perform topic or relationship interpretation.
+    """
+    normalized = _normalize_text(value, maximum=160)
+    if not normalized:
+        return None
+    exact_matches = []
+    phrase_matches = []
+    for entry in GEOGRAPHY_REGISTRY:
+        names = {_normalize_text(entry.id), _normalize_text(entry.name)}
+        names.update(_normalize_text(alias) for alias in entry.aliases)
+        if normalized in names:
+            exact_matches.append(entry)
+        elif any(_contains_phrase(normalized, name) for name in names if name):
+            phrase_matches.append(entry)
+    if len(exact_matches) == 1:
+        entry = exact_matches[0]
+        return CanonicalLocation(entry.id, entry.kind)
+    if exact_matches:
+        return None
+    if len(phrase_matches) == 1:
+        entry = phrase_matches[0]
+        return CanonicalLocation(entry.id, entry.kind)
+    # A sub-neighborhood may be qualified by its parent, as in
+    # "Fields Corner, Dorchester". Two distinct local areas stay ambiguous.
+    children = [entry for entry in phrase_matches if entry.parent_id]
+    if len(children) != 1:
+        return None
+    entry = children[0]
+    if any(
+        candidate.id not in {entry.id, entry.parent_id}
+        for candidate in phrase_matches
+    ):
+        return None
+    return CanonicalLocation(entry.id, entry.kind)
+
+
 @dataclass(frozen=True)
 class CanonicalLocation:
     id: str
@@ -821,6 +861,60 @@ def _extract_explicit_time(
         except ValueError:
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
 
+    calendar_month = re.fullmatch(
+        rf"\s*({_MONTH_PATTERN})(?:\s+(\d{{4}}))?\s*",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if calendar_month:
+        month = _MONTHS[calendar_month.group(1).lower()]
+        year = int(calendar_month.group(2) or today.year)
+        if calendar_month.group(2) is None and month > today.month:
+            year -= 1
+        start = date(year, month, 1)
+        return (
+            _range(
+                TimeLabelCode.EXPLICIT_RANGE,
+                start,
+                _next_month_start(start),
+                TimeGranularity.MONTH,
+            ),
+            ReasonCode.EXPLICIT_RANGE,
+            False,
+        )
+
+    month_comparison = re.fullmatch(
+        rf"\s*({_MONTH_PATTERN})(?:\s+(\d{{4}}))?\s+"
+        rf"(?:and|vs\.?|versus|than|to)\s+"
+        rf"({_MONTH_PATTERN})(?:\s+(\d{{4}}))?\s*",
+        original,
+        flags=re.IGNORECASE,
+    )
+    if month_comparison:
+        starts = []
+        for month_name_value, year_value in (
+            month_comparison.group(1, 2),
+            month_comparison.group(3, 4),
+        ):
+            month = _MONTHS[month_name_value.lower()]
+            year = int(year_value or today.year)
+            if year_value is None and month > today.month:
+                year -= 1
+            starts.append(date(year, month, 1))
+        later, earlier = max(starts), min(starts)
+        if _next_month_start(earlier) != later:
+            return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
+        return (
+            _range(
+                TimeLabelCode.EXPLICIT_RANGE,
+                later,
+                _next_month_start(later),
+                TimeGranularity.MONTH,
+            ),
+            ReasonCode.EXPLICIT_RANGE,
+            False,
+        )
+
     ambiguous = re.search(
         r"\b\d{1,2}/\d{1,2}\b(?!/\d{2,4})",
         original,
@@ -829,6 +923,23 @@ def _extract_explicit_time(
     if ambiguous:
         return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
     return None, None, False
+
+
+def resolve_explicit_date_expression(
+    value: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[CanonicalTimeRange]:
+    """Resolve a compiler-owned explicit date expression without topic parsing."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    resolved, _reason, ambiguous = _extract_explicit_time(
+        text,
+        resolve_app_now(now).date(),
+        resolve_yearless_named_dates=True,
+    )
+    return None if ambiguous else resolved
 
 
 def _week_start_monday(day: date) -> date:
