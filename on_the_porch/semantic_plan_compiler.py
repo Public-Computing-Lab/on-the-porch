@@ -21,19 +21,27 @@ from civic_tool_catalog import (
     ToolContractError,
     ToolId,
 )
+from model_led_orchestrator import OrchestratorContractError
 from semantic_planner import (
     GeographyMode,
+    MissingInformation,
     PlannerAction,
+    SemanticSafetyError,
     SemanticDomain,
+    SemanticGeography,
     SemanticOperation,
     SemanticPlan,
     SemanticTask,
+    SemanticTime,
     SemanticTimeKind,
     SourceScope,
+    validate_direct_response,
+    validate_semantic_task,
 )
 
 
-COMPILER_VERSION = "semantic-compiler-v2"
+COMPILER_VERSION = "semantic-compiler-v3"
+CANONICALIZATION_VERSION = "semantic-canonicalization-v3"
 
 
 class SemanticCompilationError(ValueError):
@@ -44,6 +52,12 @@ class DerivedStateEffect(str, Enum):
     PRESERVE = "PRESERVE"
     REFINE = "REFINE"
     REPLACE_TOPIC = "REPLACE_TOPIC"
+
+
+class GuardedDisposition(str, Enum):
+    EXECUTABLE = "EXECUTABLE"
+    NEEDS_CLARIFICATION = "NEEDS_CLARIFICATION"
+    INVALID_UNSAFE = "INVALID_UNSAFE"
 
 
 @dataclass(frozen=True)
@@ -64,6 +78,139 @@ class CompiledSemanticPlan:
         }
 
 
+@dataclass(frozen=True)
+class GuardedSemanticPlan:
+    disposition: GuardedDisposition
+    compiled_plan: CompiledSemanticPlan
+    resident_response: Optional[str]
+    reason_code: str
+
+    @property
+    def tool_requests(self) -> Tuple[RegisteredToolRequest, ...]:
+        return self.compiled_plan.tool_requests
+
+    def to_safe_dict(self) -> Dict[str, Any]:
+        return {
+            "disposition": self.disposition.value,
+            "compiled_plan": self.compiled_plan.to_safe_dict(),
+            "resident_response": self.resident_response,
+            "reason_code": self.reason_code,
+        }
+
+
+def guard_semantic_plan(
+    plan: SemanticPlan,
+    *,
+    trusted_context: Mapping[str, Any],
+    trusted_reference_tokens: Iterable[str] = (),
+) -> GuardedSemanticPlan:
+    """Fail closed before any semantic plan can reach a civic capability."""
+    tokens = tuple(trusted_reference_tokens)
+    plan = _normalize_semantic_plan(plan, trusted_context, tokens)
+    state_effect = _derive_state_effect(plan, trusted_context)
+    empty = CompiledSemanticPlan(COMPILER_VERSION, (), None, state_effect)
+
+    if plan.action is PlannerAction.RESPOND_DIRECTLY:
+        try:
+            if plan.response_kind is None or plan.response_text is None:
+                raise SemanticSafetyError("direct response is incomplete")
+            validate_direct_response(
+                plan.response_kind,
+                plan.response_text,
+                plan.trusted_summary_token,
+                trusted_context,
+                tokens,
+            )
+        except SemanticSafetyError:
+            return GuardedSemanticPlan(
+                GuardedDisposition.INVALID_UNSAFE,
+                empty,
+                "I need to verify that with current sources before I can answer.",
+                "UNSUPPORTED_DIRECT_RESPONSE",
+            )
+        return GuardedSemanticPlan(
+            GuardedDisposition.EXECUTABLE,
+            empty,
+            plan.response_text,
+            "VALID_DIRECT_RESPONSE",
+        )
+
+    if plan.action is PlannerAction.ASK_CLARIFICATION:
+        missing = plan.missing_information or MissingInformation.USER_MEANING
+        return GuardedSemanticPlan(
+            GuardedDisposition.NEEDS_CLARIFICATION,
+            CompiledSemanticPlan(
+                COMPILER_VERSION,
+                (),
+                plan.clarification_question,
+                state_effect,
+            ),
+            plan.clarification_question or _clarification_for_missing(missing),
+            f"MISSING_{missing.value}",
+        )
+
+    for task in plan.tasks:
+        if task.geography.mode is GeographyMode.TRUSTED_REFERENCE \
+                and task.geography.value not in set(tokens):
+            return GuardedSemanticPlan(
+                GuardedDisposition.INVALID_UNSAFE,
+                empty,
+                "Which trusted location did you mean?",
+                "UNTRUSTED_GEOGRAPHY_REFERENCE",
+            )
+        if task.time.kind is SemanticTimeKind.TRUSTED_REFERENCE \
+                and task.time.value not in set(tokens):
+            return GuardedSemanticPlan(
+                GuardedDisposition.INVALID_UNSAFE,
+                empty,
+                "Which earlier time period did you mean?",
+                "UNTRUSTED_TIME_REFERENCE",
+            )
+        try:
+            validate_semantic_task(
+                task.domain,
+                task.operation,
+                task.subject,
+                task.geography,
+                task.source_scope,
+            )
+        except OrchestratorContractError:
+            return GuardedSemanticPlan(
+                GuardedDisposition.NEEDS_CLARIFICATION,
+                empty,
+                _clarification_for_task_conflict(task),
+                "CONFLICTING_SEMANTIC_FIELDS",
+            )
+
+    try:
+        compiled = compile_semantic_plan(
+            plan,
+            trusted_context=trusted_context,
+            trusted_reference_tokens=tokens,
+        )
+    except SemanticCompilationError:
+        return GuardedSemanticPlan(
+            GuardedDisposition.INVALID_UNSAFE,
+            empty,
+            "I could not safely prepare that lookup. Could you narrow the request?",
+            "COMPILER_CONTRACT_FAILURE",
+        )
+    if compiled.clarification_reason or not compiled.tool_requests:
+        response, reason = _clarification_for_compilation(plan, compiled.clarification_reason)
+        return GuardedSemanticPlan(
+            GuardedDisposition.NEEDS_CLARIFICATION,
+            compiled,
+            response,
+            reason,
+        )
+    return GuardedSemanticPlan(
+        GuardedDisposition.EXECUTABLE,
+        compiled,
+        None,
+        "REGISTERED_TOOLS_READY",
+    )
+
+
 def compile_semantic_plan(
     plan: SemanticPlan,
     *,
@@ -71,6 +218,8 @@ def compile_semantic_plan(
     trusted_reference_tokens: Iterable[str] = (),
 ) -> CompiledSemanticPlan:
     """Compile a validated semantic action without execution or state mutation."""
+    tokens = tuple(trusted_reference_tokens)
+    plan = _normalize_semantic_plan(plan, trusted_context, tokens)
     state_effect = _derive_state_effect(plan, trusted_context)
     if plan.action is PlannerAction.RESPOND_DIRECTLY:
         return CompiledSemanticPlan(COMPILER_VERSION, (), None, state_effect)
@@ -82,18 +231,30 @@ def compile_semantic_plan(
             state_effect,
         )
 
-    tokens = tuple(trusted_reference_tokens)
     pending: List[Tuple[ToolId, Dict[str, Any], Tuple[CivicDomain, ...]]] = []
     status_sources: List[str] = []
     requires_resolution = False
     for task in plan.tasks:
         try:
+            validate_semantic_task(
+                task.domain,
+                task.operation,
+                task.subject,
+                task.geography,
+                task.source_scope,
+            )
+            if task.geography.mode is GeographyMode.TRUSTED_REFERENCE \
+                    and task.geography.value not in set(tokens):
+                raise SemanticCompilationError("The trusted location reference is unavailable.")
+            if task.time.kind is SemanticTimeKind.TRUSTED_REFERENCE \
+                    and task.time.value not in set(tokens):
+                raise SemanticCompilationError("The trusted time reference is unavailable.")
             task_requests, task_sources, task_resolution = _compile_task(
                 task,
                 trusted_context=trusted_context,
                 trusted_reference_tokens=tokens,
             )
-        except SemanticCompilationError as exc:
+        except (OrchestratorContractError, SemanticCompilationError) as exc:
             return CompiledSemanticPlan(COMPILER_VERSION, (), str(exc), state_effect)
         pending.extend(task_requests)
         status_sources.extend(task_sources)
@@ -146,6 +307,71 @@ def compile_semantic_plan(
     )
 
 
+def _normalize_semantic_plan(
+    plan: SemanticPlan,
+    trusted_context: Mapping[str, Any],
+    trusted_reference_tokens: Sequence[str],
+) -> SemanticPlan:
+    """Canonicalize fields that deterministic capabilities do not consume."""
+    if plan.action is not PlannerAction.GATHER_EVIDENCE:
+        return plan
+    tasks = tuple(
+        SemanticTask(
+            task.domain,
+            task.operation,
+            task.subject,
+            SemanticGeography(GeographyMode.NONE, None),
+            SemanticTime(SemanticTimeKind.NONE, None),
+            task.source_scope,
+        ) if task.operation is SemanticOperation.STATUS else task
+        for task in plan.tasks
+    )
+    if tasks != plan.tasks:
+        plan = SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=tasks)
+    if len(plan.tasks) != 1:
+        return plan
+    active_entity = trusted_context.get("active_entity")
+    if not isinstance(active_entity, Mapping):
+        return plan
+    token = active_entity.get("token")
+    if not isinstance(token, str) or token not in set(trusted_reference_tokens):
+        return plan
+    task = plan.tasks[0]
+    if task.geography.mode in {GeographyMode.EXPLICIT, GeographyMode.MISSING}:
+        return plan
+    if task.time.kind not in {SemanticTimeKind.NONE, SemanticTimeKind.TRUSTED_REFERENCE}:
+        return plan
+    reference_used = (
+        task.geography.mode is GeographyMode.TRUSTED_REFERENCE
+        or task.time.kind is SemanticTimeKind.TRUSTED_REFERENCE
+    )
+    selected_event_shape = (
+        task.domain is SemanticDomain.EVENTS
+        and task.operation in {
+            SemanticOperation.FIND, SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
+        }
+        and (task.subject is not None or reference_used)
+    )
+    selected_event_document_shape = (
+        task.domain is SemanticDomain.DOCUMENTS
+        and task.operation in {
+            SemanticOperation.FIND, SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
+        }
+        and reference_used
+    )
+    if not selected_event_shape and not selected_event_document_shape:
+        return plan
+    canonical = SemanticTask(
+        SemanticDomain.EVENTS,
+        SemanticOperation.FIND,
+        None,
+        SemanticGeography(GeographyMode.NONE, None),
+        SemanticTime(SemanticTimeKind.NONE, None),
+        SourceScope.ANY,
+    )
+    return SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=(canonical,))
+
+
 def _compile_task(
     task: SemanticTask,
     *,
@@ -172,7 +398,8 @@ def _compile_task(
         raise SemanticCompilationError("A location is required before evidence can be gathered.")
     if task.time.kind is SemanticTimeKind.MISSING:
         raise SemanticCompilationError("A time period is required before evidence can be gathered.")
-    if task.geography.mode is GeographyMode.EXPLICIT:
+    if task.geography.mode is GeographyMode.EXPLICIT \
+            and not _explicit_matches_default(task, trusted_context):
         return ([
             (
                 ToolId.RESOLVE_LOCATION,
@@ -237,7 +464,7 @@ def _compile_service_requests(
         raise SemanticCompilationError("Service-request evidence requires a trusted location.")
     if time_scope is None:
         raise SemanticCompilationError("Service-request evidence requires a time period.")
-    issue_id = _subject_id(task.subject)
+    issue_id = _subject_id(task.subject, task.domain)
     if task.operation in {
         SemanticOperation.FIND, SemanticOperation.CHECK_EXISTENCE,
         SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
@@ -297,7 +524,7 @@ def _compile_crime(
         raise SemanticCompilationError("Crime operation is unsupported.")
     arguments: Dict[str, Any] = {
         "operation": operation,
-        "offense_category_id": _subject_id(task.subject),
+        "offense_category_id": _subject_id(task.subject, task.domain),
         "location_id": location_id,
         "time_scope": time_scope,
         "group_by": "OFFENSE" if operation == "GROUP" else None,
@@ -339,6 +566,10 @@ def _location_id(
 ) -> Optional[str]:
     if task.geography.mode is GeographyMode.NONE:
         return None
+    if task.geography.mode is GeographyMode.EXPLICIT \
+            and _explicit_matches_default(task, trusted_context):
+        geography = trusted_context.get("default_geography")
+        return geography.get("location_id") if isinstance(geography, Mapping) else None
     if task.geography.mode is GeographyMode.TRUSTED_REFERENCE:
         token = task.geography.value
         references = trusted_context.get("location_references")
@@ -376,7 +607,9 @@ def _time_scope(
         return {"period": period.value}
     period = {
         SemanticTimeKind.CURRENT_WEEK: SemanticPeriod.CURRENT_WEEK,
+        SemanticTimeKind.CURRENT_WEEKEND: SemanticPeriod.CURRENT_WEEKEND,
         SemanticTimeKind.NEXT_CALENDAR_WEEK: SemanticPeriod.NEXT_CALENDAR_WEEK,
+        SemanticTimeKind.CURRENT_CALENDAR_MONTH: SemanticPeriod.CURRENT_CALENDAR_MONTH,
         SemanticTimeKind.PREVIOUS_CALENDAR_MONTH: SemanticPeriod.PREVIOUS_CALENDAR_MONTH,
     }.get(kind)
     if period is None:
@@ -405,14 +638,50 @@ def _comparison_scope(current: Mapping[str, Any]) -> Dict[str, Any]:
     return {"period": previous}
 
 
-def _subject_id(subject: Optional[str]) -> Optional[str]:
+def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]:
     if not subject:
         return None
     normalized = unicodedata.normalize("NFKD", subject).encode("ascii", "ignore").decode("ascii")
-    value = re.sub(r"[^a-z0-9]+", "_", normalized.casefold()).strip("_")
+    words = re.findall(r"[a-z0-9]+", normalized.casefold())
+    generic = {
+        SemanticDomain.SERVICE_REQUESTS: {
+            "311", "service", "services", "request", "requests", "report", "reports",
+            "complaint", "complaints", "issue", "issues",
+        },
+        SemanticDomain.CRIME: {
+            "crime", "crimes", "incident", "incidents", "report", "reports", "reported",
+        },
+    }.get(domain, set())
+    meaningful = [word for word in words if word not in generic]
+    if not meaningful:
+        return None
+    value = "_".join(meaningful)
     if not value:
         raise SemanticCompilationError("The subject cannot be canonicalized safely.")
+    if not value[0].isalpha():
+        raise SemanticCompilationError("The subject requires a reviewed canonical identifier.")
     return value[:80]
+
+
+def _explicit_matches_default(
+    task: SemanticTask,
+    trusted_context: Mapping[str, Any],
+) -> bool:
+    if task.geography.mode is not GeographyMode.EXPLICIT or not task.geography.value:
+        return False
+    geography = trusted_context.get("default_geography")
+    if not isinstance(geography, Mapping):
+        return False
+    candidate = _normalized_public_text(task.geography.value)
+    return candidate in {
+        _normalized_public_text(str(geography.get("name") or "")),
+        _normalized_public_text(str(geography.get("location_id") or "")),
+    }.difference({""})
+
+
+def _normalized_public_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", normalized.casefold()).split())
 
 
 def _document_corpora(scope: SourceScope) -> Tuple[List[str], Tuple[CivicDomain, ...]]:
@@ -502,10 +771,51 @@ def _derive_state_effect(
     return DerivedStateEffect.REPLACE_TOPIC
 
 
+def _clarification_for_missing(missing: MissingInformation) -> str:
+    return {
+        MissingInformation.SUBJECT: "What topic or issue should I look into?",
+        MissingInformation.GEOGRAPHY: "Which Dorchester location do you mean?",
+        MissingInformation.TIME: "What time period should I use?",
+        MissingInformation.SOURCE_TYPE: "Which kind of source should I check?",
+        MissingInformation.REFERENCE: "Which earlier item do you mean?",
+        MissingInformation.USER_MEANING: "What would you like me to find out?",
+    }[missing]
+
+
+def _clarification_for_task_conflict(task: SemanticTask) -> str:
+    if task.source_scope not in {SourceScope.ANY, SourceScope.OFFICIAL}:
+        return "Should I search that source type for discussion of this topic?"
+    if task.domain is SemanticDomain.DOCUMENTS:
+        return "What should I look for in those documents?"
+    return "What specific civic information would you like me to look up?"
+
+
+def _clarification_for_compilation(
+    plan: SemanticPlan,
+    compiler_reason: Optional[str],
+) -> Tuple[str, str]:
+    if any(task.geography.mode is GeographyMode.MISSING for task in plan.tasks):
+        return "Which Dorchester location do you mean?", "MISSING_GEOGRAPHY"
+    if any(task.time.kind is SemanticTimeKind.MISSING for task in plan.tasks):
+        return "What time period should I use?", "MISSING_TIME"
+    reason = (compiler_reason or "").casefold()
+    if "time period" in reason or "comparison period" in reason:
+        return "What time period should I use?", "MISSING_TIME"
+    if "location" in reason:
+        return "Which Dorchester location do you mean?", "MISSING_GEOGRAPHY"
+    if "selected event" in reason or "trusted" in reason:
+        return "Which earlier item do you mean?", "MISSING_REFERENCE"
+    return "Could you narrow what you want me to look up?", "UNSUPPORTED_SEMANTIC_COMBINATION"
+
+
 __all__ = [
+    "CANONICALIZATION_VERSION",
     "COMPILER_VERSION",
     "CompiledSemanticPlan",
     "DerivedStateEffect",
+    "GuardedDisposition",
+    "GuardedSemanticPlan",
     "SemanticCompilationError",
     "compile_semantic_plan",
+    "guard_semantic_plan",
 ]

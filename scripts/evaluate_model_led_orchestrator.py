@@ -27,12 +27,17 @@ from orchestrator_evaluation import (  # noqa: E402
     load_evaluation_dataset,
 )
 from sanitized_orchestrator_protocol import (  # noqa: E402
+    FROZEN_MODEL_ID,
+    FROZEN_OUTPUT_MODE,
+    FROZEN_PLANNER_TIMEOUT_SECONDS,
+    FROZEN_PROVIDER_MESSAGE_ADAPTER,
     PUBLIC_PROTOCOL_VERSION,
     SanitizedPublicEvaluationProtocol,
     audit_sanitized_provider_payload,
     build_sanitized_provider_payload,
     planner_function_declarations,
     sanitized_generation_config,
+    split_semantic_planner_prompt,
 )
 from semantic_planner import SemanticPlan  # noqa: E402
 
@@ -40,7 +45,10 @@ from semantic_planner import SemanticPlan  # noqa: E402
 DATASETS = {
     "smoke": ROOT / "evaluation" / "model_led_orchestrator" / "contract_smoke.json",
     "development": ROOT / "evaluation" / "model_led_orchestrator" / "development.json",
-    "holdout": ROOT / "evaluation" / "model_led_orchestrator" / "sealed_holdout.json",
+    "holdout": (
+        ROOT / "evaluation" / "model_led_orchestrator"
+        / "sealed_holdout_role_separated_v2.json"
+    ),
 }
 
 
@@ -69,11 +77,12 @@ class GeminiEvaluationProvider:
     def generate(self, prompt: str, *, timeout_seconds: float) -> ProviderResponse:
         call_index = self._next_call_index()
         client = self._client(timeout_seconds)
+        system_instruction, resident_content = split_semantic_planner_prompt(prompt)
         try:
             response = client.models.generate_content(
                 model=self.model_name,
-                contents=prompt,
-                config=self._generation_config(),
+                contents=resident_content,
+                config=self._generation_config(system_instruction=system_instruction),
             )
             return self._normalize_response(response, call_index=call_index)
         except Exception as exc:
@@ -86,11 +95,12 @@ class GeminiEvaluationProvider:
         """Async equivalent for future non-blocking evaluation orchestration."""
         call_index = self._next_call_index()
         client = self._client(timeout_seconds)
+        system_instruction, resident_content = split_semantic_planner_prompt(prompt)
         try:
             response = await client.aio.models.generate_content(
                 model=self.model_name,
-                contents=prompt,
-                config=self._generation_config(),
+                contents=resident_content,
+                config=self._generation_config(system_instruction=system_instruction),
             )
             return self._normalize_response(response, call_index=call_index)
         except Exception as exc:
@@ -109,12 +119,14 @@ class GeminiEvaluationProvider:
             ),
         )
 
-    def _generation_config(self):
+    def _generation_config(self, *, system_instruction: Optional[str] = None):
         generation = sanitized_generation_config(output_mode=self.output_mode)
         kwargs: Dict[str, Any] = {
             "temperature": generation["temperature"],
             "max_output_tokens": generation["max_output_tokens"],
         }
+        if system_instruction is not None:
+            kwargs["system_instruction"] = system_instruction
         if self.output_mode == "plain":
             kwargs["response_mime_type"] = generation["response_mime_type"]
         else:
@@ -253,6 +265,14 @@ def main() -> int:
         raise SystemExit("evaluation requires --dataset")
     if args.dataset == "holdout" and not args.allow_sealed_holdout:
         raise SystemExit("holdout evaluation requires --allow-sealed-holdout")
+    if args.dataset == "holdout" and (
+        args.model != FROZEN_MODEL_ID
+        or args.output_mode != FROZEN_OUTPUT_MODE
+        or abs(args.deadline_seconds - FROZEN_PLANNER_TIMEOUT_SECONDS) > 0.001
+    ):
+        raise SystemExit(
+            "holdout evaluation requires the frozen model, encoding, and planner timeout"
+        )
     if not args.audit_only and not args.model:
         raise SystemExit("real evaluation requires --model")
     dataset_name, sealed, cases = load_evaluation_dataset(
@@ -579,6 +599,7 @@ def _audit_cases(cases, *, output_mode: str) -> tuple[list[dict[str, Any]], dict
         "maximum_payload_bytes": max(payload_bytes) if payload_bytes else 0,
         "unique_payload_hashes": len(set(payload_hashes)),
         "generation_config_sha256": generation_audit.payload_sha256,
+        "provider_message_adapter": FROZEN_PROVIDER_MESSAGE_ADAPTER,
         "private_marker_failures": 0,
     }
 

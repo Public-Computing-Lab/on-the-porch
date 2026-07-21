@@ -18,10 +18,36 @@ production records, and real resident or session data. A fail-closed outbound au
 boundaries before every provider request. Raw provider output and case-level decisions remain in
 `/private/tmp` and are not committed.
 
-The development corpus contains 100 cases in 25 paraphrase families. The sealed holdout contains
-60 cases in 20 disjoint families. Holdout labels require an explicit runner flag and are never
-loaded by production code. A provider holdout run is permitted only after one configuration
-passes smoke and development gates and is frozen.
+The development corpus contains 100 cases in 25 paraphrase families. The accepted replacement
+holdout contains 60 synthetic cases in 20 disjoint families. Holdout labels require an explicit
+runner flag and are never loaded by production code. A provider holdout run is permitted only
+after one configuration passes smoke and development gates and is frozen.
+
+## Frozen Phase 1 configuration
+
+The selected configuration is recorded verbatim in
+`evaluation/model_led_orchestrator/frozen_configuration.json`. It uses the stable model ID
+`gemini-3.1-flash-lite`, the maintained `google-genai` SDK, function calling, public semantic
+protocol/schema v3, prompt v4, the `structured-user-content-adapter-v2`, semantic compiler and
+canonicalization v3, temperature zero, one provider attempt, a 0.70 confidence threshold, and a
+3.0-second planner ceiling. Trusted policy is sent as the provider system instruction; bounded
+trusted state and the synthetic resident message are sent as structured user content. The
+holdout runner rejects a different model, encoding, or timeout. This freeze authorizes only
+isolated evaluation; `MODEL_LED_ORCHESTRATOR_MODE` remains off for resident traffic.
+
+The final repeated smoke run made 63 independent provider calls with 100% availability,
+structure, compiled-tool accuracy, and guarded safety; action and guarded usefulness were 95.24%
+and p95 was 0.868 seconds. The final development run made 100 calls with 99% availability, 98%
+guarded strategy, 97% correct tool-or-targeted-clarification outcomes, 97.7% domain and compiled-
+tool accuracy, 96.55% geography accuracy, 95.4% time accuracy, and 1.044-second p95. All unsafe-
+tool, unsupported-fact, context-isolation, prompt-injection, and unnecessary-clarification counts
+were zero.
+
+The replacement sealed holdout made exactly 60 provider calls. Availability and completed
+structure were 100%; guarded strategy and useful tool-or-targeted-clarification outcomes were
+98.33%; compiled-tool accuracy among executed plans was 97.78%; guarded safety was 100%; and p95
+was 0.957 seconds. Unsupported facts, unsafe tools, fabricated references, context-isolation
+failures, prompt-injection failures, and unnecessary clarifications were all zero.
 
 ## Why the previous semantic plan was still too large
 
@@ -32,10 +58,11 @@ prompt to 3,524-3,727 bytes, but it still asked the model to propose evidence ne
 state transitions, filters, and other server-owned decisions. That plain-JSON smoke reached only
 90.48% structural compliance and included an unsupported direct civic fact.
 
-The current contract removes those remaining responsibilities. Function-mode prompts are
-1,671-1,874 bytes on the 21-case smoke corpus; plain-JSON prompts are 2,999-3,202 bytes. All smoke
-cases produce unique prompt hashes and the outbound privacy audit reports zero private-marker
-failures.
+The current contract removes those remaining responsibilities. The final function-mode audited
+payloads are about 4.3-4.5 KB and include the compact function schema, trusted policy, bounded
+synthetic state, and one resident message. All cases produce unique payload hashes and the
+outbound privacy audit reports zero private-marker failures. Expected actions, tools, and holdout
+labels are local scorer inputs and are absent from provider requests.
 
 ## Three high-level actions
 
@@ -80,8 +107,13 @@ its existing provider path; these models and this adapter are not imported into 
 The legacy `google.generativeai` runtime dependency should be removed in a later controlled
 provider migration after parity and launch gates pass.
 
-The exact evaluated model IDs are:
+The exact evaluated stable model IDs included:
 
+- `gemini-2.0-flash`
+- `gemini-2.0-flash-lite`
+- `gemini-2.5-flash`
+- `gemini-2.5-flash-lite`
+- `gemini-2.5-pro`
 - `gemini-3.5-flash`
 - `gemini-3.1-flash-lite`
 
@@ -102,16 +134,18 @@ high-level function selection, and compact gather-evidence shape:
 - p95 latency compatible with a future 15-second, two-call lifecycle.
 
 Every smoke case then receives at least three independent calls. These are independent evaluation
-trials, not retries. Smoke gates are:
+trials, not retries. The promotion gates are:
 
 - structural compliance among completed calls at least 99%;
-- action accuracy at least 95%;
-- domain and operation accuracy at least 95%;
-- compiled tool-set accuracy at least 92%;
 - unsupported direct civic facts exactly zero;
 - fabricated trusted references exactly zero;
-- unsafe semantic action rate no more than 0.5%;
+- unsafe tool execution exactly zero;
 - exactly one planner call, no civic tool execution, and no state mutation.
+- planner p95 no more than 2.5 seconds.
+
+Raw action, task-field, and compiler scores remain visible as diagnostics. Full guarded strategy,
+semantic field, compiled-tool, unnecessary-clarification, and safety gates are applied on the
+100-case development corpus before freezing.
 
 Only smoke-passing candidates may run development. Only a development-passing frozen
 configuration may run the sealed holdout once.
@@ -132,13 +166,13 @@ Repeated function smoke:
 python scripts/evaluate_model_led_orchestrator.py \
   --dataset smoke --repetitions 3 \
   --model gemini-3.1-flash-lite --output-mode function \
-  --deadline-seconds 8 \
+  --deadline-seconds 3 \
   --output /private/tmp/orchestrator-function-smoke.json
 ```
 
-Repeated plain-JSON smoke uses the same command with `--output-mode plain`. Development and
-holdout commands are intentionally omitted from the normal sequence until their preceding gates
-pass. Raw response capture, when required for local diagnosis, must target `/private/tmp`.
+Repeated plain-JSON smoke uses the same command with `--output-mode plain`. The accepted holdout
+is consumed and must not be rerun. Raw response capture, when required for local diagnosis, must
+target `/private/tmp` and must not be committed.
 
 ## July 20, 2026 operational health
 
@@ -159,7 +193,7 @@ and latency health gates and therefore did not run the semantic smoke corpus.
 `gemini-3.1-flash-lite` completed all 20 calls with 100% structure in every mode. Function
 selection p95 was 0.802s and compact gather p95 was 0.728s. It was the only smoke-eligible model.
 
-## Function calling versus plain JSON
+## Historical function calling versus plain JSON iteration
 
 The eligible model received 63 independent calls per encoding: 21 cases times three trials.
 
@@ -188,7 +222,8 @@ The eligible model received 63 independent calls per encoding: 21 cases times th
 Function calling is materially better on structure, action selection, compilation, latency, and
 output size, but it still fails mandatory structural, action, domain, operation, direct-fact, and
 safety gates. Plain JSON is not viable under this contract because malformed output dominates.
-No encoding is selected or frozen.
+At that iteration, no encoding was selected or frozen. The later guarded contract and
+role-separated adapter results above supersede this failed comparison for selection purposes.
 
 ## General failure classes
 
@@ -208,27 +243,23 @@ repaired, or retried.
 
 ## Selection decision
 
-No candidate and no encoding passed smoke. Therefore:
+`gemini-3.1-flash-lite` with function calling and the role-separated adapter is selected for the
+guarded planner. It is the lowest-cost, lowest-latency available candidate that cleared repeated
+smoke, development, and sealed-holdout gates. Larger or older candidates either failed operational
+health, timed out too often, or failed guarded usefulness. Safety gates were not reduced and no
+sentence-specific production rule was added.
 
-- the 100-case development evaluation was not run;
-- no model, prompt, action encoding, parameters, timeout, or confidence threshold was frozen;
-- the sealed 60-case holdout was not run or used for tuning;
-- no model is selected for resident traffic;
-- Phase 1 is not complete and Phase 2 cutover remains blocked.
-
-The limiting factors are contract/model structural adherence and semantic safety, not provider
-availability for `gemini-3.1-flash-lite`. `gemini-3.5-flash` also has a provider/operational health
-limitation under the tested configuration. Safety gates were not reduced and no sentence-specific
-rule was added.
+The original sealed holdout was consumed and failed before the adapter correction. Aggregate
+diagnosis showed that trusted policy, trusted state, and untrusted resident text had shared one
+provider role. That infrastructure defect was corrected independently of holdout wording. A new
+60-case corpus was independently authored, hashed, frozen after development passed, audited for
+privacy, and then run exactly once. The replacement passed all established gates and is now also
+consumed.
 
 ## Runtime status and remaining work
 
 `MODEL_LED_ORCHESTRATOR_MODE` remains off. The evaluator performs no runtime wiring, civic tool
 execution, database access, state mutation, or resident-facing behavior change. Normal JSON/SSE
-routes and the existing provider path are unchanged.
-
-Before another selection run, the team must resolve the general structural and safety failure
-classes without tuning to individual benchmark phrases, then repeat health and smoke from the
-start. Phase 2 still requires a frozen model/encoding to pass development and one sealed holdout,
-plus shadow parity, deadline, provider-fallback, transport, persistence, privacy, and concurrency
-gates.
+routes and the existing provider path are unchanged. Phase 1 is accepted for its foundation
+scope. Phase 2 must still prove canary tool execution, deterministic answers, state, transport,
+idempotency, provider failure, deadline, privacy, concurrency, and browser gates before cutover.

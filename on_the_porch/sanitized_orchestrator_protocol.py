@@ -9,18 +9,26 @@ from typing import Any, Dict, Iterable, Mapping
 from model_led_orchestrator import NormalizedResidentInput
 from semantic_planner import (
     SEMANTIC_PROTOCOL_VERSION,
+    SEMANTIC_PROMPT_VERSION,
     SemanticPlan,
     audit_semantic_provider_payload,
     build_semantic_planner_prompt,
     build_semantic_provider_payload,
     planner_function_declarations,
+    split_semantic_planner_prompt,
 )
 
 
 PUBLIC_PROTOCOL_VERSION = SEMANTIC_PROTOCOL_VERSION
 PUBLIC_CAPABILITY_CATALOG_VERSION = "not-model-facing"
-PUBLIC_SCHEMA_VERSION = 2
+PUBLIC_SCHEMA_VERSION = 3
 PUBLIC_CONFIDENCE_THRESHOLD = 0.70
+FROZEN_MODEL_ID = "gemini-3.1-flash-lite"
+FROZEN_PROVIDER_SDK = "google-genai"
+FROZEN_OUTPUT_MODE = "function"
+FROZEN_PLANNER_TIMEOUT_SECONDS = 3.0
+FROZEN_PROMPT_VERSION = SEMANTIC_PROMPT_VERSION
+FROZEN_PROVIDER_MESSAGE_ADAPTER = "structured-user-content-adapter-v2"
 
 
 @dataclass(frozen=True)
@@ -158,6 +166,12 @@ def sanitized_generation_config(*, output_mode: str = "plain") -> Dict[str, Any]
 
 
 __all__ = [
+    "FROZEN_MODEL_ID",
+    "FROZEN_OUTPUT_MODE",
+    "FROZEN_PLANNER_TIMEOUT_SECONDS",
+    "FROZEN_PROMPT_VERSION",
+    "FROZEN_PROVIDER_MESSAGE_ADAPTER",
+    "FROZEN_PROVIDER_SDK",
     "PUBLIC_CAPABILITY_CATALOG_VERSION",
     "PUBLIC_CONFIDENCE_THRESHOLD",
     "PUBLIC_PROTOCOL_VERSION",
@@ -169,5 +183,6 @@ __all__ = [
     "build_sanitized_provider_payload",
     "parse_sanitized_orchestrator_decision",
     "sanitized_generation_config",
+    "split_semantic_planner_prompt",
     "planner_function_declarations",
 ]

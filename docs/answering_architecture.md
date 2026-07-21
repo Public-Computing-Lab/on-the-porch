@@ -330,21 +330,20 @@ default, or certify worker counts without RSS and concurrency measurements.
    duplicated orchestration only after caller/import/runtime proof. Tune model choice, pools,
    caches, and worker topology from measured production-like behavior.
 
-The July 19, 2026 executable-plan development gate did not identify an adequate candidate. A first
-semantic redesign reduced the prompt by about 76% but still gave the model evidence, relationship,
-and state responsibilities and failed smoke. The July 20 redesign now exposes only three public
-actions and compiles semantic tasks deterministically. It uses the maintained `google-genai` SDK
-for isolated evaluation of exact stable model IDs. Function prompts are 1.67-1.87 KB and plain
-JSON prompts are 3.00-3.20 KB on the smoke corpus.
+The July 19 executable-plan design and early July 20 semantic revisions failed because too much
+exact structure remained model-owned. The accepted Phase 1 contract exposes only three public
+actions and compiles semantic tasks deterministically. It uses the maintained `google-genai` SDK,
+stable model IDs, function calling, and strict local validation. Provider policy is a system
+instruction; bounded trusted state and the resident message are structured user content.
 
-`gemini-3.1-flash-lite` passed repeated operational health, but its 63-call function smoke reached
-85.71% completed structural compliance, 94.44% action accuracy, 100% domain accuracy, 80%
-operation accuracy, 86.67% compiled-tool accuracy, three unsupported direct civic facts, and a
-4.76% unsafe action rate. Plain JSON reached only 14.29% structure. `gemini-3.5-flash` failed repeated operational
-health at 90% availability and 72.22% completed structure. No candidate passed smoke; development
-and sealed holdout were not run, no model or encoding was frozen, and Phase 2 remains blocked. Any
-future shadow diagnostic must be post-response/offline or independently capped below one second
-so it cannot delay the authoritative resident answer.
+The frozen `gemini-3.1-flash-lite` configuration passed 63 repeated smoke calls, the 100-case
+development corpus, and one independently authored 60-case sealed holdout. Development guarded
+strategy/tool usefulness was 98%/97%, compiled-tool accuracy was 97.7%, geography/time accuracy
+was 96.55%/95.4%, safety was 100%, and p95 was 1.044 seconds. Holdout usefulness was 98.33%,
+compiled-tool accuracy was 97.78%, safety was 100%, and p95 was 0.957 seconds. Unsupported facts,
+unsafe tools, fabricated references, context leakage, injection failures, and unnecessary
+clarifications were zero. `MODEL_LED_ORCHESTRATOR_MODE` remains off; Phase 2 begins with an
+isolated, non-default canary and does not change the current resident runtime.
 
 ## 25. Semantic debt and deprecation map
 

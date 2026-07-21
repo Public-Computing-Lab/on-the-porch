@@ -295,8 +295,8 @@
               "value": null
             },
             "time": {
-              "kind": "EXPLICIT_DATE_RANGE",
-              "value": "this weekend"
+              "kind": "CURRENT_WEEKEND",
+              "value": null
             },
             "source_scope": "ANY"
           },

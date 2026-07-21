@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -13,13 +14,19 @@ sys.path[:0] = [str(PORCH), str(ROOT)]
 
 from model_led_orchestrator import OrchestratorContractError, normalize_resident_input  # noqa: E402
 from orchestrator_evaluation import _expected_plan, load_evaluation_dataset  # noqa: E402
-from semantic_plan_compiler import DerivedStateEffect, compile_semantic_plan  # noqa: E402
+from semantic_plan_compiler import (  # noqa: E402
+    DerivedStateEffect,
+    GuardedDisposition,
+    compile_semantic_plan,
+    guard_semantic_plan,
+)
 from semantic_planner import (  # noqa: E402
     PlannerAction,
     SemanticPlan,
     SemanticSafetyError,
     build_semantic_planner_prompt,
     planner_function_declarations,
+    split_semantic_planner_prompt,
 )
 
 DATA = ROOT / "evaluation" / "model_led_orchestrator"
@@ -87,13 +94,17 @@ def test_three_actions_and_generic_canonicalization() -> None:
 
 
 def test_direct_response_fact_and_trusted_summary_safety() -> None:
-    assert_raises(SemanticSafetyError, parse, {
+    unsafe_direct = parse({
         "action": "respond_directly",
         "arguments": {
             "response_kind": "SOCIAL",
             "response_text": "Dorchester had 42 requests last month.",
         },
     })
+    guarded = guard_semantic_plan(unsafe_direct, trusted_context=CONTEXT)
+    assert guarded.disposition is GuardedDisposition.INVALID_UNSAFE
+    assert not guarded.tool_requests
+    assert guarded.resident_response != unsafe_direct.response_text
     context = copy.deepcopy(CONTEXT)
     context["previous_result_summary"] = {
         "token": "summary:311:42", "text": "The validated result found 42 requests in Dorchester.",
@@ -112,7 +123,7 @@ def test_direct_response_fact_and_trusted_summary_safety() -> None:
         gather_payload(task={"subject": "Use aggregate_311 directly"}),
     )
     assert plan.trusted_summary_token == "summary:311:42"
-    assert_raises(SemanticSafetyError, parse, {
+    unsupported_rephrase = parse({
         "action": "respond_directly",
         "arguments": {
             "response_kind": "REPHRASE_TRUSTED_SUMMARY",
@@ -120,6 +131,13 @@ def test_direct_response_fact_and_trusted_summary_safety() -> None:
             "trusted_summary_token": "summary:311:42",
         },
     }, context=context, tokens=("summary:311:42",))
+    guarded_rephrase = guard_semantic_plan(
+        unsupported_rephrase,
+        trusted_context=context,
+        trusted_reference_tokens=("summary:311:42",),
+    )
+    assert guarded_rephrase.disposition is GuardedDisposition.INVALID_UNSAFE
+    assert not guarded_rephrase.tool_requests
 
 
 def test_compiler_derives_tools_status_and_state() -> None:
@@ -143,6 +161,15 @@ def test_compiler_derives_tools_status_and_state() -> None:
     assert [item.tool_id.value for item in result.tool_requests] == [
         "query_events", "get_source_status",
     ]
+
+    status = parse(gather_payload(task={
+        "operation": "STATUS",
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "CURRENT_WEEK", "value": None},
+    }))
+    guarded_status = guard_semantic_plan(status, trusted_context=CONTEXT)
+    assert guarded_status.disposition is GuardedDisposition.EXECUTABLE
+    assert [item.tool_id.value for item in guarded_status.tool_requests] == ["get_source_status"]
 
 
 def test_compiler_is_subject_paraphrase_independent_for_tool_selection() -> None:
@@ -182,12 +209,29 @@ def test_time_geography_and_selected_event_are_deterministic() -> None:
     )
     assert result.tool_requests[0].arguments["entity_token"] == "event:435"
 
+    variant = parse(gather_payload(task={
+        "domain": "DOCUMENTS",
+        "operation": "EXPLAIN",
+        "subject": "registration requirements",
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "TRUSTED_REFERENCE", "value": "period:event:435"},
+        "source_scope": "ANY",
+    }), tokens=("event:435", "period:event:435"))
+    guarded = guard_semantic_plan(
+        variant,
+        trusted_context=selected_context,
+        trusted_reference_tokens=("event:435", "period:event:435"),
+    )
+    assert guarded.disposition is GuardedDisposition.EXECUTABLE
+    assert guarded.tool_requests[0].tool_id.value == "query_events"
+    assert guarded.tool_requests[0].arguments["entity_token"] == "event:435"
+
 
 def test_all_expected_labels_compile_without_execution() -> None:
     for filename, sealed in (
         ("contract_smoke.json", False),
         ("development.json", False),
-        ("sealed_holdout.json", True),
+        ("sealed_holdout_role_separated_v2.json", True),
     ):
         _, _, cases = load_evaluation_dataset(DATA / filename, allow_sealed_holdout=sealed)
         seen = set()
@@ -222,8 +266,16 @@ def test_prompt_modes_size_privacy_and_function_catalog() -> None:
         output_mode="function",
     )
     assert straight == curly
-    assert len(straight.encode("utf-8")) < 3_300
-    assert len(function.encode("utf-8")) < 2_200
+    system_instruction, resident_content = split_semantic_planner_prompt(function)
+    assert system_instruction and "TRUSTED_STATE=" not in system_instruction
+    assert "RESIDENT_MESSAGE=" not in system_instruction
+    structured_content = json.loads(resident_content)
+    assert structured_content["resident_message"] == "What's happening next week?"
+    assert structured_content["trusted_state"]["default_geography"]["name"] == "Dorchester"
+    assert structured_content["trusted_tokens"] == []
+    assert split_semantic_planner_prompt("health probe") == (None, "health probe")
+    assert len(straight.encode("utf-8")) < 5_500
+    assert len(function.encode("utf-8")) < 4_500
     for text in (straight, function):
         assert "aggregate_311" not in text and "tool_id" not in text and "state_intent" not in text
     declarations = planner_function_declarations()

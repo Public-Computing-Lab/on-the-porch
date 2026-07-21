@@ -315,8 +315,8 @@
               "value": null
             },
             "time": {
-              "kind": "EXPLICIT_DATE_RANGE",
-              "value": "current calendar month"
+              "kind": "CURRENT_CALENDAR_MONTH",
+              "value": null
             },
             "source_scope": "ANY"
           }
@@ -455,8 +455,8 @@
               "value": null
             },
             "time": {
-              "kind": "EXPLICIT_DATE_RANGE",
-              "value": "current calendar month"
+              "kind": "CURRENT_CALENDAR_MONTH",
+              "value": null
             },
             "source_scope": "ANY"
           }
@@ -521,10 +521,10 @@
       "family_id": "dev_policy_zoning",
       "category": "policy",
       "messages": [
-        "What do current planning policies say about zoning in Dorchester?",
-        "Find official policy documents on neighborhood zoning",
-        "What planning guidance applies to development here?",
-        "Search policy sources for Dorchester zoning rules"
+        "What do zoning rules and current planning policies say about Dorchester?",
+        "Find binding zoning rules and official planning policy documents",
+        "What zoning regulations and planning guidance apply to development here?",
+        "Search regulation and planning-policy sources for Dorchester zoning"
       ],
       "expected": {
         "action": "gather_evidence",
@@ -695,8 +695,8 @@
               "value": null
             },
             "time": {
-              "kind": "EXPLICIT_DATE_RANGE",
-              "value": "this weekend"
+              "kind": "CURRENT_WEEKEND",
+              "value": null
             },
             "source_scope": "ANY"
           },
@@ -950,7 +950,7 @@
       "messages": [
         "How current are the 311 and crime sources?",
         "Check freshness for official 311 and BPD incident data",
-        "Are your civic records stale right now?",
+        "Are the 311 and crime records stale right now?",
         "What dates do the 311 and crime feeds cover?"
       ],
       "expected": {

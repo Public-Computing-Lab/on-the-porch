@@ -12,7 +12,14 @@ PORCH = ROOT / "on_the_porch"
 sys.path[:0] = [str(PORCH), str(ROOT)]
 
 from model_led_orchestrator import OrchestratorContractError, normalize_resident_input  # noqa: E402
+from semantic_plan_compiler import GuardedDisposition, guard_semantic_plan  # noqa: E402
 from sanitized_orchestrator_protocol import (  # noqa: E402
+    FROZEN_MODEL_ID,
+    FROZEN_OUTPUT_MODE,
+    FROZEN_PLANNER_TIMEOUT_SECONDS,
+    FROZEN_PROMPT_VERSION,
+    FROZEN_PROVIDER_MESSAGE_ADAPTER,
+    FROZEN_PROVIDER_SDK,
     PUBLIC_PROTOCOL_VERSION,
     SanitizedPublicEvaluationProtocol,
     audit_sanitized_provider_payload,
@@ -42,7 +49,7 @@ def assert_raises(exc_type, function, *args, **kwargs):
 
 
 def test_plain_and_function_payloads_are_small_and_private() -> None:
-    for mode, maximum in (("plain", 3_300), ("function", 2_200)):
+    for mode, maximum in (("plain", 5_800), ("function", 4_500)):
         payload = build_sanitized_provider_payload(
             normalize_resident_input("How many 311 requests were filed this week?"),
             trusted_context=CONTEXT,
@@ -57,6 +64,21 @@ def test_plain_and_function_payloads_are_small_and_private() -> None:
 
 
 def test_function_catalog_has_only_three_high_level_actions() -> None:
+    assert (
+        FROZEN_MODEL_ID,
+        FROZEN_PROVIDER_SDK,
+        FROZEN_OUTPUT_MODE,
+        FROZEN_PLANNER_TIMEOUT_SECONDS,
+        FROZEN_PROMPT_VERSION,
+        FROZEN_PROVIDER_MESSAGE_ADAPTER,
+    ) == (
+        "gemini-3.1-flash-lite",
+        "google-genai",
+        "function",
+        3.0,
+        "semantic-planner-prompt-v4",
+        "structured-user-content-adapter-v2",
+    )
     declarations = planner_function_declarations()
     assert {item["name"] for item in declarations} == {
         "respond_directly", "ask_clarification", "gather_evidence",
@@ -96,9 +118,7 @@ def test_strict_local_validation_rejects_tools_state_and_unknown_tokens() -> Non
         }),
         trusted_context=CONTEXT,
     )
-    assert_raises(
-        OrchestratorContractError,
-        parse_sanitized_orchestrator_decision,
+    untrusted = parse_sanitized_orchestrator_decision(
         json.dumps({
             "action": "respond_directly",
             "arguments": {
@@ -110,6 +130,9 @@ def test_strict_local_validation_rejects_tools_state_and_unknown_tokens() -> Non
         trusted_context=CONTEXT,
         available_trusted_reference_tokens=(),
     )
+    guarded = guard_semantic_plan(untrusted, trusted_context=CONTEXT)
+    assert guarded.disposition is GuardedDisposition.INVALID_UNSAFE
+    assert not guarded.tool_requests
 
 
 def test_generation_modes_and_injection_isolation() -> None:

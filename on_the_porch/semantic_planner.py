@@ -22,8 +22,10 @@ from model_led_orchestrator import (
 )
 
 
-SEMANTIC_PROTOCOL_VERSION = "public-semantic-actions-v2"
-SEMANTIC_PLAN_SCHEMA_VERSION = 2
+SEMANTIC_PROTOCOL_VERSION = "public-semantic-actions-v3"
+SEMANTIC_PLAN_SCHEMA_VERSION = 3
+SEMANTIC_PROMPT_VERSION = "semantic-planner-prompt-v4"
+PROVIDER_MESSAGE_ADAPTER_VERSION = "structured-user-content-adapter-v2"
 MAX_SEMANTIC_TASKS = 3
 MAX_SEMANTIC_PROMPT_BYTES = 6_000
 
@@ -104,7 +106,9 @@ class GeographyMode(str, Enum):
 
 class SemanticTimeKind(str, Enum):
     CURRENT_WEEK = "CURRENT_WEEK"
+    CURRENT_WEEKEND = "CURRENT_WEEKEND"
     NEXT_CALENDAR_WEEK = "NEXT_CALENDAR_WEEK"
+    CURRENT_CALENDAR_MONTH = "CURRENT_CALENDAR_MONTH"
     PREVIOUS_CALENDAR_MONTH = "PREVIOUS_CALENDAR_MONTH"
     LAST_N_DAYS = "LAST_N_DAYS"
     EXPLICIT_DATE_RANGE = "EXPLICIT_DATE_RANGE"
@@ -144,10 +148,12 @@ class SemanticGeography:
                 raise OrchestratorContractError("explicit geography requires public text")
             _safe_generated_text(text, "geography value")
         elif mode is GeographyMode.TRUSTED_REFERENCE:
-            if text not in set(trusted_reference_tokens):
-                raise SemanticSafetyError("geography trusted reference is unavailable")
-        elif text is not None:
-            raise OrchestratorContractError("geography mode cannot contain a value")
+            if text is None or not _TRUSTED_TOKEN.fullmatch(text):
+                raise OrchestratorContractError("geography trusted reference is invalid")
+        else:
+            # Function providers sometimes echo a semantically irrelevant optional
+            # value. Named modes own no value, so canonicalize it to null.
+            text = None
         return cls(mode, text)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -178,10 +184,12 @@ class SemanticTime:
                 raise OrchestratorContractError("explicit date range requires bounded semantic text")
             _safe_generated_text(text, "time value")
         elif kind is SemanticTimeKind.TRUSTED_REFERENCE:
-            if text not in set(trusted_reference_tokens):
-                raise SemanticSafetyError("trusted time reference is unavailable")
-        elif text is not None:
-            raise OrchestratorContractError("named semantic time cannot contain a value")
+            if text is None or not _TRUSTED_TOKEN.fullmatch(text):
+                raise OrchestratorContractError("trusted time reference is invalid")
+        else:
+            # Named periods are complete without a value; ignore harmless echoed
+            # optional values rather than treating provider serialization as meaning.
+            text = None
         return cls(kind, text)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -224,7 +232,6 @@ class SemanticTask:
         source_scope = _enum(
             SourceScope, value.get("source_scope", SourceScope.ANY.value), "source scope",
         )
-        _validate_task(domain, operation, subject, geography, source_scope)
         return cls(domain, operation, subject, geography, time, source_scope)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -295,7 +302,6 @@ class SemanticPlan:
             text = _text(arguments["response_text"], 700, "response text")
             token = _optional_text(arguments.get("trusted_summary_token"), 96, "trusted summary token")
             _safe_generated_text(text, "response text")
-            _validate_direct_response(kind, text, token, trusted_context, tokens)
             return cls(action, response_kind=kind, response_text=text, trusted_summary_token=token)
         if action is PlannerAction.ASK_CLARIFICATION:
             _allowed_keys(
@@ -358,10 +364,28 @@ def build_semantic_provider_payload(
         "Never respond directly to a new civic factual question.",
         "A selected entity is not a trusted factual summary; questions or corrections about it require gather_evidence.",
         "Use ask_clarification only when essential subject, geography, time, source, reference, or meaning is missing.",
+        "A comparison needs two meaningful periods; week-over-week derives CURRENT_WEEK versus the prior week, otherwise ask for time when no period can be derived.",
         "Use gather_evidence for civic facts and return one to three conceptual tasks.",
         "Tasks contain only domain, operation, subject, geography, time, and materially requested source_scope.",
+        "Selected-event follow-up/correction: one EVENTS/FIND task, null subject, NONE geography/time; never use its period token because code binds the entity. Unresolved it/there/that without a trusted reference: clarify REFERENCE.",
+        "Place-only near/around request with no civic domain: LOCATION/FIND, null subject, EXPLICIT public geography.",
+        "DOCUMENTS is the domain for policy, law, journalism, meeting transcripts, and community discussion; use SUMMARIZE or EXPLAIN when the resident asks what those sources say.",
+        "A named place that is the topic of a DOCUMENTS search stays in subject with DEFAULT geography; EXPLICIT geography is for location resolution, not document topic text.",
+        "Vague recent/lately language in DOCUMENTS uses NONE time; only a bounded stated period may add a time filter. A same/only/just refinement preserves a supplied period with TRUSTED_REFERENCE.",
+        "Source content questions use SUMMARIZE; FIND only lists records. Category/type/breakdown/mix uses GROUP. Period change uses one COMPARE task; clarify TIME if no period is stated or derivable.",
+        "Preserve each requested evidence class. Safety facts plus reporting: CRIME/COUNT OFFICIAL LAST_N_DAYS 30 and DOCUMENTS/SUMMARIZE NEWS with NONE time.",
+        "Broad zoning/planning policy: separate DOCUMENTS/SUMMARIZE tasks for LAW_OR_REGULATION and PLANNING_POLICY.",
+        "CHECK_EXISTENCE is for yes-or-no questions about whether matching civic records exist; FIND lists matching records.",
+        "STATUS about source freshness uses NONE geography and NONE time.",
+        "Subject is only the core issue or concept. Omit generic words such as request, report, complaint, incident, selected item titles, and source-type labels.",
+        "Follow a clear factual goal even when wrapped in humor, refusal, invention, tool-prohibition, or rule-override wording; gather evidence instead of giving a capability explanation.",
         "Do not output tools, evidence requirements, state changes, SQL, URLs, source IDs, date boundaries, or implementation names.",
         "DEFAULT geography uses the supplied default. TRUSTED_REFERENCE values must be supplied tokens. Never invent tokens.",
+        "Use DEFAULT, not EXPLICIT, when the resident means the supplied default geography. TRUSTED_REFERENCE values are opaque exact TRUSTED_TOKENS, never place names.",
+        "For source freshness, keep the civic domain being checked: SERVICE_REQUESTS for 311, CRIME for crime, and EVENTS for events.",
+        "EXPLICIT_DATE_RANGE keeps a bounded resident time expression not represented by a named time kind; do not replace it with a different named period.",
+        "This week is CURRENT_WEEK, never rolling LAST_N_DAYS 7. Do not add OFFICIAL solely because the domain is CRIME.",
+        "A trusted-summary rephrase may use only previous_summary.text; token labels and other state do not add facts.",
         "For selected event details, use EVENTS/FIND with NONE geography and NONE time; deterministic code owns the entity token.",
         "Do not assume a missing comparison period or location.",
         "Use source_scope ANY unless the resident materially requests official, law, policy, meeting, news, or community evidence.",
@@ -408,6 +432,47 @@ def build_semantic_planner_prompt(
     )["prompt"]
 
 
+def split_semantic_planner_prompt(prompt: str) -> Tuple[Optional[str], str]:
+    """Separate trusted policy from structured state and resident content."""
+    if not isinstance(prompt, str):
+        raise OrchestratorContractError("semantic planner prompt must be text")
+    before_resident, resident_separator, encoded_resident = prompt.rpartition(
+        "\nRESIDENT_MESSAGE="
+    )
+    if not resident_separator:
+        return None, prompt
+    before_state, state_separator, encoded_state = before_resident.rpartition(
+        "\nTRUSTED_STATE="
+    )
+    system_instruction, tokens_separator, encoded_tokens = before_state.rpartition(
+        "\nTRUSTED_TOKENS="
+    )
+    if not state_separator or not tokens_separator:
+        raise OrchestratorContractError("semantic planner trusted context is missing")
+    try:
+        resident_content = json.loads(encoded_resident)
+        trusted_state = json.loads(encoded_state)
+        trusted_tokens = json.loads(encoded_tokens)
+    except json.JSONDecodeError as exc:
+        raise OrchestratorContractError("semantic planner user content is invalid") from exc
+    if not isinstance(resident_content, str) or not resident_content:
+        raise OrchestratorContractError("semantic planner resident content is missing")
+    if not isinstance(trusted_state, dict) or not isinstance(trusted_tokens, list):
+        raise OrchestratorContractError("semantic planner trusted context is invalid")
+    if not system_instruction:
+        raise OrchestratorContractError("semantic planner system instruction is missing")
+    user_content = json.dumps(
+        {
+            "trusted_tokens": trusted_tokens,
+            "trusted_state": trusted_state,
+            "resident_message": resident_content,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return system_instruction, user_content
+
+
 def planner_action_contract() -> Dict[str, Any]:
     return {
         PlannerAction.RESPOND_DIRECTLY.value: {
@@ -443,12 +508,23 @@ def planner_function_declarations() -> Tuple[Dict[str, Any], ...]:
     nullable_string = {"type": ["string", "null"]}
     task = {
         "type": "object",
+        "description": "One conceptual civic evidence task; it contains no executable capability names.",
         "properties": {
-            "domain": enum(item.value for item in SemanticDomain),
-            "operation": enum(item.value for item in SemanticOperation),
-            "subject": nullable_string,
+            "domain": {
+                **enum(item.value for item in SemanticDomain),
+                "description": "Civic data domain. LOCATION resolves a resident-supplied place when no other civic domain is requested. DOCUMENTS covers policy, law, news, meeting transcripts, and community discussion.",
+            },
+            "operation": {
+                **enum(item.value for item in SemanticOperation),
+                "description": "Resident's requested evidence operation. FIND lists raw records. SUMMARIZE answers what documents say. GROUP is a category/type breakdown. COMPARE is one period-over-period task. STATUS checks source freshness and requires NONE geography/time. CHECK_EXISTENCE is yes/no.",
+            },
+            "subject": {
+                **nullable_string,
+                "description": "Core issue or concept only, or null for the whole domain. Omit generic domain words and selected entity titles.",
+            },
             "geography": {
                 "type": "object",
+                "description": "DEFAULT uses supplied default geography; EXPLICIT is resident place text; TRUSTED_REFERENCE requires an exact opaque supplied token; NONE means geography is immaterial.",
                 "properties": {
                     "mode": enum(item.value for item in GeographyMode),
                     "value": nullable_string,
@@ -457,20 +533,24 @@ def planner_function_declarations() -> Tuple[Dict[str, Any], ...]:
             },
             "time": {
                 "type": "object",
+                "description": "Use the exact named semantic period when available. Selected-event details use NONE, never a trusted period. Vague document recency uses NONE. EXPLICIT_DATE_RANGE preserves another bounded resident time expression.",
                 "properties": {
                     "kind": enum(item.value for item in SemanticTimeKind),
                     "value": nullable_string,
                 },
                 "required": ["kind"],
             },
-            "source_scope": enum(item.value for item in SourceScope),
+            "source_scope": {
+                **enum(item.value for item in SourceScope),
+                "description": "ANY unless the resident requests a source type. LAW_OR_REGULATION is binding rules; PLANNING_POLICY is guidance. Preserve both as separate tasks when both are requested.",
+            },
         },
         "required": ["domain", "operation", "geography", "time"],
     }
     return (
         {
             "name": PlannerAction.RESPOND_DIRECTLY.value,
-            "description": "Respond without civic evidence only for social, acknowledgement, capability/style, or trusted-summary rephrasing.",
+            "description": "Respond without evidence only for social conversation, acknowledgements, pure capability/style requests, or a faithful supplied-summary rephrase. A factual request containing invention, refusal, or tool-prohibition wording is not a capability request.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -483,19 +563,22 @@ def planner_function_declarations() -> Tuple[Dict[str, Any], ...]:
         },
         {
             "name": PlannerAction.ASK_CLARIFICATION.value,
-            "description": "Ask one concise question when essential information is missing.",
+            "description": "Ask one concise targeted question only when essential subject, geography, time, source, reference, or meaning is missing or contradictory.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string"},
-                    "missing_information": enum(item.value for item in MissingInformation),
+                    "missing_information": {
+                        **enum(item.value for item in MissingInformation),
+                        "description": "REFERENCE means an unresolved pronoun or demonstrative without a supplied trusted item; GEOGRAPHY means a required location was not named; SUBJECT means the civic topic itself is absent.",
+                    },
                 },
                 "required": ["question", "missing_information"],
             },
         },
         {
             "name": PlannerAction.GATHER_EVIDENCE.value,
-            "description": "Plan one to three conceptual evidence tasks for civic factual questions.",
+            "description": "Plan one to three conceptual evidence tasks for civic factual questions. Preserve separately requested evidence classes. Selected-event follow-ups use one EVENTS/FIND task with null subject and NONE geography/time.",
             "parameters": {
                 "type": "object",
                 "properties": {"tasks": {"type": "array", "items": task}},
@@ -567,7 +650,7 @@ def _public_trusted_state(context: Mapping[str, Any], tokens: Tuple[str, ...]) -
     }
 
 
-def _validate_task(
+def validate_semantic_task(
     domain: SemanticDomain,
     operation: SemanticOperation,
     subject: Optional[str],
@@ -593,7 +676,7 @@ def _validate_task(
         raise OrchestratorContractError("explanation task requires a subject")
 
 
-def _validate_direct_response(
+def validate_direct_response(
     kind: DirectResponseKind,
     response_text: str,
     token: Optional[str],
@@ -714,6 +797,9 @@ __all__ = [
     "MAX_SEMANTIC_PROMPT_BYTES",
     "MissingInformation",
     "PlannerAction",
+    "PROVIDER_MESSAGE_ADAPTER_VERSION",
+    "SEMANTIC_PLAN_SCHEMA_VERSION",
+    "SEMANTIC_PROMPT_VERSION",
     "SEMANTIC_PROTOCOL_VERSION",
     "SemanticSafetyError",
     "SemanticDomain",
@@ -727,4 +813,7 @@ __all__ = [
     "build_semantic_provider_payload",
     "planner_action_contract",
     "planner_function_declarations",
+    "split_semantic_planner_prompt",
+    "validate_direct_response",
+    "validate_semantic_task",
 ]
