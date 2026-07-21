@@ -289,7 +289,7 @@ def test_generic_domain_subject_is_safely_canonicalized() -> None:
     assert result.guarded_useful_outcome
 
 
-def test_status_ignores_nonconsumed_geography_time_and_source_serialization() -> None:
+def test_source_status_does_not_ignore_request_status_geography_and_time() -> None:
     status_expected = copy.deepcopy(EXPECTED)
     status_expected["tasks"][0].update({
         "operation": "STATUS",
@@ -324,8 +324,8 @@ def test_status_ignores_nonconsumed_geography_time_and_source_serialization() ->
     assert result.scores["geography"] == 1.0
     assert result.scores["time"] == 1.0
     assert result.scores["source_scope"] == 1.0
-    assert result.scores["compiled_tool_set"] == 1.0
-    assert result.guarded_useful_outcome
+    assert result.scores["compiled_tool_set"] == 0.0
+    assert not result.guarded_useful_outcome
 
 
 def test_semantic_metrics_are_scored_only_when_applicable() -> None:
@@ -379,12 +379,16 @@ def test_timeout_has_one_call_and_no_retry() -> None:
 
 def test_maintained_sdk_adapter_isolated_from_runtime() -> None:
     runner = (ROOT / "scripts" / "evaluate_model_led_orchestrator.py").read_text()
+    provider = (ROOT / "on_the_porch" / "gemini_semantic_planner_provider.py").read_text()
     api = (ROOT / "api" / "api_v2.py").read_text()
-    assert "from google import genai" in runner
-    assert "google.generativeai" not in runner
-    assert "async def generate_async" in runner
-    assert "HttpRetryOptions(attempts=1)" in runner
-    assert "semantic_planner" not in api and "semantic_plan_compiler" not in api
+    assert "from google import genai" in provider
+    assert "google.generativeai" not in provider
+    assert "async def generate_async" in provider
+    assert "HttpRetryOptions(attempts=1)" in provider
+    assert "GeminiSemanticPlannerProvider" in runner
+    assert "capture_responses=True" in runner
+    assert "GeminiSemanticPlannerProvider" in api
+    assert "capture_responses=False" in api
 
 
 def test_prompt_expected_labels_and_private_state_are_isolated() -> None:

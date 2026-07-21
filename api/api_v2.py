@@ -226,6 +226,17 @@ from turn_idempotency import (  # noqa: E402
     validate_client_turn_id,
     wait_for_completed_turn,
 )
+from gemini_semantic_planner_provider import GeminiSemanticPlannerProvider  # noqa: E402
+from model_led_turn_service import (  # noqa: E402
+    ModelLedTurnService,
+    TurnRequest as ModelLedTurnRequest,
+    TurnResult as ModelLedTurnResult,
+    TurnServiceStatus as ModelLedTurnStatus,
+)
+from sanitized_orchestrator_protocol import (  # noqa: E402
+    FROZEN_MODEL_ID as MODEL_LED_PLANNER_MODEL,
+    FROZEN_OUTPUT_MODE as MODEL_LED_OUTPUT_MODE,
+)
 
 try:
     from ingest_community_notes import ingest_community_notes as _ingest_community_notes  # noqa: E402
@@ -420,6 +431,7 @@ CORS(
         "RethinkAI-API-Key",
         "Authorization",
         "X-Request-ID",
+        Config.MODEL_LED_CANARY_HEADER_NAME,
     ],
     expose_headers=["X-Request-ID", "Retry-After"],
 )
@@ -3955,6 +3967,126 @@ def _assistant_message_metadata(
     return metadata
 
 
+def _model_led_canary_requested() -> bool:
+    """Allow Phase 2A only in an explicit, isolated non-production request."""
+    return bool(
+        not Config.PRODUCTION_MODE
+        and Config.MODEL_LED_ORCHESTRATOR_MODE == "isolated_canary"
+        and request.headers.get(Config.MODEL_LED_CANARY_HEADER_NAME, "")
+        == Config.MODEL_LED_CANARY_HEADER_VALUE
+    )
+
+
+def _model_led_envelope_with_selected_event(
+    envelope: ThreadStateEnvelope,
+    event_resolution: Optional[EventResolution],
+) -> ThreadStateEnvelope:
+    if event_resolution is None or not event_resolution.event:
+        return envelope
+    entity = event_resolution.resolved_entity()
+    event_id = entity.get("id")
+    if not event_id:
+        return envelope
+    current = envelope.conversation_state
+    selected_state = ConversationState(
+        schema_version=current.schema_version,
+        revision=current.revision,
+        active_topic=CanonicalTopic.EVENTS,
+        active_entity=ActiveEntity.event(event_id),
+        location=current.location,
+        time_range=current.time_range,
+        filters=current.filters if current.active_topic is CanonicalTopic.EVENTS else None,
+        previous_route=current.previous_route,
+        last_substantive_message_id=current.last_substantive_message_id,
+    )
+    return replace(envelope, conversation_state=selected_state)
+
+
+def _run_model_led_canary(
+    message: str,
+    *,
+    state_envelope: ThreadStateEnvelope,
+    event_resolution: Optional[EventResolution],
+    request_started_at: float,
+) -> ModelLedTurnResult:
+    selected_envelope = _model_led_envelope_with_selected_event(
+        state_envelope,
+        event_resolution,
+    )
+    selected_entity_token = None
+    if event_resolution is not None and event_resolution.event:
+        event_id = event_resolution.resolved_entity().get("id")
+        if event_id:
+            selected_entity_token = f"event:{event_id}"
+    provider = GeminiSemanticPlannerProvider(
+        api_key=Config.GEMINI_API_KEY,
+        model_name=MODEL_LED_PLANNER_MODEL,
+        output_mode=MODEL_LED_OUTPUT_MODE,
+        capture_responses=False,
+    )
+    service = ModelLedTurnService(
+        provider=provider,
+        connection_factory=get_db_connection,
+    )
+    result = service.run(ModelLedTurnRequest(
+        message=message,
+        state_envelope=selected_envelope,
+        request_started_at=request_started_at,
+        selected_entity_token=selected_entity_token,
+    ))
+    increment_llm_call_counter(result.planner_call_count)
+    print(
+        json_dumps({
+            "event": "model_led_phase2a_canary",
+            "status": result.status.value,
+            "mode": result.mode,
+            "planner_action": result.planner_action,
+            "guarded_disposition": result.guarded_disposition,
+            "reason_code": result.reason_code,
+            "planner_call_count": result.planner_call_count,
+            "synthesis_call_count": result.synthesis_call_count,
+            "tool_call_count": result.tool_call_count,
+            "tool_execution_counts": dict(result.tool_execution_counts),
+            "latency_ms": round(result.latency_ms, 2),
+        }),
+        file=sys.stderr,
+        flush=True,
+    )
+    return result
+
+
+def _model_led_agent_result(
+    result: ModelLedTurnResult,
+    *,
+    retrieval_cache: Mapping[str, Any],
+) -> Dict[str, Any]:
+    agent = result.to_agent_result(retrieval_cache=retrieval_cache)
+    agent["_model_led_turn_result"] = result
+    return agent
+
+
+def _model_led_message_diagnostics(
+    result: Optional[ModelLedTurnResult],
+) -> Optional[Dict[str, Any]]:
+    if result is None:
+        return None
+    return {
+        "status": result.status.value,
+        "planner_action": result.planner_action,
+        "guarded_disposition": result.guarded_disposition,
+        "reason_code": result.reason_code,
+        "compiled_tool_ids": [
+            item.get("tool_id")
+            for item in result.compiled_tools
+            if isinstance(item.get("tool_id"), str)
+        ],
+        "planner_call_count": result.planner_call_count,
+        "synthesis_call_count": result.synthesis_call_count,
+        "tool_call_count": result.tool_call_count,
+        "latency_ms": round(result.latency_ms, 2),
+    }
+
+
 def _relationship_llm_classifier(prompt: str, timeout_seconds: float) -> str:
     """One bounded structured classifier call used only when explicitly enabled."""
     client = _get_llm_client()
@@ -4089,6 +4221,7 @@ def _user_message_metadata(
     event_query_plan: Optional[EventQueryPlan] = None,
     civic_311_diagnostics: Optional[Mapping[str, Any]] = None,
     dialogue_decision: Optional[DialogueDecision] = None,
+    model_led_turn: Optional[ModelLedTurnResult] = None,
 ) -> Optional[Dict[str, Any]]:
     metadata: Dict[str, Any] = {}
     if event_context is not None:
@@ -4132,6 +4265,9 @@ def _user_message_metadata(
         }
     if dialogue_decision is not None:
         metadata["semantic_dialogue_controller"] = dialogue_decision.to_dict()
+    model_led_diagnostics = _model_led_message_diagnostics(model_led_turn)
+    if model_led_diagnostics is not None:
+        metadata["model_led_phase2a"] = model_led_diagnostics
     return metadata or None
 
 
@@ -4772,6 +4908,7 @@ def post_conversation_message(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
+    model_led_canary_request = _model_led_canary_requested()
 
     conn = None
     emergency_decision = None
@@ -4841,6 +4978,7 @@ def post_conversation_message(thread_id: str):
         stale_active_event = False
         dialogue_decision = None
         direct_dialogue_result = None
+        model_led_turn_result: Optional[ModelLedTurnResult] = None
         # Emergency detection uses only the current message. Skip history load so
         # prior turns cannot influence response wiring; title uses the thread row.
         if not emergency_decision.is_active_emergency:
@@ -4851,45 +4989,45 @@ def post_conversation_message(thread_id: str):
             except EventContextValidationError as exc:
                 print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
                 return _json_error("Invalid UI context.", 400, "invalid_ui_context")
-            dialogue_decision = _decide_semantic_dialogue(
-                message,
-                state_envelope=state_envelope,
-                event_context=event_context,
-                thread_id=thread_id,
-                request_started_at=getattr(g, "request_started_at", None),
-            )
-            relationship = _classify_relationship_shadow(
-                message,
-                history_rows,
-                thread_id=thread_id,
-                authoritative_active_event=conversation_state.active_entity is not None,
-            )
-            dimensions = _extract_dimensions_shadow(
-                message,
-                thread_id=thread_id,
-                conversation_state=conversation_state,
-                event_list_context=(
-                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
-                    or _explicit_event_list_request(message)
-                    or bool(
-                        conversation_state.active_topic is CanonicalTopic.EVENTS
-                        and relationship is not None
-                        and relationship.relationship
-                        in {
-                            ConversationRelationship.REFINEMENT,
-                            ConversationRelationship.FOLLOW_UP,
-                            ConversationRelationship.CORRECTION,
-                        }
-                    )
-                ),
-            )
-            if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
-                direct_dialogue_result = _direct_dialogue_agent_result(
-                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
+            event_resolution = _resolve_validated_event_context(conn, event_context)
+            if not model_led_canary_request:
+                dialogue_decision = _decide_semantic_dialogue(
+                    message,
+                    state_envelope=state_envelope,
+                    event_context=event_context,
+                    thread_id=thread_id,
+                    request_started_at=getattr(g, "request_started_at", None),
                 )
-            else:
-                event_resolution = _resolve_validated_event_context(conn, event_context)
-                if event_resolution is None:
+                relationship = _classify_relationship_shadow(
+                    message,
+                    history_rows,
+                    thread_id=thread_id,
+                    authoritative_active_event=conversation_state.active_entity is not None,
+                )
+                dimensions = _extract_dimensions_shadow(
+                    message,
+                    thread_id=thread_id,
+                    conversation_state=conversation_state,
+                    event_list_context=(
+                        dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                        or _explicit_event_list_request(message)
+                        or bool(
+                            conversation_state.active_topic is CanonicalTopic.EVENTS
+                            and relationship is not None
+                            and relationship.relationship
+                            in {
+                                ConversationRelationship.REFINEMENT,
+                                ConversationRelationship.FOLLOW_UP,
+                                ConversationRelationship.CORRECTION,
+                            }
+                        )
+                    ),
+                )
+                if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
+                    direct_dialogue_result = _direct_dialogue_agent_result(
+                        dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
+                    )
+                elif event_resolution is None:
                     active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
                         message,
@@ -4906,12 +5044,11 @@ def post_conversation_message(thread_id: str):
                             dimensions=dimensions,
                             retrieval_cache=retrieval_cache,
                         )
-                civic_311_request = bool(
-                    event_resolution is None
-                    and active_event_result is None
-                    and state_aware_event_result is None
-                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
-                )
+                    civic_311_request = bool(
+                        active_event_result is None
+                        and state_aware_event_result is None
+                        and dialogue_decision.domain is DialogueDomain.CIVIC_311
+                    )
         conn.close()
         conn = None
 
@@ -4923,6 +5060,31 @@ def post_conversation_message(thread_id: str):
                 emergency_decision,
                 retrieval_cache,
                 detector_latency_ms=detector_latency_ms,
+            )
+        elif model_led_canary_request:
+            model_led_turn_result = _run_model_led_canary(
+                message,
+                state_envelope=state_envelope,
+                event_resolution=event_resolution,
+                request_started_at=float(
+                    getattr(g, "request_started_at", time.perf_counter())
+                ),
+            )
+            if model_led_turn_result.status is ModelLedTurnStatus.NOT_YET_MIGRATED:
+                if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
+                    fail_turn(
+                        get_db_connection,
+                        turn_row_id=turn_reservation.turn_row_id,
+                        lease_owner=turn_reservation.lease_owner,
+                    )
+                return _json_error(
+                    "This topic is not part of the isolated Phase 2A canary.",
+                    409,
+                    "model_led_domain_not_migrated",
+                )
+            agent_result = _model_led_agent_result(
+                model_led_turn_result,
+                retrieval_cache=retrieval_cache,
             )
         elif direct_dialogue_result is not None:
             agent_result = direct_dialogue_result
@@ -4967,58 +5129,69 @@ def post_conversation_message(thread_id: str):
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
         resolved_entity = agent_result.get("resolved_entity")
-        conversation_transition = (
-            _emergency_conversation_transition(conversation_state)
-            if emergency_decision.is_active_emergency
-            else _plan_conversation_transition(
-                state=conversation_state,
-                relationship=relationship,
-                dimensions=dimensions,
-                message=message,
-                mode=mode,
-                agent_result=agent_result,
-                selected_resolution=event_resolution,
-                stale_active_event=stale_active_event,
-                event_query_plan=event_query_plan,
-                event_retrieval_matched=(
-                    agent_result.get("result", {}).get("event_retrieval_matched")
-                    if event_query_plan is not None
-                    else None
+        if model_led_turn_result is not None:
+            conversation_transition = None
+            transition = model_led_turn_result.state_transition
+            persisted_cache = next_cache
+            invalidate_retrieval_cache = False
+            civic_311_context_update = model_led_turn_result.update_civic_311_context
+            civic_311_next_context = model_led_turn_result.next_civic_311_context
+            dialogue_next_context = model_led_turn_result.next_dialogue_context
+            dialogue_context_update = model_led_turn_result.update_dialogue_context
+        else:
+            conversation_transition = (
+                _emergency_conversation_transition(conversation_state)
+                if emergency_decision.is_active_emergency
+                else _plan_conversation_transition(
+                    state=conversation_state,
+                    relationship=relationship,
+                    dimensions=dimensions,
+                    message=message,
+                    mode=mode,
+                    agent_result=agent_result,
+                    selected_resolution=event_resolution,
+                    stale_active_event=stale_active_event,
+                    event_query_plan=event_query_plan,
+                    event_retrieval_matched=(
+                        agent_result.get("result", {}).get("event_retrieval_matched")
+                        if event_query_plan is not None
+                        else None
+                    ),
+                )
+            )
+            transition = conversation_transition.state_proposal(conversation_state)
+            persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
+                current_cache=retrieval_cache,
+                next_cache=next_cache,
+                transition=conversation_transition,
+                replacement_cache_valid=bool(
+                    agent_result.get("event_cache_replacement_valid")
                 ),
             )
-        )
-        transition = conversation_transition.state_proposal(conversation_state)
-        persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
-            current_cache=retrieval_cache,
-            next_cache=next_cache,
-            transition=conversation_transition,
-            replacement_cache_valid=bool(
-                agent_result.get("event_cache_replacement_valid")
-            ),
-        )
-        civic_311_context_update = bool(agent_result.get("civic_311_context_update"))
-        civic_311_next_context = agent_result.get("civic_311_context")
-        if (
-            not civic_311_request
-            and dialogue_decision is not None
-            and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
-            and _clear_civic_311_context_for_message(
-                message,
-                active_context=state_envelope.civic_311_context,
+            civic_311_context_update = bool(agent_result.get("civic_311_context_update"))
+            civic_311_next_context = agent_result.get("civic_311_context")
+            if (
+                not civic_311_request
+                and dialogue_decision is not None
+                and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
+                and _clear_civic_311_context_for_message(
+                    message,
+                    active_context=state_envelope.civic_311_context,
+                )
+            ):
+                civic_311_context_update = True
+                civic_311_next_context = None
+            dialogue_next_context = (
+                _next_dialogue_context_for_turn(
+                    previous=state_envelope.dialogue_context,
+                    decision=dialogue_decision,
+                    agent_result=agent_result,
+                    event_query_plan=event_query_plan,
+                )
+                if dialogue_decision is not None
+                else None
             )
-        ):
-            civic_311_context_update = True
-            civic_311_next_context = None
-        dialogue_next_context = (
-            _next_dialogue_context_for_turn(
-                previous=state_envelope.dialogue_context,
-                decision=dialogue_decision,
-                agent_result=agent_result,
-                event_query_plan=event_query_plan,
-            )
-            if dialogue_decision is not None
-            else None
-        )
+            dialogue_context_update = dialogue_next_context is not None
 
         persisted = _persist_conversation_turn(
             thread_id=thread_id,
@@ -5031,7 +5204,7 @@ def post_conversation_message(thread_id: str):
             next_civic_311_context=civic_311_next_context,
             update_civic_311_context=civic_311_context_update,
             next_dialogue_context=dialogue_next_context,
-            update_dialogue_context=dialogue_next_context is not None,
+            update_dialogue_context=dialogue_context_update,
             user_content=message,
             user_meta=_user_message_metadata(
                 event_context=event_context,
@@ -5043,6 +5216,7 @@ def post_conversation_message(thread_id: str):
                 event_query_plan=event_query_plan,
                 civic_311_diagnostics=agent_result.get("civic_311_diagnostics"),
                 dialogue_decision=dialogue_decision,
+                model_led_turn=model_led_turn_result,
             ),
             assistant_content=answer,
             assistant_mode=mode,
@@ -5089,6 +5263,8 @@ def post_conversation_message(thread_id: str):
         }
         if resolved_entity:
             response_payload["resolved_entity"] = resolved_entity
+        if model_led_turn_result is not None:
+            response_payload["model_led_turn"] = model_led_turn_result.to_safe_dict()
         return jsonify(response_payload), 201
     except ConversationConflictError:
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
@@ -5173,6 +5349,7 @@ def post_conversation_message_stream(thread_id: str):
     message_error = _validate_message(message)
     if message_error:
         return message_error
+    model_led_canary_request = _model_led_canary_requested()
 
     # Load context up front, then release the DB before the long LLM work.
     conn = None
@@ -5274,45 +5451,45 @@ def post_conversation_message_stream(thread_id: str):
             except EventContextValidationError as exc:
                 print(f"Rejected invalid UI event context: {exc}", file=sys.stderr)
                 return _json_error("Invalid UI context.", 400, "invalid_ui_context")
-            dialogue_decision = _decide_semantic_dialogue(
-                message,
-                state_envelope=state_envelope,
-                event_context=event_context,
-                thread_id=thread_id,
-                request_started_at=getattr(g, "request_started_at", None),
-            )
-            relationship = _classify_relationship_shadow(
-                message,
-                history_rows,
-                thread_id=thread_id,
-                authoritative_active_event=conversation_state.active_entity is not None,
-            )
-            dimensions = _extract_dimensions_shadow(
-                message,
-                thread_id=thread_id,
-                conversation_state=conversation_state,
-                event_list_context=(
-                    dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
-                    or _explicit_event_list_request(message)
-                    or bool(
-                        conversation_state.active_topic is CanonicalTopic.EVENTS
-                        and relationship is not None
-                        and relationship.relationship
-                        in {
-                            ConversationRelationship.REFINEMENT,
-                            ConversationRelationship.FOLLOW_UP,
-                            ConversationRelationship.CORRECTION,
-                        }
-                    )
-                ),
-            )
-            if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
-                direct_dialogue_result = _direct_dialogue_agent_result(
-                    dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
+            event_resolution = _resolve_validated_event_context(conn, event_context)
+            if not model_led_canary_request:
+                dialogue_decision = _decide_semantic_dialogue(
+                    message,
+                    state_envelope=state_envelope,
+                    event_context=event_context,
+                    thread_id=thread_id,
+                    request_started_at=getattr(g, "request_started_at", None),
                 )
-            else:
-                event_resolution = _resolve_validated_event_context(conn, event_context)
-                if event_resolution is None:
+                relationship = _classify_relationship_shadow(
+                    message,
+                    history_rows,
+                    thread_id=thread_id,
+                    authoritative_active_event=conversation_state.active_entity is not None,
+                )
+                dimensions = _extract_dimensions_shadow(
+                    message,
+                    thread_id=thread_id,
+                    conversation_state=conversation_state,
+                    event_list_context=(
+                        dialogue_decision.capability_intent is CapabilityIntent.LIST_EVENTS
+                        or _explicit_event_list_request(message)
+                        or bool(
+                            conversation_state.active_topic is CanonicalTopic.EVENTS
+                            and relationship is not None
+                            and relationship.relationship
+                            in {
+                                ConversationRelationship.REFINEMENT,
+                                ConversationRelationship.FOLLOW_UP,
+                                ConversationRelationship.CORRECTION,
+                            }
+                        )
+                    ),
+                )
+                if dialogue_decision.response_strategy is not ResponseStrategy.EXECUTE_CAPABILITY:
+                    direct_dialogue_result = _direct_dialogue_agent_result(
+                        dialogue_decision, retrieval_cache, state_envelope.dialogue_context,
+                    )
+                elif event_resolution is None:
                     active_event_result, stale_active_event = _resolve_active_event_request(
                         conn,
                         message,
@@ -5329,12 +5506,11 @@ def post_conversation_message_stream(thread_id: str):
                             dimensions=dimensions,
                             retrieval_cache=retrieval_cache,
                         )
-                civic_311_request = bool(
-                    event_resolution is None
-                    and active_event_result is None
-                    and state_aware_event_result is None
-                    and dialogue_decision.domain is DialogueDomain.CIVIC_311
-                )
+                    civic_311_request = bool(
+                        active_event_result is None
+                        and state_aware_event_result is None
+                        and dialogue_decision.domain is DialogueDomain.CIVIC_311
+                    )
     except Exception as exc:
         if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
             fail_turn(
@@ -5357,6 +5533,7 @@ def post_conversation_message_stream(thread_id: str):
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
     emergency_request = emergency_decision.is_active_emergency
+    request_started_at = float(getattr(g, "request_started_at", time.perf_counter()))
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
@@ -5376,8 +5553,10 @@ def post_conversation_message_stream(thread_id: str):
         state_aware_event_request = state_aware_event_result is not None
         civic_311_structured_request = civic_311_request
         direct_dialogue_request = direct_dialogue_result is not None
+        model_led_turn_result: Optional[ModelLedTurnResult] = None
         deterministic_request = (
             emergency_request
+            or model_led_canary_request
             or direct_dialogue_request
             or selected_request
             or active_event_request
@@ -5421,6 +5600,27 @@ def post_conversation_message_stream(thread_id: str):
                     emergency_decision,
                     retrieval_cache,
                     detector_latency_ms=detector_latency_ms,
+                )
+            elif model_led_canary_request:
+                model_led_turn_result = _run_model_led_canary(
+                    message,
+                    state_envelope=state_envelope,
+                    event_resolution=event_resolution,
+                    request_started_at=request_started_at,
+                )
+                if model_led_turn_result.status is ModelLedTurnStatus.NOT_YET_MIGRATED:
+                    _fail_active_turn()
+                    completion_status = "rejected"
+                    error_code = "model_led_domain_not_migrated"
+                    yield _sse({
+                        "type": "error",
+                        "error": "This topic is not part of the isolated Phase 2A canary.",
+                        "code": error_code,
+                    })
+                    return
+                deterministic_result = _model_led_agent_result(
+                    model_led_turn_result,
+                    retrieval_cache=retrieval_cache,
                 )
             elif direct_dialogue_request:
                 deterministic_result = direct_dialogue_result
@@ -5597,59 +5797,70 @@ def post_conversation_message_stream(thread_id: str):
                 "retrieval_cache": next_cache,
                 "execution_degraded": bool(execution_metadata.get("execution_degraded")),
             }
-            conversation_transition = (
-                _emergency_conversation_transition(conversation_state)
-                if emergency_request
-                else _plan_conversation_transition(
-                    state=conversation_state,
-                    relationship=relationship,
-                    dimensions=dimensions,
-                    message=message,
-                    mode=mode,
-                    agent_result=transition_result,
-                    selected_resolution=event_resolution,
-                    stale_active_event=stale_active_event,
-                    event_query_plan=event_query_plan,
-                    event_retrieval_matched=(
-                        transition_result.get("result", {}).get("event_retrieval_matched")
-                        if event_query_plan is not None
-                        else None
+            if model_led_turn_result is not None:
+                conversation_transition = None
+                transition = model_led_turn_result.state_transition
+                persisted_cache = next_cache
+                invalidate_retrieval_cache = False
+                civic_311_context_update = model_led_turn_result.update_civic_311_context
+                civic_311_next_context = model_led_turn_result.next_civic_311_context
+                dialogue_next_context = model_led_turn_result.next_dialogue_context
+                dialogue_context_update = model_led_turn_result.update_dialogue_context
+            else:
+                conversation_transition = (
+                    _emergency_conversation_transition(conversation_state)
+                    if emergency_request
+                    else _plan_conversation_transition(
+                        state=conversation_state,
+                        relationship=relationship,
+                        dimensions=dimensions,
+                        message=message,
+                        mode=mode,
+                        agent_result=transition_result,
+                        selected_resolution=event_resolution,
+                        stale_active_event=stale_active_event,
+                        event_query_plan=event_query_plan,
+                        event_retrieval_matched=(
+                            transition_result.get("result", {}).get("event_retrieval_matched")
+                            if event_query_plan is not None
+                            else None
+                        ),
+                        partial=generation_degraded,
+                    )
+                )
+                transition = conversation_transition.state_proposal(conversation_state)
+                persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
+                    current_cache=retrieval_cache,
+                    next_cache=next_cache,
+                    transition=conversation_transition,
+                    replacement_cache_valid=bool(
+                        transition_result.get("event_cache_replacement_valid")
                     ),
-                    partial=generation_degraded,
                 )
-            )
-            transition = conversation_transition.state_proposal(conversation_state)
-            persisted_cache, invalidate_retrieval_cache = _cache_for_conversation_transition(
-                current_cache=retrieval_cache,
-                next_cache=next_cache,
-                transition=conversation_transition,
-                replacement_cache_valid=bool(
-                    transition_result.get("event_cache_replacement_valid")
-                ),
-            )
-            civic_311_context_update = bool(transition_result.get("civic_311_context_update"))
-            civic_311_next_context = transition_result.get("civic_311_context")
-            if (
-                not civic_311_structured_request
-                and dialogue_decision is not None
-                and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
-                and _clear_civic_311_context_for_message(
-                    message,
-                    active_context=state_envelope.civic_311_context,
+                civic_311_context_update = bool(transition_result.get("civic_311_context_update"))
+                civic_311_next_context = transition_result.get("civic_311_context")
+                if (
+                    not civic_311_structured_request
+                    and dialogue_decision is not None
+                    and dialogue_decision.turn_kind not in {TurnKind.SMALL_TALK, TurnKind.RESPONSE_REPHRASE}
+                    and _clear_civic_311_context_for_message(
+                        message,
+                        active_context=state_envelope.civic_311_context,
+                    )
+                ):
+                    civic_311_context_update = True
+                    civic_311_next_context = None
+                dialogue_next_context = (
+                    _next_dialogue_context_for_turn(
+                        previous=state_envelope.dialogue_context,
+                        decision=dialogue_decision,
+                        agent_result=transition_result,
+                        event_query_plan=event_query_plan,
+                    )
+                    if dialogue_decision is not None
+                    else None
                 )
-            ):
-                civic_311_context_update = True
-                civic_311_next_context = None
-            dialogue_next_context = (
-                _next_dialogue_context_for_turn(
-                    previous=state_envelope.dialogue_context,
-                    decision=dialogue_decision,
-                    agent_result=transition_result,
-                    event_query_plan=event_query_plan,
-                )
-                if dialogue_decision is not None
-                else None
-            )
+                dialogue_context_update = dialogue_next_context is not None
             persisted = _persist_conversation_turn(
                 thread_id=thread_id,
                 user_id=user_id,
@@ -5661,7 +5872,7 @@ def post_conversation_message_stream(thread_id: str):
                 next_civic_311_context=civic_311_next_context,
                 update_civic_311_context=civic_311_context_update,
                 next_dialogue_context=dialogue_next_context,
-                update_dialogue_context=dialogue_next_context is not None,
+                update_dialogue_context=dialogue_context_update,
                 user_content=message,
                 user_meta=_user_message_metadata(
                     event_context=event_context,
@@ -5673,6 +5884,7 @@ def post_conversation_message_stream(thread_id: str):
                     event_query_plan=event_query_plan,
                     civic_311_diagnostics=transition_result.get("civic_311_diagnostics"),
                     dialogue_decision=dialogue_decision,
+                    model_led_turn=model_led_turn_result,
                 ),
                 assistant_content=full_answer,
                 assistant_mode=mode,
@@ -5723,6 +5935,8 @@ def post_conversation_message_stream(thread_id: str):
             }
             if resolved_entity:
                 final_payload["resolved_entity"] = resolved_entity
+            if model_led_turn_result is not None:
+                final_payload["model_led_turn"] = model_led_turn_result.to_safe_dict()
             if emergency_request:
                 _log_emergency_metrics(
                     emergency_decision,

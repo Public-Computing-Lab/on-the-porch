@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
@@ -63,6 +63,7 @@ class SemanticPeriod(str, Enum):
     PREVIOUS_CALENDAR_WEEK = "PREVIOUS_CALENDAR_WEEK"
     CURRENT_CALENDAR_MONTH = "CURRENT_CALENDAR_MONTH"
     PREVIOUS_CALENDAR_MONTH = "PREVIOUS_CALENDAR_MONTH"
+    UPCOMING_DEFAULT = "UPCOMING_DEFAULT"
     LAST_N_DAYS = "LAST_N_DAYS"
     EXPLICIT_DATE_RANGE = "EXPLICIT_DATE_RANGE"
     RETAIN_TRUSTED_PERIOD = "RETAIN_TRUSTED_PERIOD"
@@ -147,6 +148,120 @@ class SemanticTimeScope:
             }.items()
             if value is not None
         }
+
+
+@dataclass(frozen=True)
+class ResolvedSemanticTimeScope:
+    period: SemanticPeriod
+    start_date: str
+    end_date_exclusive: str
+    label: str
+    event_label_code: str
+    upcoming: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "period": self.period.value,
+            "start_date": self.start_date,
+            "end_date_exclusive": self.end_date_exclusive,
+            "label": self.label,
+            "event_label_code": self.event_label_code,
+            "upcoming": self.upcoming,
+        }
+
+
+def resolve_semantic_time_scope(
+    raw: Mapping[str, Any],
+    *,
+    today: date,
+    trusted_period: Optional[Mapping[str, Any]] = None,
+) -> ResolvedSemanticTimeScope:
+    """Resolve a validated compiler time scope to one half-open calendar range."""
+    scope = SemanticTimeScope.from_mapping(
+        raw,
+        trusted_reference_tokens=(
+            (str(raw.get("trusted_reference_token")),)
+            if raw.get("trusted_reference_token")
+            else ()
+        ),
+    )
+    period = scope.period
+    start: date
+    end: date
+    event_label = "EXPLICIT_RANGE"
+    label: str
+    if period is SemanticPeriod.CURRENT_DAY:
+        start, end, event_label, label = today, today + timedelta(days=1), "TODAY", "today"
+    elif period is SemanticPeriod.CURRENT_WEEK:
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=7)
+        event_label, label = "THIS_CALENDAR_WEEK", "this calendar week"
+    elif period is SemanticPeriod.CURRENT_WEEKEND:
+        start = today + timedelta(days=(5 - today.weekday()) % 7)
+        if today.weekday() == 6:
+            start = today
+        end = start + timedelta(days=2 if start.weekday() == 5 else 1)
+        event_label, label = "THIS_WEEKEND", "this weekend"
+    elif period is SemanticPeriod.NEXT_CALENDAR_WEEK:
+        start = today - timedelta(days=today.weekday()) + timedelta(days=7)
+        end = start + timedelta(days=7)
+        event_label, label = "NEXT_CALENDAR_WEEK", "next calendar week"
+    elif period is SemanticPeriod.NEXT_WEEKEND:
+        week_start = today - timedelta(days=today.weekday()) + timedelta(days=7)
+        start, end = week_start + timedelta(days=5), week_start + timedelta(days=7)
+        event_label, label = "NEXT_WEEKEND", "next weekend"
+    elif period is SemanticPeriod.PREVIOUS_CALENDAR_WEEK:
+        end = today - timedelta(days=today.weekday())
+        start = end - timedelta(days=7)
+        event_label, label = "LAST_WEEK", "the previous calendar week"
+    elif period is SemanticPeriod.CURRENT_CALENDAR_MONTH:
+        start = today.replace(day=1)
+        end = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        event_label, label = "THIS_MONTH", "this calendar month"
+    elif period is SemanticPeriod.PREVIOUS_CALENDAR_MONTH:
+        end = today.replace(day=1)
+        previous_last = end - timedelta(days=1)
+        start = previous_last.replace(day=1)
+        event_label = "LAST_MONTH"
+        label = f"{start.strftime('%B')} {start.year}"
+    elif period is SemanticPeriod.UPCOMING_DEFAULT:
+        start, end = today, today + timedelta(days=14)
+        event_label, label = "UPCOMING_DEFAULT", "the next 14 days"
+    elif period is SemanticPeriod.LAST_N_DAYS:
+        end = today + timedelta(days=1)
+        start = end - timedelta(days=int(scope.n_days or 1))
+        event_label = "ROLLING_DAYS"
+        label = f"the last {int(scope.n_days or 1)} days"
+    elif period is SemanticPeriod.EXPLICIT_DATE_RANGE:
+        start = date.fromisoformat(str(scope.start_date))
+        end = date.fromisoformat(str(scope.end_date_exclusive))
+        label = (
+            f"{start.strftime('%B')} {start.day} through "
+            f"{(end - timedelta(days=1)).strftime('%B')} {(end - timedelta(days=1)).day}, "
+            f"{start.year}"
+        )
+    elif period is SemanticPeriod.RETAIN_TRUSTED_PERIOD:
+        if not isinstance(trusted_period, Mapping):
+            raise ToolContractError("trusted period values are unavailable")
+        try:
+            start = date.fromisoformat(str(trusted_period["start_date"]))
+            end = date.fromisoformat(str(trusted_period["end_date_exclusive"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ToolContractError("trusted period values are invalid") from exc
+        if end <= start or (end - start).days > 366:
+            raise ToolContractError("trusted period values are invalid")
+        label = str(trusted_period.get("label") or "the previous period")[:192]
+        event_label = str(trusted_period.get("event_label_code") or "EXPLICIT_RANGE")
+    else:  # pragma: no cover - exhaustive enum guard
+        raise ToolContractError("semantic period cannot be resolved")
+    return ResolvedSemanticTimeScope(
+        period=period,
+        start_date=start.isoformat(),
+        end_date_exclusive=end.isoformat(),
+        label=label,
+        event_label_code=event_label,
+        upcoming=end > today,
+    )
 
 
 @dataclass(frozen=True)
@@ -753,6 +868,7 @@ __all__ = [
     "DocumentCorpus",
     "MAX_TOOL_REQUESTS",
     "RegisteredToolRequest",
+    "ResolvedSemanticTimeScope",
     "SemanticPeriod",
     "SemanticTimeScope",
     "SourceTypeFilter",
@@ -761,6 +877,7 @@ __all__ = [
     "ToolDefinition",
     "ToolId",
     "catalog_for_prompt",
+    "resolve_semantic_time_scope",
     "validate_tool_domain_compatibility",
     "validate_tool_arguments",
 ]

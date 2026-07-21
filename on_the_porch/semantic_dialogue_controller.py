@@ -706,7 +706,15 @@ def validate_dialogue_context(value: Any) -> Dict[str, Any]:
             enum_type(item)
     pending_type = copied.get("pending_clarification_type")
     pending_domain = copied.get("pending_clarification_domain")
-    if pending_type is not None and pending_type not in {"311_ISSUE_SCOPE"}:
+    if pending_type is not None and pending_type not in {
+        "311_ISSUE_SCOPE",
+        "SEMANTIC_SUBJECT",
+        "SEMANTIC_GEOGRAPHY",
+        "SEMANTIC_TIME",
+        "SEMANTIC_SOURCE_TYPE",
+        "SEMANTIC_REFERENCE",
+        "SEMANTIC_USER_MEANING",
+    }:
         raise ValueError("dialogue context has an invalid pending clarification")
     if pending_domain is not None:
         DialogueDomain(pending_domain)

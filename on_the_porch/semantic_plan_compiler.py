@@ -21,6 +21,8 @@ from civic_tool_catalog import (
     ToolContractError,
     ToolId,
 )
+from civic_311 import canonical_issue_family_id
+from conversation_dimensions import resolve_app_now, resolve_explicit_date_expression
 from model_led_orchestrator import OrchestratorContractError
 from semantic_planner import (
     GeographyMode,
@@ -315,17 +317,7 @@ def _normalize_semantic_plan(
     """Canonicalize fields that deterministic capabilities do not consume."""
     if plan.action is not PlannerAction.GATHER_EVIDENCE:
         return plan
-    tasks = tuple(
-        SemanticTask(
-            task.domain,
-            task.operation,
-            task.subject,
-            SemanticGeography(GeographyMode.NONE, None),
-            SemanticTime(SemanticTimeKind.NONE, None),
-            task.source_scope,
-        ) if task.operation is SemanticOperation.STATUS else task
-        for task in plan.tasks
-    )
+    tasks = tuple(_normalize_task(task) for task in plan.tasks)
     if tasks != plan.tasks:
         plan = SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=tasks)
     if len(plan.tasks) != 1:
@@ -337,10 +329,12 @@ def _normalize_semantic_plan(
     if not isinstance(token, str) or token not in set(trusted_reference_tokens):
         return plan
     task = plan.tasks[0]
-    if task.geography.mode in {GeographyMode.EXPLICIT, GeographyMode.MISSING}:
-        return plan
-    if task.time.kind not in {SemanticTimeKind.NONE, SemanticTimeKind.TRUSTED_REFERENCE}:
-        return plan
+    selected_for_turn = trusted_context.get("selected_entity_for_turn") == token
+    if not selected_for_turn:
+        if task.geography.mode in {GeographyMode.EXPLICIT, GeographyMode.MISSING}:
+            return plan
+        if task.time.kind not in {SemanticTimeKind.NONE, SemanticTimeKind.TRUSTED_REFERENCE}:
+            return plan
     reference_used = (
         task.geography.mode is GeographyMode.TRUSTED_REFERENCE
         or task.time.kind is SemanticTimeKind.TRUSTED_REFERENCE
@@ -350,7 +344,7 @@ def _normalize_semantic_plan(
         and task.operation in {
             SemanticOperation.FIND, SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
         }
-        and (task.subject is not None or reference_used)
+        and (selected_for_turn or task.subject is not None or reference_used)
     )
     selected_event_document_shape = (
         task.domain is SemanticDomain.DOCUMENTS
@@ -370,6 +364,47 @@ def _normalize_semantic_plan(
         SourceScope.ANY,
     )
     return SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=(canonical,))
+
+
+def _normalize_task(task: SemanticTask) -> SemanticTask:
+    if (
+        task.operation is SemanticOperation.STATUS
+        and task.subject is None
+        and task.time.kind is SemanticTimeKind.NONE
+    ):
+        return SemanticTask(
+            task.domain,
+            task.operation,
+            None,
+            SemanticGeography(GeographyMode.NONE, None),
+            task.time,
+            task.source_scope,
+        )
+    if (
+        task.domain is SemanticDomain.SERVICE_REQUESTS
+        and task.operation is SemanticOperation.GROUP
+        and _is_status_subject(task.subject)
+    ):
+        return SemanticTask(
+            task.domain,
+            SemanticOperation.STATUS,
+            None,
+            task.geography,
+            task.time,
+            task.source_scope,
+        )
+    return task
+
+
+def _is_status_subject(subject: Optional[str]) -> bool:
+    if not subject:
+        return False
+    words = set(_normalized_public_text(subject).split()).difference({
+        "and", "or", "versus", "vs", "by",
+    })
+    return bool(words) and words.issubset({
+        "status", "statuses", "open", "opened", "closed", "closure", "pending",
+    })
 
 
 def _compile_task(
@@ -409,7 +444,18 @@ def _compile_task(
         ], [], True)
 
     location_id = _location_id(task, trusted_context, trusted_reference_tokens)
-    time_scope = _time_scope(task, trusted_reference_tokens)
+    time_scope = _time_scope(
+        task,
+        trusted_reference_tokens,
+        trusted_context=trusted_context,
+    )
+    if (
+        task.domain is SemanticDomain.EVENTS
+        and task.operation in {SemanticOperation.FIND, SemanticOperation.CHECK_EXISTENCE}
+        and task.time.kind is SemanticTimeKind.NONE
+        and time_scope is None
+    ):
+        time_scope = {"period": SemanticPeriod.UPCOMING_DEFAULT.value}
     status_sources = _status_sources(task)
     if task.domain is SemanticDomain.EVENTS:
         return _compile_events(task, trusted_context, location_id, time_scope), status_sources, False
@@ -587,9 +633,23 @@ def _location_id(
 def _time_scope(
     task: SemanticTask,
     trusted_reference_tokens: Sequence[str],
+    *,
+    trusted_context: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
     kind = task.time.kind
     if kind is SemanticTimeKind.NONE:
+        active_topic = trusted_context.get("active_topic")
+        active_time = trusted_context.get("time_scope")
+        token = active_time.get("token") if isinstance(active_time, Mapping) else None
+        if (
+            active_topic == task.domain.value
+            and isinstance(token, str)
+            and token in set(trusted_reference_tokens)
+        ):
+            return {
+                "period": SemanticPeriod.RETAIN_TRUSTED_PERIOD.value,
+                "trusted_reference_token": token,
+            }
         return None
     if kind is SemanticTimeKind.LAST_N_DAYS:
         return {"period": SemanticPeriod.LAST_N_DAYS.value, "n_days": int(task.time.value or "0")}
@@ -602,9 +662,19 @@ def _time_scope(
         }
     if kind is SemanticTimeKind.EXPLICIT_DATE_RANGE:
         period = _semantic_range_period(task.time.value or "")
-        if period is None:
+        if period is not None:
+            return {"period": period.value}
+        resolved = resolve_explicit_date_expression(task.time.value)
+        if resolved is None:
             raise SemanticCompilationError("The semantic time range needs deterministic resolution.")
-        return {"period": period.value}
+        named = _named_calendar_period(resolved.start_date, resolved.end_date_exclusive)
+        if named is not None:
+            return {"period": named.value}
+        return {
+            "period": SemanticPeriod.EXPLICIT_DATE_RANGE.value,
+            "start_date": resolved.start_date,
+            "end_date_exclusive": resolved.end_date_exclusive,
+        }
     period = {
         SemanticTimeKind.CURRENT_WEEK: SemanticPeriod.CURRENT_WEEK,
         SemanticTimeKind.CURRENT_WEEKEND: SemanticPeriod.CURRENT_WEEKEND,
@@ -633,9 +703,58 @@ def _comparison_scope(current: Mapping[str, Any]) -> Dict[str, Any]:
         SemanticPeriod.CURRENT_WEEK.value: SemanticPeriod.PREVIOUS_CALENDAR_WEEK.value,
         SemanticPeriod.CURRENT_CALENDAR_MONTH.value: SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value,
     }.get(current.get("period"))
-    if previous is None:
-        raise SemanticCompilationError("The requested comparison period is underspecified.")
-    return {"period": previous}
+    if previous is not None:
+        return {"period": previous}
+    if current.get("period") == SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value:
+        from datetime import timedelta
+
+        this_month = resolve_app_now().date().replace(day=1)
+        previous_start = (this_month - timedelta(days=1)).replace(day=1)
+        prior_start = (previous_start - timedelta(days=1)).replace(day=1)
+        return {
+            "period": SemanticPeriod.EXPLICIT_DATE_RANGE.value,
+            "start_date": prior_start.isoformat(),
+            "end_date_exclusive": previous_start.isoformat(),
+        }
+    if current.get("period") == SemanticPeriod.EXPLICIT_DATE_RANGE.value:
+        from datetime import date, timedelta
+
+        try:
+            start = date.fromisoformat(str(current["start_date"]))
+            end = date.fromisoformat(str(current["end_date_exclusive"]))
+            if end <= start:
+                raise ValueError
+            prior_start = start - timedelta(days=(end - start).days)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SemanticCompilationError(
+                "The requested comparison period is underspecified."
+            ) from exc
+        return {
+            "period": SemanticPeriod.EXPLICIT_DATE_RANGE.value,
+            "start_date": prior_start.isoformat(),
+            "end_date_exclusive": start.isoformat(),
+        }
+    raise SemanticCompilationError("The requested comparison period is underspecified.")
+
+
+def _named_calendar_period(start_value: str, end_value: str) -> Optional[SemanticPeriod]:
+    from datetime import date, timedelta
+
+    try:
+        start = date.fromisoformat(start_value)
+        end = date.fromisoformat(end_value)
+    except ValueError:
+        return None
+    today = resolve_app_now().date()
+    this_month = today.replace(day=1)
+    previous_end = this_month
+    previous_start = (previous_end - timedelta(days=1)).replace(day=1)
+    if (start, end) == (previous_start, previous_end):
+        return SemanticPeriod.PREVIOUS_CALENDAR_MONTH
+    next_month = (this_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    if (start, end) == (this_month, next_month):
+        return SemanticPeriod.CURRENT_CALENDAR_MONTH
+    return None
 
 
 def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]:
@@ -646,7 +765,13 @@ def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]
     generic = {
         SemanticDomain.SERVICE_REQUESTS: {
             "311", "service", "services", "request", "requests", "report", "reports",
-            "complaint", "complaints", "issue", "issues",
+            "complaint", "complaints", "issue", "issues", "case", "cases",
+            "boston", "category", "categories",
+            "type", "types", "all", "everything", "overall", "total", "totals",
+            "a", "an", "the", "of", "in", "for", "from", "by", "most", "common",
+            "kind", "kinds", "breakdown", "mix",
+            "month", "monthly", "period", "previous", "prior", "change", "changes",
+            "comparison", "compare", "compared", "over",
         },
         SemanticDomain.CRIME: {
             "crime", "crimes", "incident", "incidents", "report", "reports", "reported",
@@ -655,6 +780,13 @@ def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]
     meaningful = [word for word in words if word not in generic]
     if not meaningful:
         return None
+    if domain is SemanticDomain.SERVICE_REQUESTS:
+        family = canonical_issue_family_id(" ".join(meaningful))
+        if family is None:
+            raise SemanticCompilationError(
+                "The service-request subject is outside the reviewed issue registry."
+            )
+        return family.casefold()
     value = "_".join(meaningful)
     if not value:
         raise SemanticCompilationError("The subject cannot be canonicalized safely.")
@@ -673,6 +805,8 @@ def _explicit_matches_default(
     if not isinstance(geography, Mapping):
         return False
     candidate = _normalized_public_text(task.geography.value)
+    if candidate in {"here", "around here", "near here", "nearby", "locally"}:
+        return True
     return candidate in {
         _normalized_public_text(str(geography.get("name") or "")),
         _normalized_public_text(str(geography.get("location_id") or "")),

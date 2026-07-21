@@ -316,15 +316,29 @@ GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 25)
 GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 30)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 2)
 
-# Future model-led orchestrator. Phase 1 is contract/evaluation only; this flag
-# is deliberately not wired into resident traffic.
+# Model-led orchestrator. The normal resident runtime remains off by default;
+# Phase 2A permits only explicit offline replay or an isolated non-production canary.
 MODEL_LED_ORCHESTRATOR_MODE = _env("MODEL_LED_ORCHESTRATOR_MODE", "off").strip().lower()
-if MODEL_LED_ORCHESTRATOR_MODE not in {"off", "offline", "shadow"}:
+_MODEL_LED_MODE_ALIASES = {
+    "offline": "shadow_or_offline_replay",
+    "shadow": "shadow_or_offline_replay",
+}
+MODEL_LED_ORCHESTRATOR_MODE = _MODEL_LED_MODE_ALIASES.get(
+    MODEL_LED_ORCHESTRATOR_MODE,
+    MODEL_LED_ORCHESTRATOR_MODE,
+)
+if MODEL_LED_ORCHESTRATOR_MODE not in {
+    "off",
+    "shadow_or_offline_replay",
+    "isolated_canary",
+}:
     MODEL_LED_ORCHESTRATOR_MODE = "off"
 MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS = max(
     0.25,
     min(3.0, _float("MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS", 1.5)),
 )
+MODEL_LED_CANARY_HEADER_NAME = "X-On-The-Porch-Canary"
+MODEL_LED_CANARY_HEADER_VALUE = "model-led-phase2a"
 
 # ============================================================================
 # Embeddings / vector stores
@@ -755,6 +769,10 @@ class Config:
     INGEST_STALE_HOURS = INGEST_STALE_HOURS
     REQUEST_METRICS_ENABLED = REQUEST_METRICS_ENABLED
     GEMINI_FALLBACK_MODEL = GEMINI_FALLBACK_MODEL
+    GEMINI_API_KEY = GEMINI_API_KEY
+    MODEL_LED_ORCHESTRATOR_MODE = MODEL_LED_ORCHESTRATOR_MODE
+    MODEL_LED_CANARY_HEADER_NAME = MODEL_LED_CANARY_HEADER_NAME
+    MODEL_LED_CANARY_HEADER_VALUE = MODEL_LED_CANARY_HEADER_VALUE
     STREAMING_ENABLED = STREAMING_ENABLED
     SECRET_KEY = SECRET_KEY
     SESSION_COOKIE_SECURE = SESSION_COOKIE_SECURE

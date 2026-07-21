@@ -111,7 +111,7 @@ FAMILY_DEFINITIONS: Tuple[FamilyDefinition, ...] = (
         IssueFamily.ROAD_SURFACE_POTHOLE,
         "pothole",
         (
-            "pothole", "potholes", "hole in the road", "hole in the street",
+            "pothole", "potholes", "road hole", "hole in the road", "hole in the street",
             "road crater", "broken road surface",
         ),
         ("Request for Pothole Repair", "BWSC Pothole"),
@@ -121,7 +121,7 @@ FAMILY_DEFINITIONS: Tuple[FamilyDefinition, ...] = (
         IssueFamily.DRAINAGE_AND_FLOODING,
         "drainage and flooding",
         (
-            "flooding", "street flooding", "water collecting", "standing water",
+            "drainage", "flooding", "street flooding", "water collecting", "standing water",
             "drain", "drains", "storm drain", "storm drains", "blocked drain", "clogged storm drain", "water not draining",
             "water backing up", "catch basin", "catchbasin",
         ),
@@ -134,7 +134,8 @@ FAMILY_DEFINITIONS: Tuple[FamilyDefinition, ...] = (
         "street and pavement condition",
         (
             "cracked road", "broken pavement", "damaged pavement", "road condition",
-            "road conditions", "pavement condition", "street damage", "sidewalk repair", "roadway repair", "sidewalk cover",
+            "road conditions", "damaged road surface", "damaged road surfaces",
+            "pavement condition", "street damage", "sidewalk repair", "roadway repair", "sidewalk cover",
         ),
         (
             "Roadway Repair", "Sidewalk Repair", "Sidewalk Repair (Make Safe)",
@@ -404,6 +405,129 @@ def _bounded_optional_text(value: Any, maximum: int) -> Optional[str]:
         return None
     text = str(value).strip()
     return text[:maximum] if text else None
+
+
+def canonical_issue_family_id(value: Any) -> Optional[str]:
+    """Map one compiler-owned issue concept to the reviewed 311 registry."""
+    text = _normalized(str(value or "").replace("_", " "))
+    if not text:
+        return None
+    matches = []
+    for definition in FAMILY_DEFINITIONS:
+        candidates = {
+            _normalized(definition.family.value.replace("_", " ")),
+            _normalized(definition.label),
+            *(_normalized(alias) for alias in definition.aliases),
+        }
+        if text in candidates:
+            matches.append(definition.family.value)
+    return matches[0] if len(matches) == 1 else None
+
+
+def build_compiled_311_plan(
+    *,
+    tool_id: str,
+    arguments: Mapping[str, Any],
+    resolved_period: Mapping[str, Any],
+) -> StrictToolPlan:
+    """Translate one validated registered request into the existing 311 plan."""
+    operation = str(arguments.get("operation") or "").upper()
+    raw_family = arguments.get("issue_family_id")
+    family = canonical_issue_family_id(raw_family)
+    issue_scope = (
+        IssueScope.ALL_311.value
+        if raw_family is None
+        else IssueScope.SPECIFIC_FAMILY.value
+    )
+    if raw_family is not None and family is None:
+        raise ValueError("compiled 311 issue family is not registered")
+    location_id = str(arguments.get("location_id") or "")
+    geography_by_id = {
+        "dorchester": CivicGeography().to_dict(),
+        "codman_square": CivicGeography(
+            label="Codman Square",
+            kind="SUBAREA",
+            subarea="Codman Square",
+            filterable=False,
+        ).to_dict(),
+        "fields_corner": CivicGeography(
+            label="Fields Corner",
+            kind="SUBAREA",
+            subarea="Fields Corner",
+            filterable=False,
+        ).to_dict(),
+    }
+    if location_id not in geography_by_id:
+        raise ValueError("compiled 311 location is not registered")
+    try:
+        period = CivicPeriod(
+            kind=str(resolved_period["period"]),
+            label=str(resolved_period["label"]),
+            start=date.fromisoformat(str(resolved_period["start_date"])),
+            end_exclusive=date.fromisoformat(str(resolved_period["end_date_exclusive"])),
+        ).to_dict()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("compiled 311 period is invalid") from exc
+
+    if tool_id == "aggregate_311":
+        mapping = {
+            "COUNT": (
+                "exact_count",
+                (OutputName.ISSUE_COUNT.value,),
+                (ToolName.ISSUE_COUNT.value, ToolName.SOURCE_FRESHNESS.value),
+            ),
+            "GROUP": (
+                "category_overview",
+                (OutputName.CATEGORY_DISTRIBUTION.value,),
+                (ToolName.CATEGORY_DISTRIBUTION.value, ToolName.SOURCE_FRESHNESS.value),
+            ),
+            "COMPARE": (
+                "period_comparison",
+                (OutputName.PERIOD_COMPARISON.value,),
+                (ToolName.PERIOD_COMPARISON.value, ToolName.SOURCE_FRESHNESS.value),
+            ),
+            "STATUS": (
+                "status_followup",
+                (OutputName.STATUS_BREAKDOWN.value,),
+                (ToolName.STATUS_BREAKDOWN.value, ToolName.SOURCE_FRESHNESS.value),
+            ),
+        }
+    elif tool_id == "search_311_records":
+        mapping = {
+            "SEARCH": (
+                "recent_reports",
+                (
+                    OutputName.ISSUE_COUNT.value,
+                    OutputName.STATUS_BREAKDOWN.value,
+                    OutputName.RECENT_EXAMPLES.value,
+                ),
+                (
+                    ToolName.ISSUE_COUNT.value,
+                    ToolName.STATUS_BREAKDOWN.value,
+                    ToolName.RECENT_EXAMPLES.value,
+                    ToolName.SOURCE_FRESHNESS.value,
+                ),
+            ),
+        }
+    else:
+        raise ValueError("compiled request is not a 311 capability")
+    if operation not in mapping:
+        raise ValueError("compiled 311 operation is unsupported")
+    intent, outputs, tools = mapping[operation]
+    return StrictToolPlan(
+        domain="311",
+        intent=intent,
+        issue_family=family,
+        issue_scope=issue_scope,
+        geography=geography_by_id[location_id],
+        period=period,
+        outputs=outputs,
+        tools=tools,
+        needs_clarification=False,
+        clarification_message=None,
+        confidence=1.0,
+        planner_source=PlannerSource.LLM,
+    )
 
 
 def _normalized(text: str) -> str:
@@ -2047,7 +2171,8 @@ def deterministic_answer(bundle: EvidenceBundle, plan: StrictToolPlan) -> Tuple[
             sentence = f"In the two latest comparable {days}-day periods available, {request_label} remained at {current}"
         if direction:
             request_word = "request" if abs(difference) == 1 else "requests"
-            sentence += f", a {direction} of {abs(difference)} {request_word}"
+            article = "an" if direction == "increase" else "a"
+            sentence += f", {article} {direction} of {abs(difference)} {request_word}"
             if percentage is not None:
                 sentence += f", or {percentage:g}%"
         sentence += "."
@@ -2748,36 +2873,23 @@ def _pending_context_from_plan(plan: StrictToolPlan) -> Optional[Dict[str, Any]]
         return None
 
 
-def process_311_question(
+def execute_311_plan(
     message: str,
     *,
+    plan: StrictToolPlan,
     connection_factory: ConnectionFactory,
-    active_context: Optional[Mapping[str, Any]] = None,
-    state_location: Optional[Mapping[str, Any]] = None,
-    request_started_at: Optional[float] = None,
+    deadline: GlobalDeadline,
     now: Optional[datetime] = None,
-    planner_llm: Optional[PlannerLLM] = None,
+    started_at: Optional[float] = None,
+    planner_ms: int = 0,
+    planner_call_count: int = 0,
+    planner_failure: str = "",
     synthesis_llm: Optional[SynthesisLLM] = None,
     repair_llm: Optional[RepairLLM] = None,
 ) -> Civic311Result:
-    """Run the bounded 311 path once and return no resident-internal diagnostics."""
-    started = time.perf_counter()
+    """Execute one already-validated plan without interpreting the resident turn."""
+    started = started_at or time.perf_counter()
     current_now = now or datetime.now().astimezone()
-    deadline = GlobalDeadline.from_started_at(request_started_at or started)
-    plan_started = time.perf_counter()
-    planner_stats: Dict[str, Any] = {"call_count": 0}
-    plan = plan_311_question(
-        message,
-        active_context=active_context,
-        state_location=state_location,
-        now=current_now.date(),
-        planner_llm=planner_llm,
-        deadline=deadline,
-        planner_stats=planner_stats,
-    )
-    planner_ms = int((time.perf_counter() - plan_started) * 1000)
-    planner_call_count = int(planner_stats.get("call_count") or 0)
-    planner_failure = str(planner_stats.get("failure") or "")
     if plan.needs_clarification:
         evidence = EvidenceBundle(
             question_scope={"domain": "311", "intent": plan.intent},
@@ -2785,7 +2897,9 @@ def process_311_question(
             geography=plan.geography,
             requested_period=plan.period,
             executed_period=plan.period,
-            freshness={}, coverage={}, evidence_status=EvidenceStatus.INSUFFICIENT_EVIDENCE,
+            freshness={},
+            coverage={},
+            evidence_status=EvidenceStatus.INSUFFICIENT_EVIDENCE,
         )
         telemetry = CivicTelemetry(
             planner_source=plan.planner_source,
@@ -2801,20 +2915,25 @@ def process_311_question(
         pending_context = _pending_context_from_plan(plan)
         return Civic311Result(
             answer=plan.clarification_message or "Which city-service issue are you asking about?",
-            mode=AnswerMode.CLARIFICATION, sources=[], evidence=evidence, plan=plan,
-            telemetry=telemetry, next_context=pending_context,
+            mode=AnswerMode.CLARIFICATION,
+            sources=[],
+            evidence=evidence,
+            plan=plan,
+            telemetry=telemetry,
+            next_context=pending_context,
             update_context=pending_context is not None,
         )
     requested = _period_from_plan(plan)
     fresh, executed, evidence_status, limitations = _status_and_period(
-        plan, connection_factory=connection_factory, now=current_now, deadline=deadline,
+        plan,
+        connection_factory=connection_factory,
+        now=current_now,
+        deadline=deadline,
     )
     family = IssueFamily(plan.issue_family) if plan.issue_family else None
     geography = _geography_from_plan(plan)
     if evidence_status is EvidenceStatus.OUTSIDE_COVERAGE:
-        results = {
-            ToolName.SOURCE_FRESHNESS.value: {"freshness": dict(fresh)},
-        }
+        results = {ToolName.SOURCE_FRESHNESS.value: {"freshness": dict(fresh)}}
         failures: List[str] = []
         tool_ms = 0
         timeout_stage = None
@@ -2831,8 +2950,15 @@ def process_311_question(
         )
         executed_tool_count = len(plan.tools)
     bundle = _bundle_from_execution(
-        message=message, plan=plan, freshness=fresh, requested=requested, executed=executed,
-        initial_status=evidence_status, limitations=limitations, results=results, failures=failures,
+        message=message,
+        plan=plan,
+        freshness=fresh,
+        requested=requested,
+        executed=executed,
+        initial_status=evidence_status,
+        limitations=limitations,
+        results=results,
+        failures=failures,
     )
     composition = compose_311_answer(
         message,
@@ -2879,4 +3005,49 @@ def process_311_question(
         telemetry=telemetry,
         next_context=next_context,
         update_context=next_context is not None,
+    )
+
+
+def process_311_question(
+    message: str,
+    *,
+    connection_factory: ConnectionFactory,
+    active_context: Optional[Mapping[str, Any]] = None,
+    state_location: Optional[Mapping[str, Any]] = None,
+    request_started_at: Optional[float] = None,
+    now: Optional[datetime] = None,
+    planner_llm: Optional[PlannerLLM] = None,
+    synthesis_llm: Optional[SynthesisLLM] = None,
+    repair_llm: Optional[RepairLLM] = None,
+) -> Civic311Result:
+    """Run the bounded 311 path once and return no resident-internal diagnostics."""
+    started = time.perf_counter()
+    current_now = now or datetime.now().astimezone()
+    deadline = GlobalDeadline.from_started_at(request_started_at or started)
+    plan_started = time.perf_counter()
+    planner_stats: Dict[str, Any] = {"call_count": 0}
+    plan = plan_311_question(
+        message,
+        active_context=active_context,
+        state_location=state_location,
+        now=current_now.date(),
+        planner_llm=planner_llm,
+        deadline=deadline,
+        planner_stats=planner_stats,
+    )
+    planner_ms = int((time.perf_counter() - plan_started) * 1000)
+    planner_call_count = int(planner_stats.get("call_count") or 0)
+    planner_failure = str(planner_stats.get("failure") or "")
+    return execute_311_plan(
+        message,
+        plan=plan,
+        connection_factory=connection_factory,
+        deadline=deadline,
+        now=current_now,
+        started_at=started,
+        planner_ms=planner_ms,
+        planner_call_count=planner_call_count,
+        planner_failure=planner_failure,
+        synthesis_llm=synthesis_llm,
+        repair_llm=repair_llm,
     )

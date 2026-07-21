@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ PORCH = ROOT / "on_the_porch"
 sys.path[:0] = [str(PORCH), str(ROOT)]
 
 from model_led_orchestrator import OrchestratorContractError, normalize_resident_input  # noqa: E402
+from conversation_dimensions import resolve_registered_geography  # noqa: E402
 from orchestrator_evaluation import _expected_plan, load_evaluation_dataset  # noqa: E402
 from semantic_plan_compiler import (  # noqa: E402
     DerivedStateEffect,
@@ -162,14 +164,47 @@ def test_compiler_derives_tools_status_and_state() -> None:
         "query_events", "get_source_status",
     ]
 
-    status = parse(gather_payload(task={
+    source_status = parse(gather_payload(task={
         "operation": "STATUS",
-        "geography": {"mode": "DEFAULT", "value": None},
-        "time": {"kind": "CURRENT_WEEK", "value": None},
+        "geography": {"mode": "NONE", "value": None},
+        "time": {"kind": "NONE", "value": None},
     }))
-    guarded_status = guard_semantic_plan(status, trusted_context=CONTEXT)
-    assert guarded_status.disposition is GuardedDisposition.EXECUTABLE
-    assert [item.tool_id.value for item in guarded_status.tool_requests] == ["get_source_status"]
+    guarded_source = guard_semantic_plan(source_status, trusted_context=CONTEXT)
+    assert guarded_source.disposition is GuardedDisposition.EXECUTABLE
+    assert [item.tool_id.value for item in guarded_source.tool_requests] == ["get_source_status"]
+
+    provider_default_source = parse(gather_payload(task={
+        "operation": "STATUS",
+        "subject": None,
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "NONE", "value": None},
+    }))
+    guarded_default_source = guard_semantic_plan(
+        provider_default_source, trusted_context=CONTEXT,
+    )
+    assert [item.tool_id.value for item in guarded_default_source.tool_requests] == [
+        "get_source_status",
+    ]
+
+    request_status = parse(gather_payload(task={
+        "operation": "STATUS",
+        "subject": "service requests",
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "PREVIOUS_CALENDAR_MONTH", "value": None},
+    }))
+    guarded_request = guard_semantic_plan(request_status, trusted_context=CONTEXT)
+    assert guarded_request.disposition is GuardedDisposition.EXECUTABLE
+    assert [item.tool_id.value for item in guarded_request.tool_requests] == [
+        "aggregate_311", "get_source_status",
+    ]
+    assert guarded_request.tool_requests[0].arguments["operation"] == "STATUS"
+
+    grouped_status = parse(gather_payload(task={
+        "operation": "GROUP",
+        "subject": "open and closed status",
+    }))
+    compiled_status = compile_semantic_plan(grouped_status, trusted_context=CONTEXT)
+    assert compiled_status.tool_requests[0].arguments["operation"] == "STATUS"
 
 
 def test_compiler_is_subject_paraphrase_independent_for_tool_selection() -> None:
@@ -178,6 +213,50 @@ def test_compiler_is_subject_paraphrase_independent_for_tool_selection() -> None
     left = [item.tool_id.value for item in compile_semantic_plan(one, trusted_context=CONTEXT).tool_requests]
     right = [item.tool_id.value for item in compile_semantic_plan(two, trusted_context=CONTEXT).tool_requests]
     assert left == right == ["aggregate_311", "get_source_status"]
+
+    road_hole = parse(gather_payload(task={"subject": "road hole"}))
+    road_hole_request = compile_semantic_plan(
+        road_hole,
+        trusted_context=CONTEXT,
+    ).tool_requests[0]
+    assert road_hole_request.arguments["issue_family_id"] == "road_surface_pothole"
+
+    drainage = parse(gather_payload(task={"subject": "drainage"}))
+    drainage_request = compile_semantic_plan(
+        drainage,
+        trusted_context=CONTEXT,
+    ).tool_requests[0]
+    assert drainage_request.arguments["issue_family_id"] == "drainage_and_flooding"
+
+    for generic_subject in ("all request types", "types of requests", "most common categories"):
+        grouped = parse(gather_payload(task={
+            "operation": "GROUP",
+            "subject": generic_subject,
+        }))
+        result = compile_semantic_plan(grouped, trusted_context=CONTEXT)
+        aggregate = result.tool_requests[0]
+        assert aggregate.arguments["issue_scope"] == "ALL"
+        assert "issue_family_id" not in aggregate.arguments
+
+    all_cases = parse(gather_payload(task={
+        "operation": "COMPARE",
+        "subject": "month-over-month change in all Boston 311 cases",
+    }))
+    compared = compile_semantic_plan(all_cases, trusted_context=CONTEXT)
+    assert compared.tool_requests[0].arguments["operation"] == "COMPARE"
+    assert compared.tool_requests[0].arguments["issue_scope"] == "ALL"
+
+
+def test_compiler_maps_relative_default_geography_without_resolution() -> None:
+    plan = parse(gather_payload(task={
+        "subject": None,
+        "geography": {"mode": "EXPLICIT", "value": "here"},
+    }))
+    compiled = compile_semantic_plan(plan, trusted_context=CONTEXT)
+    aggregate = compiled.tool_requests[0]
+    assert aggregate.tool_id.value == "aggregate_311"
+    assert aggregate.arguments["location_id"] == "dorchester"
+    assert not compiled.requires_location_resolution
 
 
 def test_time_geography_and_selected_event_are_deterministic() -> None:
@@ -225,6 +304,83 @@ def test_time_geography_and_selected_event_are_deterministic() -> None:
     assert guarded.disposition is GuardedDisposition.EXECUTABLE
     assert guarded.tool_requests[0].tool_id.value == "query_events"
     assert guarded.tool_requests[0].arguments["entity_token"] == "event:435"
+
+    upcoming = parse(gather_payload(task={
+        "domain": "EVENTS",
+        "operation": "FIND",
+        "subject": None,
+        "time": {"kind": "NONE", "value": None},
+    }))
+    result = compile_semantic_plan(upcoming, trusted_context=CONTEXT)
+    assert result.tool_requests[0].arguments["time_scope"] == {
+        "period": "UPCOMING_DEFAULT",
+    }
+
+    assert resolve_registered_geography("near Fields Corner, Dorchester").id == "fields_corner"
+    assert resolve_registered_geography("Codman Square and Fields Corner") is None
+
+    previous = os.environ.get("OTP_FREEZE_NOW")
+    os.environ["OTP_FREEZE_NOW"] = "2026-07-21T12:00:00-04:00"
+    try:
+        june = parse(gather_payload(task={
+            "time": {"kind": "EXPLICIT_DATE_RANGE", "value": "June"},
+        }))
+        result = compile_semantic_plan(june, trusted_context=CONTEXT)
+        assert result.tool_requests[0].arguments["time_scope"] == {
+            "period": "PREVIOUS_CALENDAR_MONTH",
+        }
+
+        comparison = parse(gather_payload(task={
+            "operation": "COMPARE",
+            "time": {"kind": "EXPLICIT_DATE_RANGE", "value": "June vs May"},
+        }))
+        result = compile_semantic_plan(comparison, trusted_context=CONTEXT)
+        aggregate = result.tool_requests[0]
+        assert aggregate.arguments["time_scope"] == {
+            "period": "PREVIOUS_CALENDAR_MONTH",
+        }
+        assert aggregate.arguments["comparison_time_scope"] == {
+            "period": "EXPLICIT_DATE_RANGE",
+            "start_date": "2026-05-01",
+            "end_date_exclusive": "2026-06-01",
+        }
+    finally:
+        if previous is None:
+            os.environ.pop("OTP_FREEZE_NOW", None)
+        else:
+            os.environ["OTP_FREEZE_NOW"] = previous
+
+
+def test_same_domain_omitted_time_reuses_only_a_trusted_period() -> None:
+    context = copy.deepcopy(CONTEXT)
+    context["active_topic"] = "SERVICE_REQUESTS"
+    context["time_scope"] = {"token": "time:active"}
+    plan = parse(gather_payload(task={
+        "operation": "GROUP",
+        "time": {"kind": "NONE", "value": None},
+    }))
+    result = compile_semantic_plan(
+        plan,
+        trusted_context=context,
+        trusted_reference_tokens=("time:active",),
+    )
+    aggregate = next(
+        item for item in result.tool_requests if item.tool_id.value == "aggregate_311"
+    )
+    assert aggregate.arguments["time_scope"] == {
+        "period": "RETAIN_TRUSTED_PERIOD",
+        "trusted_reference_token": "time:active",
+    }
+
+    unrelated = copy.deepcopy(context)
+    unrelated["active_topic"] = "EVENTS"
+    result = compile_semantic_plan(
+        plan,
+        trusted_context=unrelated,
+        trusted_reference_tokens=("time:active",),
+    )
+    assert not result.tool_requests
+    assert "time period" in (result.clarification_reason or "").lower()
 
 
 def test_all_expected_labels_compile_without_execution() -> None:

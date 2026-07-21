@@ -29,7 +29,20 @@ const ApiConfig = {
   ),
   // Opt-in: stream assistant replies token-by-token via Server-Sent Events.
   streamingEnabled: Boolean(window.APP_CONFIG?.streaming ?? window.APP_CONFIG?.STREAMING ?? false),
+  // Non-production Phase 2A canaries may opt in from an isolated runtime config.
+  // The normal config leaves this empty, so public traffic cannot activate it.
+  modelLedCanaryHeader: String(
+    window.APP_CONFIG?.modelLedCanaryHeader ??
+    window.APP_CONFIG?.MODEL_LED_CANARY_HEADER ??
+    ''
+  ).trim(),
 };
+
+function applyModelLedCanaryHeader(headers) {
+  if (ApiConfig.modelLedCanaryHeader) {
+    headers['X-On-The-Porch-Canary'] = ApiConfig.modelLedCanaryHeader;
+  }
+}
 
 function getCookie(name) {
   const encoded = `${name}=`;
@@ -127,6 +140,7 @@ async function apiRequest(path, options = {}) {
   }
 
   applyAuthHeaders(headers, method);
+  applyModelLedCanaryHeader(headers);
 
   try {
     const response = await fetch(`${ApiConfig.baseUrl}${path}`, {
@@ -196,6 +210,7 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
     Accept: 'text/event-stream',
   };
   applyAuthHeaders(headers, 'POST');
+  applyModelLedCanaryHeader(headers);
 
   const controller = new AbortController();
   const shouldAbort = Number.isFinite(streamTimeout) && streamTimeout > 0;
