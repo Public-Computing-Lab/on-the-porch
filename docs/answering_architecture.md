@@ -372,15 +372,17 @@ server-issued trusted token; ordinary prior active-entity state cannot masquerad
 selection.
 
 The final synthetic development evaluation used 138 privacy-audited cases and one frozen planner
-configuration. It recorded 138 planner calls, zero synthesis calls, 98.55% status and action
-accuracy, 96.38% capability accuracy, 98.55% useful outcomes, 100% safe outcomes, 0.72%
-unnecessary clarifications, p50 latency of 0.746 seconds, p95 of 0.929 seconds, and a 1.254-second
-maximum. Every established Phase 2A gate passed and every case completed below 15 seconds. The two
-remaining development misses are an overly broad event execution for a deliberately vague request
-and an unnecessary time clarification for a 311 source-freshness question. They are retained as
-general Phase 2B quality work; no phrase-specific production rule was added.
+configuration. It recorded 138 planner calls, zero synthesis calls, 100% status, action, useful,
+and safe-outcome accuracy, 97.83% capability accuracy, zero unnecessary clarifications, p50
+latency of 0.733 seconds, p95 of 0.914 seconds, and a 1.109-second maximum. Every established Phase
+2A gate passed and every case completed below 15 seconds. The general semantic contract now marks
+an evidence task as `DOMAIN_ONLY` when the civic domain is recognizable but the requested evidence
+operation is not; the compiler converts that state to a targeted clarification with no tool. Clear
+event discovery remains executable with the deterministic upcoming default, Boston 311 freshness
+compiles to source status without an invented time filter, and selected-event detail aspects are
+compiler-owned allowlisted fields. No resident phrase or exact question was added to runtime code.
 
-An isolated local-demo API run exercised one planner call and zero synthesis calls per turn across
+An isolated two-worker local-demo API run exercised one planner call and zero synthesis calls per turn across
 direct responses, clarifications, selected-event details, event follow-ups, event-to-311 topic
 switches, 311 aggregates/categories/source policy, emergency precedence, JSON/SSE parity,
 concurrent idempotent replay, and two-worker concurrency. The final live run completed ten factual
@@ -391,11 +393,10 @@ acceptance on isolated ports verified event cards, trusted selected-event detail
 header. These results used only `sentiment_demo`; they do not certify production data, credentials,
 DreamHost networking, or resident traffic. The normal runtime was not restarted or reconfigured.
 
-Phase 2B should expand the same service to remaining 311 operations and other civic domains,
-introduce one evidence-bounded synthesis call only where deterministic formatting is insufficient,
-strengthen semantic handling for vague event and source-freshness requests, shorten detail answers
-for narrow follow-ups, and retire legacy routing only after per-domain parity and caller-removal
-proof.
+Phase 2B should make this lifecycle authoritative for direct conversation, clarification, events,
+and Boston 311; preserve explicit transitional handoff for not-yet-migrated civic domains; and
+retire the replaced legacy interpretation authority only after transport, state, idempotency,
+provider-failure, and caller-removal proof.
 
 ## 26. Semantic debt and deprecation map
 

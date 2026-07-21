@@ -30,6 +30,7 @@ from semantic_planner import (
     PlannerAction,
     SemanticSafetyError,
     SemanticDomain,
+    SemanticGoalClarity,
     SemanticGeography,
     SemanticOperation,
     SemanticPlan,
@@ -42,7 +43,7 @@ from semantic_planner import (
 )
 
 
-COMPILER_VERSION = "semantic-compiler-v3"
+COMPILER_VERSION = "semantic-compiler-v4"
 CANONICALIZATION_VERSION = "semantic-canonicalization-v3"
 
 
@@ -152,6 +153,13 @@ def guard_semantic_plan(
         )
 
     for task in plan.tasks:
+        if task.goal_clarity is SemanticGoalClarity.DOMAIN_ONLY:
+            return GuardedSemanticPlan(
+                GuardedDisposition.NEEDS_CLARIFICATION,
+                empty,
+                _clarification_for_missing(MissingInformation.USER_MEANING),
+                "MISSING_USER_MEANING",
+            )
         if task.geography.mode is GeographyMode.TRUSTED_REFERENCE \
                 and task.geography.value not in set(tokens):
             return GuardedSemanticPlan(
@@ -358,10 +366,15 @@ def _normalize_semantic_plan(
     canonical = SemanticTask(
         SemanticDomain.EVENTS,
         SemanticOperation.FIND,
-        None,
+        (
+            task.subject
+            if _event_detail_field(task.subject) != "GENERAL"
+            else None
+        ),
         SemanticGeography(GeographyMode.NONE, None),
         SemanticTime(SemanticTimeKind.NONE, None),
         SourceScope.ANY,
+        task.goal_clarity,
     )
     return SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=(canonical,))
 
@@ -379,6 +392,7 @@ def _normalize_task(task: SemanticTask) -> SemanticTask:
             SemanticGeography(GeographyMode.NONE, None),
             task.time,
             task.source_scope,
+            task.goal_clarity,
         )
     if (
         task.domain is SemanticDomain.SERVICE_REQUESTS
@@ -392,6 +406,7 @@ def _normalize_task(task: SemanticTask) -> SemanticTask:
             task.geography,
             task.time,
             task.source_scope,
+            task.goal_clarity,
         )
     return task
 
@@ -482,7 +497,11 @@ def _compile_events(
             and isinstance(active_entity.get("token"), str):
         return [(
             ToolId.QUERY_EVENTS,
-            {"operation": "DETAILS", "entity_token": active_entity["token"]},
+            {
+                "operation": "DETAILS",
+                "entity_token": active_entity["token"],
+                "detail_field": _event_detail_field(task.subject),
+            },
             (CivicDomain.EVENTS,),
         )]
     if location_id is None:
@@ -499,6 +518,19 @@ def _compile_events(
         },
         (CivicDomain.EVENTS,),
     )]
+
+
+def _event_detail_field(subject: Optional[str]) -> str:
+    """Map a model-owned semantic aspect to one reviewed event-detail field."""
+    normalized = _normalized_public_text(subject or "").replace("_", " ")
+    return {
+        "location": "LOCATION",
+        "date time": "DATE_TIME",
+        "datetime": "DATE_TIME",
+        "cost": "COST",
+        "registration contact": "REGISTRATION_CONTACT",
+        "organizer": "ORGANIZER",
+    }.get(normalized, "GENERAL")
 
 
 def _compile_service_requests(
@@ -851,7 +883,9 @@ _DOCUMENT_SOURCE_TYPES = {
 
 def _status_sources(task: SemanticTask) -> List[str]:
     if task.domain is SemanticDomain.EVENTS:
-        return ["events"]
+        # The current event adapter has no civic_source_status record. Do not
+        # compile or report a source-status execution that cannot be performed.
+        return []
     if task.domain is SemanticDomain.SERVICE_REQUESTS:
         return ["boston_311"]
     if task.domain is SemanticDomain.CRIME:

@@ -41,7 +41,11 @@ from conversation_state import (
     ProposedTransition,
     ThreadStateEnvelope,
 )
-from event_context import build_selected_event_response, resolve_event_by_id
+from event_context import (
+    build_active_event_response,
+    build_selected_event_response,
+    resolve_event_by_id,
+)
 from event_query_context import (
     EventDiscoveryResult,
     compose_event_answer,
@@ -543,6 +547,7 @@ class ModelLedTurnService:
                 geography=SemanticGeography(GeographyMode.TRUSTED_REFERENCE, token),
                 time=task.time,
                 source_scope=task.source_scope,
+                goal_clarity=task.goal_clarity,
             ) if task.geography.mode is GeographyMode.EXPLICIT else task
             for task in plan.tasks
         )
@@ -580,9 +585,16 @@ class ModelLedTurnService:
             )
             conn = self.connection_factory()
             try:
-                selected = build_selected_event_response(
-                    request.message,
-                    resolve_event_by_id(conn, event_id),
+                resolution = resolve_event_by_id(conn, event_id)
+                detail_field = str(tool.arguments.get("detail_field") or "GENERAL")
+                selected = (
+                    build_active_event_response(
+                        request.message,
+                        resolution,
+                        property_name=detail_field.lower(),
+                    )
+                    if detail_field != "GENERAL"
+                    else build_selected_event_response(request.message, resolution)
                 )
             finally:
                 conn.close()
@@ -604,7 +616,7 @@ class ModelLedTurnService:
                 event_id=event_id if selected.resolved_entity.get("id") else None,
                 scope=None,
             )
-            counts = {"query_events": 1, "get_source_status": 1}
+            counts = {"query_events": 1}
             if resolver_count:
                 counts["resolve_location"] = resolver_count
             return TurnResult(
@@ -663,7 +675,7 @@ class ModelLedTurnService:
             event_id=None,
             scope=resolved,
         )
-        counts = {"query_events": 1, "get_source_status": 1}
+        counts = {"query_events": 1}
         if resolver_count:
             counts["resolve_location"] = resolver_count
         return TurnResult(

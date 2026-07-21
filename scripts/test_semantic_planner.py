@@ -160,9 +160,7 @@ def test_compiler_derives_tools_status_and_state() -> None:
         "time": {"kind": "CURRENT_WEEK", "value": None},
     }))
     result = compile_semantic_plan(events, trusted_context=CONTEXT)
-    assert [item.tool_id.value for item in result.tool_requests] == [
-        "query_events", "get_source_status",
-    ]
+    assert [item.tool_id.value for item in result.tool_requests] == ["query_events"]
 
     source_status = parse(gather_payload(task={
         "operation": "STATUS",
@@ -205,6 +203,23 @@ def test_compiler_derives_tools_status_and_state() -> None:
     }))
     compiled_status = compile_semantic_plan(grouped_status, trusted_context=CONTEXT)
     assert compiled_status.tool_requests[0].arguments["operation"] == "STATUS"
+
+
+def test_domain_only_goal_clarity_requires_meaning_without_tools() -> None:
+    plan = parse(gather_payload(task={
+        "domain": "EVENTS",
+        "operation": "FIND",
+        "subject": None,
+        "geography": {"mode": "DEFAULT", "value": None},
+        "time": {"kind": "NONE", "value": None},
+        "source_scope": "ANY",
+        "goal_clarity": "DOMAIN_ONLY",
+    }))
+    guarded = guard_semantic_plan(plan, trusted_context=CONTEXT)
+    assert guarded.disposition is GuardedDisposition.NEEDS_CLARIFICATION
+    assert guarded.reason_code == "MISSING_USER_MEANING"
+    assert guarded.resident_response == "What would you like me to find out?"
+    assert not guarded.tool_requests
 
 
 def test_compiler_is_subject_paraphrase_independent_for_tool_selection() -> None:
@@ -287,6 +302,21 @@ def test_time_geography_and_selected_event_are_deterministic() -> None:
         event, trusted_context=selected_context, trusted_reference_tokens=("event:435",),
     )
     assert result.tool_requests[0].arguments["entity_token"] == "event:435"
+    assert result.tool_requests[0].arguments["detail_field"] == "GENERAL"
+
+    event_location = parse(gather_payload(task={
+        "domain": "EVENTS",
+        "operation": "FIND",
+        "subject": "LOCATION",
+        "geography": {"mode": "NONE", "value": None},
+        "time": {"kind": "NONE", "value": None},
+    }))
+    result = compile_semantic_plan(
+        event_location,
+        trusted_context=selected_context,
+        trusted_reference_tokens=("event:435",),
+    )
+    assert result.tool_requests[0].arguments["detail_field"] == "LOCATION"
 
     variant = parse(gather_payload(task={
         "domain": "DOCUMENTS",

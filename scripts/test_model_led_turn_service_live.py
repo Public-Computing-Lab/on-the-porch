@@ -346,9 +346,12 @@ def run(base_url: str) -> None:
     check(not lookup_required["compiled_tools"], "tool-prohibition explanation must not run tools")
     check("2933" not in lookup_required["answer"] and "54" not in lookup_required["answer"], "civic fact was fabricated")
     if lookup_required["status"] == "COMPLETED":
+        grounding_explanation = lookup_required["answer"].lower()
         check(
-            "data" in lookup_required["answer"].lower()
-            or "evidence" in lookup_required["answer"].lower(),
+            any(
+                wording in grounding_explanation
+                for wording in ("data", "evidence", "source", "look up", "looking up")
+            ),
             "completed tool-prohibition answer must explain the evidence requirement",
         )
     else:

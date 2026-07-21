@@ -442,11 +442,15 @@ def _argument_contract(tool_id: ToolId) -> Dict[str, Any]:
         ToolId.QUERY_EVENTS: {
             "required": {"operation": ["LIST", "DETAILS"]},
             "constraints": (
-                "DETAILS accepts only entity_token; LIST requires location_id and time_scope "
-                "and cannot contain entity_token"
+                "DETAILS accepts entity_token plus one compiler-owned detail_field; LIST "
+                "requires location_id and time_scope and cannot contain either"
             ),
             "optional": {
                 "entity_token": "trusted token; required for DETAILS",
+                "detail_field": [
+                    "GENERAL", "LOCATION", "DATE_TIME", "COST",
+                    "REGISTRATION_CONTACT", "ORGANIZER",
+                ],
                 "location_id": "canonical ID; required for LIST",
                 "time_scope": {**time_scope, "required_for": "LIST"},
                 "filters": {
@@ -532,11 +536,18 @@ def _validate_event_args(value: Mapping[str, Any], trusted: set[str]) -> Dict[st
     _exact_keys(
         value,
         {"operation"},
-        {"entity_token", "location_id", "time_scope", "filters", "limit"},
+        {
+            "entity_token", "detail_field", "location_id", "time_scope", "filters", "limit",
+        },
         "query_events arguments",
     )
     operation = _operation(value, ("LIST", "DETAILS"))
     token = _trusted_token(value.get("entity_token"), trusted, required=operation == "DETAILS")
+    detail_field = _optional_enum(
+        value.get("detail_field"),
+        {"GENERAL", "LOCATION", "DATE_TIME", "COST", "REGISTRATION_CONTACT", "ORGANIZER"},
+        "event detail field",
+    )
     location = _optional_canonical_id(value.get("location_id"), "event location")
     time_scope = _optional_time_scope(value.get("time_scope"), trusted)
     filters = _event_filters(value.get("filters"))
@@ -544,9 +555,15 @@ def _validate_event_args(value: Mapping[str, Any], trusted: set[str]) -> Dict[st
     if operation == "DETAILS":
         if any(item is not None for item in (location, time_scope)) or filters or "limit" in value:
             raise ToolContractError("event details must use only the trusted entity")
-        return {"operation": operation, "entity_token": token}
+        return _clean({
+            "operation": operation,
+            "entity_token": token,
+            "detail_field": detail_field or "GENERAL",
+        })
     if token is not None:
         raise ToolContractError("event listing cannot contain an entity token")
+    if detail_field is not None:
+        raise ToolContractError("event listing cannot contain a detail field")
     if location is None or time_scope is None:
         raise ToolContractError("event listing requires canonical location and time scope")
     return _clean({

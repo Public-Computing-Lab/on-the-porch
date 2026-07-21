@@ -219,9 +219,10 @@ def test_unknown_explicit_location_asks_targeted_clarification():
 def test_selected_event_details_use_trusted_id(monkeypatch=None):
     original_resolve = service_module.resolve_event_by_id
     original_build = service_module.build_selected_event_response
+    original_active_build = service_module.build_active_event_response
     try:
         service_module.resolve_event_by_id = lambda conn, event_id: {"id": int(event_id)}
-        service_module.build_selected_event_response = lambda message, event: SelectedEventResponse(
+        service_module.build_active_event_response = lambda message, event, property_name: SelectedEventResponse(
             answer="The selected event is at 10 Main Street.",
             sources=[{"type": "event", "source": "Test", "path": "https://example.test"}],
             resolved_entity={"type": "event", "id": str(event["id"]), "source_ref": f"event:{event['id']}"},
@@ -231,6 +232,7 @@ def test_selected_event_details_use_trusted_id(monkeypatch=None):
             task(
                 "EVENTS",
                 "FIND",
+                subject="LOCATION",
                 geography="NONE",
                 time_kind="NONE",
             ),
@@ -240,9 +242,11 @@ def test_selected_event_details_use_trusted_id(monkeypatch=None):
     finally:
         service_module.resolve_event_by_id = original_resolve
         service_module.build_selected_event_response = original_build
+        service_module.build_active_event_response = original_active_build
     assert result.status is TurnServiceStatus.COMPLETED
     assert result.resolved_entity["id"] == "437"
     assert result.tool_execution_counts["query_events"] == 1
+    assert result.compiled_tools[0]["arguments"]["detail_field"] == "LOCATION"
     assert result.state_transition.next_state.active_entity.entity_id == "437"
 
 
@@ -278,10 +282,10 @@ def test_current_turn_selected_event_ignores_redundant_explicit_title_and_date()
     assert result.compiled_tools[0]["arguments"] == {
         "operation": "DETAILS",
         "entity_token": "event:437",
+        "detail_field": "GENERAL",
     }
     assert result.tool_execution_counts == {
         "query_events": 1,
-        "get_source_status": 1,
     }
 
 

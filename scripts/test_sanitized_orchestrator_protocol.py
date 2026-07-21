@@ -76,7 +76,7 @@ def test_function_catalog_has_only_three_high_level_actions() -> None:
         "google-genai",
         "function",
         3.0,
-        "semantic-planner-prompt-v8",
+        "semantic-planner-prompt-v9",
         "structured-user-content-adapter-v2",
     )
     declarations = planner_function_declarations()
