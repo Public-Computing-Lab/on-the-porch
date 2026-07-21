@@ -316,6 +316,16 @@ GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 25)
 GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 30)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 2)
 
+# Future model-led orchestrator. Phase 1 is contract/evaluation only; this flag
+# is deliberately not wired into resident traffic.
+MODEL_LED_ORCHESTRATOR_MODE = _env("MODEL_LED_ORCHESTRATOR_MODE", "off").strip().lower()
+if MODEL_LED_ORCHESTRATOR_MODE not in {"off", "offline", "shadow"}:
+    MODEL_LED_ORCHESTRATOR_MODE = "off"
+MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS = max(
+    0.25,
+    min(3.0, _float("MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS", 1.5)),
+)
+
 # ============================================================================
 # Embeddings / vector stores
 # ============================================================================
