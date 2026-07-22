@@ -85,28 +85,43 @@ class ModelRuntimePolicy:
         }
 
 
+# Product-facing absolute ceiling stays 15s. Application work cuts off earlier so
+# timeout propagation, persistence, and HTTP finalization remain under 15s.
+AUTHORITATIVE_HARD_CEILING_SECONDS = 15.0
+AUTHORITATIVE_APPLICATION_CEILING_SECONDS = 14.0
+
+
 @dataclass(frozen=True)
 class GlobalDeadline:
     """One monotonic deadline shared by every stage of a civic answer."""
 
     deadline: float
     persistence_reserve_seconds: float = 1.0
+    started_at: float = 0.0
+    hard_ceiling_seconds: float = AUTHORITATIVE_HARD_CEILING_SECONDS
+    application_ceiling_seconds: float = AUTHORITATIVE_APPLICATION_CEILING_SECONDS
 
     @classmethod
     def from_started_at(
         cls,
         started_at: float,
         *,
-        hard_ceiling_seconds: float = 15.0,
+        hard_ceiling_seconds: float = AUTHORITATIVE_HARD_CEILING_SECONDS,
         persistence_reserve_seconds: float = 1.0,
+        application_ceiling_seconds: float = AUTHORITATIVE_APPLICATION_CEILING_SECONDS,
     ) -> "GlobalDeadline":
+        hard = max(1.0, float(hard_ceiling_seconds))
+        application = min(hard, max(1.0, float(application_ceiling_seconds)))
         return cls(
-            deadline=float(started_at) + max(1.0, float(hard_ceiling_seconds)),
+            deadline=float(started_at) + hard,
             persistence_reserve_seconds=max(0.25, float(persistence_reserve_seconds)),
+            started_at=float(started_at),
+            hard_ceiling_seconds=hard,
+            application_ceiling_seconds=application,
         )
 
     @classmethod
-    def now(cls, *, hard_ceiling_seconds: float = 15.0) -> "GlobalDeadline":
+    def now(cls, *, hard_ceiling_seconds: float = AUTHORITATIVE_HARD_CEILING_SECONDS) -> "GlobalDeadline":
         return cls.from_started_at(time.perf_counter(), hard_ceiling_seconds=hard_ceiling_seconds)
 
     def remaining(self, *, reserve_for_persistence: bool = False) -> float:
@@ -115,8 +130,16 @@ class GlobalDeadline:
             remaining -= self.persistence_reserve_seconds
         return max(0.0, remaining)
 
+    def application_remaining(self, *, reserve_for_persistence: bool = False) -> float:
+        """Seconds left before the application cutoff (below the public 15s ceiling)."""
+        elapsed = time.perf_counter() - self.started_at
+        remaining = self.application_ceiling_seconds - elapsed
+        if reserve_for_persistence:
+            remaining -= self.persistence_reserve_seconds
+        return max(0.0, min(remaining, self.remaining(reserve_for_persistence=False)))
+
     def expired(self, *, reserve_for_persistence: bool = False) -> bool:
-        return self.remaining(reserve_for_persistence=reserve_for_persistence) <= 0.0
+        return self.application_remaining(reserve_for_persistence=reserve_for_persistence) <= 0.0
 
 
 def bounded_strings(values: Iterable[Any], *, limit: int, maximum_length: int = 96) -> Tuple[str, ...]:

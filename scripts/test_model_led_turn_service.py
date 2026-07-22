@@ -176,13 +176,27 @@ def test_targeted_clarification_updates_only_dialogue_context():
 
 
 def test_unmigrated_domain_is_explicit_and_non_resident():
+    # LOCATION-only place resolution without a selected event remains transitional.
     _provider, result = run(
-        task("DOCUMENTS", "SUMMARIZE", subject="zoning", source_scope="PLANNING_POLICY"),
-        "What does the zoning plan say?",
+        task("LOCATION", "FIND", geography="EXPLICIT", geo_value="unknown hamlet"),
+        "Where is unknown hamlet?",
     )
     assert result.status is TurnServiceStatus.NOT_YET_MIGRATED
     assert result.answer is None and result.tool_call_count == 0
     assert result.state_transition.action is TransitionAction.PRESERVE
+
+
+def test_documents_domain_is_migrated():
+    _provider, result = run(
+        task("DOCUMENTS", "SUMMARIZE", subject="zoning", source_scope="PLANNING_POLICY"),
+        "What does the zoning plan say?",
+    )
+    assert result.status is not TurnServiceStatus.NOT_YET_MIGRATED
+    assert result.planner_call_count == 1
+    assert result.answer is not None
+    assert result.repair_call_count == 0
+    assert result.embedding_call_count == 0
+    assert result.secondary_planner_call_count == 0
 
 
 def test_provider_failure_degrades_without_state_mutation():

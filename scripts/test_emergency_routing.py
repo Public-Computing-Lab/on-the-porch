@@ -281,7 +281,62 @@ FALSE_CASES = (
     "Tell me about asthma statistics.",
     "I can't breathe in this song",
     "I need services for chronic breathing problems.",
+    # Quoted / historical / fictional / reported controls
+    '"Someone is trying to break into my apartment right now."',
+    "My neighbor said someone is breaking into her house.",
+    "In the movie, there is an intruder in the apartment.",
+    "Last year there was an intruder in my apartment.",
+    "What if someone was hurting my child?",
+    "According to the news, someone was shot nearby.",
 )
+
+
+PHASE3_EMERGENCY_MATRIX = (
+    (
+        "Someone just broke into my home.",
+        True,
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_BREAK_IN,
+    ),
+    (
+        "I think there is an intruder in my apartment right now.",
+        True,
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_BREAK_IN,
+    ),
+    (
+        "Someone is hurting my elderly neighbor.",
+        True,
+        EmergencyCategory.OTHER_IMMEDIATE_DANGER,
+        EmergencyReasonCode.CHILD_IN_DANGER,
+    ),
+    (
+        "My child is in immediate danger.",
+        True,
+        EmergencyCategory.OTHER_IMMEDIATE_DANGER,
+        EmergencyReasonCode.CHILD_IN_DANGER,
+    ),
+    (
+        '"Call 911, there is a fire in my house right now."',
+        False,
+        EmergencyCategory.NONE,
+        EmergencyReasonCode.NO_MATCH,
+    ),
+    (
+        "Hypothetically, someone is attacking me right now.",
+        False,
+        EmergencyCategory.NONE,
+        EmergencyReasonCode.NO_MATCH,
+    ),
+)
+
+
+def test_phase3_emergency_active_control_matrix() -> None:
+    for message, active, category, reason in PHASE3_EMERGENCY_MATRIX:
+        decision = detect_active_emergency(message)
+        assert decision.is_active_emergency is active, message
+        assert decision.category is category, message
+        assert decision.reason_code is reason, message
 
 
 def _nearest_rank(values: list[float], percentile: float) -> float:
@@ -747,6 +802,7 @@ def main() -> int:
     tests = (
         test_true_positive_cases,
         test_false_positive_cases,
+        test_phase3_emergency_active_control_matrix,
         test_exact_bounded_contract_and_serialization,
         test_no_llm_fallback_or_history_dependency,
         test_invalid_and_oversized_inputs_are_not_parsed,

@@ -208,6 +208,34 @@ def _patterns(*values: str) -> Tuple[Pattern[str], ...]:
     return tuple(re.compile(value, flags=re.IGNORECASE) for value in values)
 
 
+_VULNERABLE = (
+    r"(?:(?:my |our |the )?(?:kid|child|baby|toddler|infant|elder|elderly|"
+    r"grandma|grandfather|grandpa|grandmother|disabled (?:person|neighbor))|"
+    r"a child|a baby|an elderly (?:person|neighbor))"
+)
+
+# Reported / non-current framing that must not trigger the fixed emergency reply.
+_NON_CURRENT_CONTEXT = _patterns(
+    r"^(?:someone (?:told|said|asked)|they (?:said|told)|my (?:friend|neighbor) "
+    r"(?:said|told|asked)|i (?:heard|read|saw) (?:that|about)|"
+    r"according to|in the news|on the news|the article|the story|"
+    r"a (?:news )?report|hypothetical(?:ly)?|in (?:a |this )?movie|"
+    r"in (?:a |this )?book|in (?:a |this )?novel|for (?:a )?story|"
+    r"role[- ]?play|what if|suppose|imagine)\b",
+    r"\b(?:last (?:year|month|week|night)|yesterday|in \d{4}|years ago|"
+    r"when i was|back in|used to|historically|previously)\b.*"
+    r"\b(?:fire|shooting|gunshots|broke in|intruder|overdose|heart attack)\b",
+    r'^[\'"].*[\'"]$',
+    r'\bsaid[,:]?\s+[\'"].*(?:help|911|gun|fire|break(?:ing)? in)',
+    r"\b(?:quoting|quote|as (?:a )?quote)\b",
+)
+
+
+def _is_non_current_emergency_language(normalized: str) -> bool:
+    """True for quoted, historical, fictional, or second-hand emergency wording."""
+    return any(pattern.search(normalized) for pattern in _NON_CURRENT_CONTEXT)
+
+
 _RULES: Tuple[
     Tuple[EmergencyCategory, EmergencyReasonCode, Tuple[Pattern[str], ...]],
     ...,
@@ -270,6 +298,12 @@ _RULES: Tuple[
             rf"(?:my |our )?{_STRUCTURE}\b",
             rf"\b(?:i|we) (?:just )?(?:caught|saw) (?:someone|somebody) "
             rf"(?:breaking|broke) in\b",
+            rf"\b(?:active |current )?break[- ]?in (?:in|at|inside) "
+            rf"(?:my |our )?{_STRUCTURE}\b",
+            rf"\bsomeone (?:just )?broke into (?:my |our )home\b",
+            rf"\bi (?:think )?there(?:'s| is) (?:a |an )?(?:burglar|intruder) "
+            rf"(?:in|inside) (?:my |our )?{_STRUCTURE} "
+            rf"(?:right now|now)\b",
         ),
     ),
     (
@@ -292,6 +326,12 @@ _RULES: Tuple[
             rf"not breathing|unconscious)\b",
             rf"\b(?:someone|somebody) (?:is )?(?:hurting|attacking|abducting|"
             rf"kidnapping) (?:my |our |the )?{_CHILD}\b",
+            rf"\b{_VULNERABLE}\b.*\b(?:in (?:immediate )?danger|being "
+            rf"(?:hurt|attacked|hurt right now))\b",
+            rf"\b(?:someone|somebody) (?:is )?(?:hurting|attacking) "
+            rf"(?:my |our |the )?{_VULNERABLE}\b",
+            rf"\b(?:my |our )?{_VULNERABLE} (?:is|are) "
+            rf"(?:in immediate danger|being hurt)\b",
         ),
     ),
     (
@@ -429,6 +469,8 @@ def detect_active_emergency(message: Any) -> EmergencyDecision:
         return _inactive(EmergencyReasonCode.INVALID_INPUT)
 
     normalized = _normalize(message)
+    if _is_non_current_emergency_language(normalized):
+        return _inactive(EmergencyReasonCode.NO_MATCH)
     for category, reason, patterns in _RULES:
         if any(pattern.search(normalized) for pattern in patterns):
             return _active(category, reason)
