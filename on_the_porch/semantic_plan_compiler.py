@@ -985,11 +985,22 @@ def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]
         },
         SemanticDomain.CRIME: {
             "crime", "crimes", "incident", "incidents", "report", "reports", "reported",
+            "safety", "concern", "concerns", "public", "overview", "main", "major",
+            "trend", "trends", "pattern", "patterns", "issue", "issues",
+            "neighborhood", "dorchester", "boston", "local", "overall", "general",
         },
     }.get(domain, set())
     meaningful = [word for word in words if word not in generic]
     if not meaningful:
         return None
+    if domain is SemanticDomain.CRIME:
+        # Broad non-offense phrases must not become fake offense filters.
+        joined = " ".join(meaningful)
+        if joined in {
+            "safety concern", "safety concerns", "public safety", "main concern",
+            "main concerns", "safety overview",
+        }:
+            return None
     if domain is SemanticDomain.SERVICE_REQUESTS:
         family = canonical_issue_family_id(" ".join(meaningful))
         if family is None:
