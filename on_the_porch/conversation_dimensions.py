@@ -806,8 +806,8 @@ def _extract_explicit_time(
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
 
     month_range = re.search(
-        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}}),?\s+(\d{{4}})\s+(?:to|through)\s+"
-        rf"({_MONTH_PATTERN})\s+(\d{{1,2}}),?\s+(\d{{4}})\b",
+        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\s+(?:to|through)\s+"
+        rf"({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b",
         original,
         flags=re.IGNORECASE,
     )
@@ -828,7 +828,7 @@ def _extract_explicit_time(
             return None, ReasonCode.AMBIGUOUS_EXPLICIT_DATE, True
 
     month_date = re.search(
-        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}}),?\s+(\d{{4}})\b",
+        rf"\b({_MONTH_PATTERN})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b",
         original,
         flags=re.IGNORECASE,
     )

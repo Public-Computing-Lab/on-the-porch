@@ -56,5 +56,8 @@
   },
   "holdout_consumed_at": "2026-07-21",
   "selection_reason": "Lowest-cost, lowest-latency available candidate that cleared repeated smoke and full development gates with the maintained SDK and the role-separated structured-content adapter.",
-  "runtime_authority": "offline_evaluation_only"
+  "runtime_authority": "historical_offline_evaluation_only_not_authoritative_runtime",
+  "record_kind": "historical_offline_phase1_freeze",
+  "historical": true,
+  "superseded_by": "evaluation/model_led_turn_service/authoritative_runtime_freeze.json"
 }

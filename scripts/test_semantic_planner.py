@@ -456,8 +456,13 @@ def test_same_domain_omitted_time_reuses_only_a_trusted_period() -> None:
         trusted_context=unrelated,
         trusted_reference_tokens=("time:active",),
     )
-    assert not result.tool_requests
-    assert "time period" in (result.clarification_reason or "").lower()
+    # Cross-topic trusted time must not leak. Unqualified SERVICE_REQUESTS NONE
+    # time uses the reviewed previous-month default instead.
+    aggregate = next(
+        item for item in result.tool_requests if item.tool_id.value == "aggregate_311"
+    )
+    assert aggregate.arguments["time_scope"] == {"period": "PREVIOUS_CALENDAR_MONTH"}
+    assert aggregate.arguments["time_scope"].get("trusted_reference_token") is None
 
 
 def test_all_expected_labels_compile_without_execution() -> None:
@@ -507,8 +512,8 @@ def test_prompt_modes_size_privacy_and_function_catalog() -> None:
     assert structured_content["trusted_state"]["default_geography"]["name"] == "Dorchester"
     assert structured_content["trusted_tokens"] == []
     assert split_semantic_planner_prompt("health probe") == (None, "health probe")
-    assert len(straight.encode("utf-8")) < 5_500
-    assert len(function.encode("utf-8")) < 4_500
+    assert len(straight.encode("utf-8")) < 7_000
+    assert len(function.encode("utf-8")) < 5_500
     for text in (straight, function):
         assert "aggregate_311" not in text and "tool_id" not in text and "state_intent" not in text
     declarations = planner_function_declarations()

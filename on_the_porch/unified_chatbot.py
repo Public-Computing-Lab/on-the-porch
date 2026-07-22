@@ -2214,6 +2214,8 @@ def _retrieve_rag(
     print(f"  🔎 RAG sources: {', '.join(source_names)}")
 
     deadline = current_deadline()
+    # Keep enough reserve for persistence/finalization under the shared 15s ceiling.
+    retrieval_safety_margin = 1.0
 
     def _safe_run(fn):
         try:
@@ -2236,12 +2238,12 @@ def _retrieve_rag(
                 pending.add(future)
 
             while pending:
-                if deadline_exhausted(deadline, safety_margin=0.25):
+                if deadline_exhausted(deadline, safety_margin=retrieval_safety_margin):
                     break
                 wait_timeout = wait_timeout_cap(
                     per_task_timeout,
                     deadline,
-                    safety_margin=0.25,
+                    safety_margin=retrieval_safety_margin,
                 )
                 if wait_timeout is not None and wait_timeout <= 0.0:
                     break
@@ -2276,7 +2278,7 @@ def _retrieve_rag(
     else:
         results = []
         for _name, fn in task_entries:
-            if deadline_exhausted(deadline, safety_margin=0.25):
+            if deadline_exhausted(deadline, safety_margin=retrieval_safety_margin):
                 results.append(("(timeout)", [], []))
                 break
             results.append(_safe_run(fn))
@@ -2526,7 +2528,7 @@ def _run_hybrid_parts(
             pending.update({sql_future, rag_future})
 
             while pending:
-                if deadline_exhausted(deadline, safety_margin=0.25):
+                if deadline_exhausted(deadline, safety_margin=1.0):
                     break
                 wait_timeout = (
                     None
@@ -2534,7 +2536,7 @@ def _run_hybrid_parts(
                     else wait_timeout_cap(
                         5.0,
                         deadline,
-                        safety_margin=0.25,
+                        safety_margin=1.0,
                     )
                 )
                 if wait_timeout is not None and wait_timeout <= 0.0:
@@ -2749,10 +2751,13 @@ def _budget_nearly_exhausted(seconds: float = 3.0) -> bool:
     return budget_exhausted() or remaining_seconds(floor=0.0) < seconds
 
 
-def _budget_fallback_answer() -> str:
-    return (
-        "I am running out of time to answer this safely. Please try a narrower "
-        "question, such as a specific 311 count, event window, or safety topic."
+def _budget_fallback_answer(intent: Optional[str] = None) -> str:
+    from resident_response import execution_failure_message  # noqa: WPS433
+
+    return execution_failure_message(
+        path="rag",
+        intent=intent,
+        timed_out=True,
     )
 
 

@@ -16,19 +16,26 @@ from typing import Any, Dict, Iterator, Optional
 _metrics_local = threading.local()
 
 
-def reset_request_metrics() -> None:
+def reset_request_metrics(*, reset_budget: bool = True) -> None:
+    """Reset per-request LLM counters.
+
+    When ``reset_budget`` is false, preserve any already-installed wall-clock
+    deadline so an authoritative 15-second turn budget is not replaced by the
+    legacy 30-second default mid-request.
+    """
     try:
         from unified_chatbot import reset_llm_call_counter  # type: ignore
 
         reset_llm_call_counter()
     except Exception:
         pass
-    try:
-        from request_budget import reset_request_budget  # type: ignore
+    if reset_budget:
+        try:
+            from request_budget import reset_request_budget  # type: ignore
 
-        reset_request_budget()
-    except Exception:
-        pass
+            reset_request_budget()
+        except Exception:
+            pass
     _metrics_local.llm_calls = 0
     _metrics_local.started_at = time.perf_counter()
 

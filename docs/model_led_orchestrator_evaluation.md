@@ -23,17 +23,19 @@ holdout contains 60 synthetic cases in 20 disjoint families. Holdout labels requ
 runner flag and are never loaded by production code. A provider holdout run is permitted only
 after one configuration passes smoke and development gates and is frozen.
 
-## Frozen Phase 1 configuration
+## Frozen configurations
 
-The selected configuration is recorded verbatim in
-`evaluation/model_led_orchestrator/frozen_configuration.json`. It uses the stable model ID
-`gemini-3.1-flash-lite`, the maintained `google-genai` SDK, function calling, public semantic
-protocol/schema v3, prompt v4, the `structured-user-content-adapter-v2`, semantic compiler and
-canonicalization v3, temperature zero, one provider attempt, a 0.70 confidence threshold, and a
-3.0-second planner ceiling. Trusted policy is sent as the provider system instruction; bounded
-trusted state and the synthetic resident message are sent as structured user content. The
-holdout runner rejects a different model, encoding, or timeout. This freeze authorizes only
-isolated evaluation; `MODEL_LED_ORCHESTRATOR_MODE` remains off for resident traffic.
+Historical Phase 1 offline freeze:
+`evaluation/model_led_orchestrator/frozen_configuration.json` (prompt v4; marked historical;
+not authoritative for resident traffic).
+
+Authoritative Phase 2 runtime freeze:
+`evaluation/model_led_turn_service/authoritative_runtime_freeze.json`. It records the maintained
+`google-genai` SDK, `gemini-3.1-flash-lite`, function calling, the current semantic protocol and
+generalized planner prompt, compiler/normalization hashes, one-attempt/no-retry policy,
+confidence threshold, planner timeout, development dataset, and fresh sealed holdout identifier.
+`MODEL_LED_ORCHESTRATOR_MODE=authoritative` is the resident-runtime mode documented by that
+freeze after Phase 2 cleanup.
 
 The final repeated smoke run made 63 independent provider calls with 100% availability,
 structure, compiled-tool accuracy, and guarded safety; action and guarded usefulness were 95.24%
@@ -258,8 +260,8 @@ consumed.
 
 ## Runtime status and remaining work
 
-`MODEL_LED_ORCHESTRATOR_MODE` remains off. The evaluator performs no runtime wiring, civic tool
-execution, database access, state mutation, or resident-facing behavior change. Normal JSON/SSE
-routes and the existing provider path are unchanged. Phase 1 is accepted for its foundation
-scope. Phase 2 must still prove canary tool execution, deterministic answers, state, transport,
-idempotency, provider failure, deadline, privacy, concurrency, and browser gates before cutover.
+The offline evaluator remains isolated: it does not wire resident traffic, mutate production
+state, or certify DreamHost deployment. Phase 2 authoritative resident traffic is documented in
+`docs/answering_architecture.md` and frozen in
+`evaluation/model_led_turn_service/authoritative_runtime_freeze.json`. Phase 3 domain migration
+(crime, documents/RAG, legacy caller retirement) remains future work.

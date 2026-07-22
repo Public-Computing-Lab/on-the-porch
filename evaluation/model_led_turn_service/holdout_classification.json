@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "purpose": "Classify Phase 2 turn-service holdouts for future sealed-release eligibility. Consumed or unsuitable sets must not be reused as fresh sealed evidence.",
+  "updated_for": "phase2-cleanup-sealed-holdout-v20-passed",
+  "labels": {
+    "consumed": "Already used in a sealed evaluation that passed; do not reuse for future sealed-release claims.",
+    "historical": "Superseded archival artifact kept for lineage; not eligible as a fresh sealed release set.",
+    "unsuitable": "Failed sealed run or otherwise unfit; do not cite for sealed-release claims.",
+    "sealed_pending_run": "Fresh sealed candidate awaiting an independent evaluation run."
+  },
+  "holdouts": [
+    {
+      "dataset_name": "phase2b-integration-holdout-v1",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout.json",
+      "classification": "historical",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Original v1 holdout; failed sealed attempt and superseded by later versions. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v2",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v2.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; wording and labels are burned for reuse. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v3",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v3.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; not eligible for future sealed-release claims. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v4",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v4.json",
+      "classification": "consumed",
+      "consumption_status": "consumed_passed_no_reuse",
+      "notes": "Passed sealed evaluation; consumed and blocked from reuse. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v5",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v5.json",
+      "classification": "consumed",
+      "consumption_status": "consumed_passed_no_reuse",
+      "notes": "Passed sealed evaluation; consumed and blocked from reuse. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v6",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v6.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; unsuitable for sealed-release claims. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v7",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v7.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; unsuitable for sealed-release claims. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2b-integration-holdout-v8",
+      "path": "evaluation/model_led_turn_service/phase2b_integration_holdout_v8.json",
+      "classification": "consumed",
+      "consumption_status": "consumed_passed_no_reuse",
+      "notes": "Latest prior passed sealed holdout; consumed and blocked from reuse. Marked non-sealed for future release eligibility."
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v9",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v9.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; burned. General defects corrected without tuning from holdout wording.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v10",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v10.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed run failed; burned. Do not reuse wording for sealed-release claims.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v11",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v11.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Unsuitable calendar labels relative to evaluation date; burned.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v12",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v12.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed one-shot failed (useful 90.65%); burned for reuse. Defect classes: through-Sunday\u2192weekend, 311 freshness\u2192MISSING_TIME, contradictory/negation under-clarify, soft greeting/capability validity.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v13",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v13.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed one-shot failed (useful 83.49%). Primary defect: cases used issue types outside the reviewed five-family 311 ontology; also label mismatches on trusted rephrase.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v14",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v14.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed one-shot failed at 92.73% useful (need 95%). Residual: label mismatches on rephrase/contradiction, freshness MISSING_GEOGRAPHY, one explicit-date compile miss, planner timeouts.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v15",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v15.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed failed at 92.45% useful. Residual: COUNT vs GROUP wording, FIND vs COUNT, community-board\u2192docs.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v16",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v16.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed failed; message contamination during overlap uniquify."
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v17",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v17.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed 91.51% useful. Defects: week-end\u2192weekend, ponding/lamp synonyms, topic-switch residual.",
+      "overlap_audit": "PASS"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v18",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v18.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed 91.51% useful. Defects: pavement alias, discourse-next period, topic-leave, coverage rephrase, CHECK_EXISTENCE geography retention, negation."
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v19",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v19.json",
+      "classification": "unsuitable",
+      "consumption_status": "consumed_failed_no_reuse",
+      "notes": "Sealed 90.57% useful / 88.68% capability. Defects: negation/contradiction, weekend phrasing, 311 issue synonyms, trusted rephrase, topic switch, geo-time refine.",
+      "overlap_audit": "PASS",
+      "sha256": "f85658fe8c96a13900562286ca60775798e03cb5efedad924df3629a2fcfe276"
+    },
+    {
+      "dataset_name": "phase2-cleanup-sealed-holdout-v20",
+      "path": "evaluation/model_led_turn_service/phase2_cleanup_sealed_holdout_v20.json",
+      "classification": "consumed",
+      "consumption_status": "consumed_passed_no_reuse",
+      "notes": "Sealed one-shot PASSED (useful 97.17%, safe 100%). Consumed; do not reuse for future sealed-release claims.",
+      "overlap_audit": "PASS",
+      "sha256": "9c2279b125617ba123adedd8b681a52b35c0494a759393bd4e2ea67fd3b7f71b",
+      "sealed_run": {
+        "useful_outcome_rate": 97.17,
+        "safe_outcome_rate": 100.0,
+        "capability_accuracy": 95.28,
+        "all_gates_passed": true,
+        "failed_case_ids": [
+          "v20-negation-ambiguous:1",
+          "v20-311-status:1",
+          "v20-311-chain:2"
+        ],
+        "output": "/private/tmp/phase2-cleanup-sealed-holdout-v20-final.json"
+      }
+    }
+  ]
+}

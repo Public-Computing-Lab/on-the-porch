@@ -336,67 +336,49 @@ actions and compiles semantic tasks deterministically. It uses the maintained `g
 stable model IDs, function calling, and strict local validation. Provider policy is a system
 instruction; bounded trusted state and the resident message are structured user content.
 
-The frozen `gemini-3.1-flash-lite` configuration passed 63 repeated smoke calls, the 100-case
-development corpus, and one independently authored 60-case sealed holdout. Development guarded
-strategy/tool usefulness was 98%/97%, compiled-tool accuracy was 97.7%, geography/time accuracy
-was 96.55%/95.4%, safety was 100%, and p95 was 1.044 seconds. Holdout usefulness was 98.33%,
-compiled-tool accuracy was 97.78%, safety was 100%, and p95 was 0.957 seconds. Unsupported facts,
-unsafe tools, fabricated references, context leakage, injection failures, and unnecessary
-clarifications were zero. `MODEL_LED_ORCHESTRATOR_MODE` remains off; Phase 2 begins with an
-isolated, non-default canary and does not change the current resident runtime.
+The frozen `gemini-3.1-flash-lite` Phase 1 offline configuration historically passed 63 repeated
+smoke calls, the 100-case development corpus, and one independently authored 60-case sealed
+holdout under prompt v4. That Phase 1 freeze is retained only as a historical offline record in
+`evaluation/model_led_orchestrator/frozen_configuration.json`. It does not describe the
+authoritative resident runtime.
 
-## 25. Phase 2A isolated turn-service canary
+## 25. Phase 2 authoritative model-led turns
 
-Phase 2A implements the first executable vertical slice of the model-led architecture for
-direct conversation, clarification, event discovery/details, and aggregate Boston 311. The
+Phase 2 makes the model-led lifecycle authoritative for direct conversation, clarification,
+Dorchester event discovery/details, and aggregate Boston 311 when
+`MODEL_LED_ORCHESTRATOR_MODE=authoritative` (process-level; restart required to change). The
 transport-neutral `ModelLedTurnService` receives a validated resident message, bounded trusted
-state, a request deadline, and an optional server-issued selected-entity token. It makes exactly
-one semantic-planner call, guards and deterministically compiles the result, executes only
-registered event or 311 capabilities, composes the answer from structured evidence without a
-synthesis model, and derives server-owned state transitions. The model cannot select physical
-tables, SQL, exact dates, arbitrary functions, source IDs, or persistent state.
+state, a request deadline, and an optional server-issued selected-entity token. Migrated turns
+make exactly one semantic-planner call, guard and deterministically compile the result, execute
+only registered event or 311 capabilities, compose the answer from structured evidence with
+**zero synthesis and zero repair calls**, and derive server-owned state transitions. Embeddings
+are not used on migrated paths. The model cannot select physical tables, SQL, exact dates,
+arbitrary functions, source IDs, or persistent state.
 
-The maintained `google-genai` provider adapter is shared by the Phase 1 planner and Phase 2A turn
-service. Planner failures, invalid plans, unavailable capabilities, and deadline pressure fail
-closed to a bounded clarification or deterministic degraded answer. Emergency interception,
-identity and ownership checks, rate limiting, turn idempotency, atomic persistence, replay,
-request budgets, and JSON/SSE finalization remain in the existing API stack. The service does not
-implement a second transport, state store, cache, deadline, or planner.
+Planner failures fail closed to a bounded DEGRADED clarification and do not silently enter RAG.
+Event and 311 turns do not silently return to legacy semantic authority in authoritative mode.
+Emergency interception and completed idempotent replay occur before the planner. JSON and SSE
+share the same model-led execution and finalization helpers.
 
-The canary is off by default. It is reachable only when
-`MODEL_LED_ORCHESTRATOR_MODE=isolated_canary`, the existing request uses an authenticated
-non-production environment, and the exact server-configured `X-On-The-Porch-Canary` value is
-present. The optional browser header is absent from normal frontend configuration. A selected
-event is accepted only through the existing validated UI event-resolution envelope and a matching
-server-issued trusted token; ordinary prior active-entity state cannot masquerade as a new
-selection.
+Not-yet-migrated civic domains (for example public-safety/crime and generic document RAG) receive
+exactly one transitional handoff at the API boundary after the model-led planner returns
+`NOT_YET_MIGRATED`. The same request-scoped 15-second `GlobalDeadline` covers that legacy
+handoff, validation, persistence, and response finalization; the legacy 30-second request budget
+must not override it. Rollback to legacy interpretation requires an explicit process-level mode
+change and restart (`off` / `legacy`).
 
-The final synthetic development evaluation used 138 privacy-audited cases and one frozen planner
-configuration. It recorded 138 planner calls, zero synthesis calls, 100% status, action, useful,
-and safe-outcome accuracy, 97.83% capability accuracy, zero unnecessary clarifications, p50
-latency of 0.733 seconds, p95 of 0.914 seconds, and a 1.109-second maximum. Every established Phase
-2A gate passed and every case completed below 15 seconds. The general semantic contract now marks
-an evidence task as `DOMAIN_ONLY` when the civic domain is recognizable but the requested evidence
-operation is not; the compiler converts that state to a targeted clarification with no tool. Clear
-event discovery remains executable with the deterministic upcoming default, Boston 311 freshness
-compiles to source status without an invented time filter, and selected-event detail aspects are
-compiler-owned allowlisted fields. No resident phrase or exact question was added to runtime code.
+The isolated canary mode (`MODEL_LED_ORCHESTRATOR_MODE=isolated_canary` plus the configured
+`X-On-The-Porch-Canary` header) remains available for non-production opt-in testing and rejects
+not-yet-migrated domains with HTTP 409 instead of handing off.
 
-An isolated two-worker local-demo API run exercised one planner call and zero synthesis calls per turn across
-direct responses, clarifications, selected-event details, event follow-ups, event-to-311 topic
-switches, 311 aggregates/categories/source policy, emergency precedence, JSON/SSE parity,
-concurrent idempotent replay, and two-worker concurrency. The final live run completed ten factual
-turns and three expected clarifications with no unexpected tool calls; event and 311 capabilities
-ran exactly once when required. Live p50/p95/max latency was 0.871/1.024/1.024 seconds. Browser
-acceptance on isolated ports verified event cards, trusted selected-event details, `Where is it?`,
-311 follow-ups, evidence-policy responses, source rendering, and CORS preflight for the canary
-header. These results used only `sentiment_demo`; they do not certify production data, credentials,
-DreamHost networking, or resident traffic. The normal runtime was not restarted or reconfigured.
+The authoritative runtime freeze that matches the running planner/compiler configuration is
+`evaluation/model_led_turn_service/authoritative_runtime_freeze.json` (prompt v20 and later).
+Historical Phase 2B holdouts v1–v8 are classified as consumed or unsuitable for future sealed
+release claims; sealed generalization claims require a fresh independently authored holdout after
+prompt generalization.
 
-Phase 2B should make this lifecycle authoritative for direct conversation, clarification, events,
-and Boston 311; preserve explicit transitional handoff for not-yet-migrated civic domains; and
-retire the replaced legacy interpretation authority only after transport, state, idempotency,
-provider-failure, and caller-removal proof.
+Phase 3 is not implemented. Remaining work includes migrating crime/document domains, retiring
+legacy interpretation callers after parity proof, and production hardening outside this cleanup.
 
 ## 26. Semantic debt and deprecation map
 
