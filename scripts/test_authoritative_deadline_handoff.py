@@ -62,9 +62,21 @@ def test_legacy_handoff_budget_helper_requires_four_seconds() -> None:
     assert not api_v2._legacy_handoff_budget_exhausted(fresh)
 
 
+def test_application_ceiling_stops_before_public_deadline() -> None:
+    started = time.perf_counter() - 14.05
+    deadline = GlobalDeadline.from_started_at(started, hard_ceiling_seconds=15.0)
+    assert deadline.application_remaining(reserve_for_persistence=False) == 0.0
+    assert deadline.remaining(reserve_for_persistence=False) > 0.0
+    assert deadline.expired(reserve_for_persistence=False)
+    import api_v2
+
+    assert api_v2._legacy_handoff_budget_exhausted(deadline)
+
+
 if __name__ == "__main__":
     test_reset_metrics_can_preserve_deadline()
     test_authoritative_deadline_is_fifteen_seconds()
     test_thirty_second_budget_must_not_override_installed_deadline()
     test_legacy_handoff_budget_helper_requires_four_seconds()
+    test_application_ceiling_stops_before_public_deadline()
     print("authoritative deadline handoff tests passed")

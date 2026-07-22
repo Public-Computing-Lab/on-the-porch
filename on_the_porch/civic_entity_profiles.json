@@ -1,0 +1,114 @@
+{
+  "profiles": [
+    {
+      "stable_id": "eversource",
+      "display_name": "Eversource",
+      "aliases": ["eversource energy", "nstar", "nstar electric"],
+      "entity_kind": "utility",
+      "role_summary": "Investor-owned electric and gas utility serving much of Greater Boston, including Dorchester.",
+      "resident_relevance": "Residents contact Eversource for power outages, electric/gas service, and meter issues.",
+      "official_url": "https://www.eversource.com/",
+      "source_authority": "Eversource Energy official site",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "bwsc",
+      "display_name": "Boston Water and Sewer Commission",
+      "aliases": ["bwsc", "boston water and sewer", "boston water"],
+      "entity_kind": "utility",
+      "role_summary": "City water and sewer utility responsible for drinking water distribution and wastewater collection in Boston.",
+      "resident_relevance": "Residents use BWSC for water/sewer billing, leaks, and service disruptions.",
+      "official_url": "https://www.bwsc.org/",
+      "source_authority": "Boston Water and Sewer Commission",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "mbta",
+      "display_name": "MBTA",
+      "aliases": ["massachusetts bay transportation authority", "the t", "mbta transit"],
+      "entity_kind": "agency",
+      "role_summary": "Regional public transit agency operating buses, subway, ferry, and commuter rail serving Boston neighborhoods.",
+      "resident_relevance": "Dorchester residents rely on MBTA buses and Red Line / Fairmount service for daily travel.",
+      "official_url": "https://www.mbta.com/",
+      "source_authority": "Massachusetts Bay Transportation Authority",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "bpd",
+      "display_name": "Boston Police Department",
+      "aliases": ["bpd", "boston police"],
+      "entity_kind": "agency",
+      "role_summary": "Municipal police department that publishes incident report open data used for neighborhood safety context.",
+      "resident_relevance": "BPD open data informs public-safety questions; emergencies still require 911.",
+      "official_url": "https://www.boston.gov/departments/police",
+      "source_authority": "City of Boston",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "bfd",
+      "display_name": "Boston Fire Department",
+      "aliases": ["bfd", "boston fire"],
+      "entity_kind": "agency",
+      "role_summary": "Municipal fire and emergency response department for the City of Boston.",
+      "resident_relevance": "Handles fires, rescue, and related emergencies; call 911 for immediate danger.",
+      "official_url": "https://www.boston.gov/departments/fire-department",
+      "source_authority": "City of Boston",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "boston_311",
+      "display_name": "Boston 311",
+      "aliases": ["311", "bos 311", "boston three one one"],
+      "entity_kind": "city_service",
+      "role_summary": "City non-emergency service request system for street, sanitation, housing, and related issues.",
+      "resident_relevance": "Residents use Boston 311 to report and track non-emergency neighborhood service requests.",
+      "official_url": "https://www.boston.gov/departments/boston-311",
+      "source_authority": "City of Boston",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "mass_save",
+      "display_name": "Mass Save",
+      "aliases": ["masssave", "mass save program"],
+      "entity_kind": "program",
+      "role_summary": "Statewide energy-efficiency program offering rebates, assessments, and weatherization support.",
+      "resident_relevance": "Helps renters and homeowners reduce energy costs through efficiency upgrades.",
+      "official_url": "https://www.masssave.com/",
+      "source_authority": "Mass Save",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "codman_square_ndc",
+      "display_name": "Codman Square Neighborhood Development Corporation",
+      "aliases": ["codman square ndc", "csndc", "codman square neighborhood development"],
+      "entity_kind": "community_organization",
+      "role_summary": "Community development corporation focused on housing, economic opportunity, and neighborhood stability in Codman Square.",
+      "resident_relevance": "Local partner for housing and community development issues in Dorchester's Codman Square area.",
+      "official_url": "https://www.csndc.com/",
+      "source_authority": "Codman Square NDC",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "bpda",
+      "display_name": "Boston Planning and Development Agency",
+      "aliases": ["bpda", "boston planning", "boston redevelopment authority", "bra"],
+      "entity_kind": "agency",
+      "role_summary": "City planning and development agency involved in zoning, planning review, and major development processes.",
+      "resident_relevance": "Relevant for zoning, planning proposals, and development review questions.",
+      "official_url": "https://www.bostonplans.org/",
+      "source_authority": "Boston Planning and Development Agency",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "isd",
+      "display_name": "Inspectional Services Department",
+      "aliases": ["isd", "boston isd", "inspectional services"],
+      "entity_kind": "agency",
+      "role_summary": "City department that handles building, housing, and related code inspection and permitting functions.",
+      "resident_relevance": "Residents encounter ISD for permits, housing code issues, and building inspections.",
+      "official_url": "https://www.boston.gov/departments/inspectional-services",
+      "source_authority": "City of Boston",
+      "verification_status": "verified_profile"
+    }
+  ]
+}

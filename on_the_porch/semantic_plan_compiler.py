@@ -579,6 +579,14 @@ def _compile_task(
     ):
         # Unqualified service-request aggregates default to the prior calendar month.
         time_scope = {"period": SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value}
+    if (
+        task.domain is SemanticDomain.CRIME
+        and task.operation is not SemanticOperation.STATUS
+        and task.time.kind is SemanticTimeKind.NONE
+        and time_scope is None
+    ):
+        # Broad safety/crime overviews default to the latest complete calendar month.
+        time_scope = {"period": SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value}
     status_sources = _status_sources(task)
     if task.domain is SemanticDomain.EVENTS:
         return _compile_events(task, trusted_context, location_id, time_scope), status_sources, False

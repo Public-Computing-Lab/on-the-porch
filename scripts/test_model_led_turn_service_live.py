@@ -433,17 +433,46 @@ def run(base_url: str) -> None:
     check(emergency_latency < 15_000, "emergency exceeded deadline")
 
     if AUTHORITATIVE:
-        legacy_thread = client.create_thread("Phase 2 transitional legacy handoff")
+        safety_thread = client.create_thread("Phase 3 public-safety overview")
+        safety = turn(
+            client,
+            safety_thread,
+            "phase3_safety_overview",
+            "What are the main safety concerns in Dorchester?",
+        )
+        check(safety["status"] in {"COMPLETED", "DEGRADED", "CLARIFICATION"}, "safety overview status")
+        check(safety["planner_call_count"] in {0, 1}, "safety overview planner count")
+        check(safety.get("repair_call_count", 0) == 0, "safety overview repair count")
+        check(safety.get("secondary_planner_call_count", 0) == 0, "safety overview secondary planner")
+        check(bool(safety["answer"].strip()), "safety overview answer is empty")
+
+        entity_thread = client.create_thread("Phase 3 civic entity")
+        entity = turn(
+            client,
+            entity_thread,
+            "phase3_entity",
+            "What is Eversource?",
+        )
+        check(entity["status"] in {"COMPLETED", "CLARIFICATION", "DEGRADED"}, "entity status")
+        check(entity["planner_call_count"] == 1, "entity planner count")
+        check(entity.get("synthesis_call_count", 0) in {0, 1}, "entity synthesis count")
+        check("Eversource" in entity["answer"] or entity["status"] == "CLARIFICATION", "entity answer")
+
+        legacy_thread = client.create_thread("Phase 3 remaining location handoff")
         legacy = turn(
             client,
             legacy_thread,
-            "legacy_public_safety",
-            "What public-safety updates are available for Dorchester?",
+            "legacy_location_only",
+            "Where exactly is unknown hamlet twelve?",
         )
-        check(legacy["status"] == "NOT_YET_MIGRATED", "legacy handoff disposition")
-        check(legacy["response_mode"] != "model_led_not_yet_migrated", "legacy answer was not produced")
-        check(bool(legacy["answer"].strip()), "legacy handoff answer is empty")
-        check(not legacy["tool_execution_counts"], "model-led service ran migrated tools during legacy handoff")
+        # LOCATION-only remains outside migrated domains unless the planner routes elsewhere.
+        if legacy["status"] == "NOT_YET_MIGRATED":
+            check(legacy["response_mode"] != "model_led_not_yet_migrated", "legacy answer was not produced")
+            check(bool(legacy["answer"].strip()), "legacy handoff answer is empty")
+            check(not legacy["tool_execution_counts"], "model-led tools during location handoff")
+        else:
+            check(legacy.get("repair_call_count", 0) == 0, "location path repair count")
+            check(legacy.get("secondary_planner_call_count", 0) == 0, "location path secondary planner")
 
     parity_thread = client.create_thread("Phase 2A JSON SSE replay parity")
     parity_id = str(uuid.uuid4())

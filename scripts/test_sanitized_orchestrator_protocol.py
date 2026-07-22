@@ -49,7 +49,7 @@ def assert_raises(exc_type, function, *args, **kwargs):
 
 
 def test_plain_and_function_payloads_are_small_and_private() -> None:
-    for mode, maximum in (("plain", 5_800), ("function", 4_500)):
+    for mode, maximum in (("plain", 7_000), ("function", 5_500)):
         payload = build_sanitized_provider_payload(
             normalize_resident_input("How many 311 requests were filed this week?"),
             trusted_context=CONTEXT,
@@ -76,7 +76,7 @@ def test_function_catalog_has_only_three_high_level_actions() -> None:
         "google-genai",
         "function",
         3.0,
-        "semantic-planner-prompt-v15",
+        "semantic-planner-prompt-v20",
         "structured-user-content-adapter-v2",
     )
     declarations = planner_function_declarations()

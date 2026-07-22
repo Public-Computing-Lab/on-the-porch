@@ -514,25 +514,42 @@ function formatSource(rawSource) {
 
   const label = (source.source || source.label || source.name || '').trim();
   let path = source.path || source.link || source.url || null;
+  const sourceType = (source.source_type || source.sourceType || '').trim();
+  const sourceDate = (source.date || source.publication_or_data_date || '').trim();
 
   if (path && !isPublicSourcePath(path)) {
     path = null;
   }
 
-  if (source.type === 'event' && label) {
-    return { label, path };
+  let displayLabel = label;
+  if (sourceType) {
+    displayLabel = label ? `${label} · ${sourceType.replace(/_/g, ' ')}` : sourceType.replace(/_/g, ' ');
   }
-  if (label && path) {
-    return { label, path };
+  if (sourceDate) {
+    displayLabel = `${displayLabel} · ${sourceDate}`;
+  }
+
+  if (source.type === 'event' && label) {
+    return { label: displayLabel || label, path };
+  }
+  if (source.type === 'entity_profile' && label) {
+    return { label: displayLabel || label, path };
+  }
+  if ((displayLabel || label) && path) {
+    return { label: displayLabel || label, path };
   }
   if (source.type === 'sql' && source.table) {
     const key = source.table.toLowerCase();
-    return sourceMapping[key] || { label: source.table, path: null };
+    const mapped = sourceMapping[key] || { label: source.table, path: null };
+    return {
+      label: sourceType ? `${mapped.label} · ${sourceType.replace(/_/g, ' ')}` : mapped.label,
+      path: mapped.path || path,
+    };
   }
-  if (source.type === 'rag' && label) {
-    return { label, path };
+  if (source.type === 'rag' && (displayLabel || label)) {
+    return { label: displayLabel || label, path };
   }
-  return { label: label || 'Community data', path };
+  return { label: displayLabel || label || 'Community data', path };
 }
 
 function setAuthMode(mode) {

@@ -1,7 +1,7 @@
 {
   "record_kind": "authoritative_runtime_freeze",
   "frozen_at": "2026-07-22",
-  "phase": "phase_2_cleanup",
+  "phase": "phase_3_civic_evidence",
   "authoritative_runtime_mode": "authoritative",
   "model_id": "gemini-3.1-flash-lite",
   "provider_sdk": "google-genai",
@@ -15,7 +15,7 @@
   "planner_contract_hash": "41bede394e452445ba802065c521a90affc7b0bf1cc0c9435e11d3cbfce0e683",
   "provider_message_adapter": "structured-user-content-adapter-v2",
   "compiler_version": "semantic-compiler-v4",
-  "compiler_hash": "194dc321a91697a05657872ab43a5fdd5eeb2cbc91f2560a9f930090428ba840",
+  "compiler_hash": "c9d9bf032a3dd3ab1fb2645ea607270476ac0bcd0b4584ab9badd65f3eb4f4f3",
   "civic_311_module_hash": "12738940d0ebcaec5241f6ed0b89cc8c0dd7c607f482384cefa9cb615b700565",
   "canonicalization_version": "semantic-canonicalization-v3",
   "normalization_version": "resident-input-nfkc-v1",
@@ -73,6 +73,6 @@
     ]
   },
   "sealed_holdout_sha256_at_one_shot": "9c2279b125617ba123adedd8b681a52b35c0494a759393bd4e2ea67fd3b7f71b",
-  "notes_sha": "sha256_at_one_shot is the audited payload hash used for the one-shot sealed run; sealed_holdout_sha256 includes post-run consumption metadata.",
+  "notes_sha": "sha256_at_one_shot is the audited payload hash used for the one-shot sealed run; sealed_holdout_sha256 includes post-run consumption metadata. Phase 3 updates compiler_hash after crime default-time compilation.",
   "max_semantic_prompt_bytes": 7500
 }

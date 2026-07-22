@@ -4099,6 +4099,17 @@ def _authoritative_turn_deadline(started_at: Optional[float]) -> GlobalDeadline:
     return GlobalDeadline.from_started_at(origin, hard_ceiling_seconds=15.0)
 
 
+def _global_deadline_from_installed(installed: float) -> GlobalDeadline:
+    """Rebuild a GlobalDeadline from the absolute request_budget timestamp."""
+    hard = 15.0
+    return GlobalDeadline(
+        deadline=float(installed),
+        started_at=float(installed) - hard,
+        hard_ceiling_seconds=hard,
+        application_ceiling_seconds=14.0,
+    )
+
+
 def _install_authoritative_request_deadline(started_at: Optional[float]) -> GlobalDeadline:
     """Bind the shared authoritative deadline into request_budget for legacy stages."""
     deadline = _authoritative_turn_deadline(started_at)
@@ -4132,13 +4143,16 @@ def _legacy_handoff_budget_result(
 
 # Heavy transitional RAG must not start unless enough wall time remains for
 # retrieval + persistence inside the shared 15-second authoritative deadline.
+# The public product deadline stays 15s; application work cuts off at ~14s.
 _LEGACY_HANDOFF_MIN_REMAINING_SECONDS = 4.0
 
 
 def _legacy_handoff_budget_exhausted(turn_deadline: GlobalDeadline) -> bool:
     """True when the shared turn budget cannot safely run transitional RAG."""
+    if turn_deadline.application_remaining(reserve_for_persistence=False) <= 0.0:
+        return True
     return (
-        turn_deadline.remaining(reserve_for_persistence=True)
+        turn_deadline.application_remaining(reserve_for_persistence=True)
         < _LEGACY_HANDOFF_MIN_REMAINING_SECONDS
     )
 
@@ -4305,6 +4319,9 @@ def _model_led_message_diagnostics(
         ],
         "planner_call_count": result.planner_call_count,
         "synthesis_call_count": result.synthesis_call_count,
+        "repair_call_count": result.repair_call_count,
+        "embedding_call_count": result.embedding_call_count,
+        "secondary_planner_call_count": result.secondary_planner_call_count,
         "tool_call_count": result.tool_call_count,
         "tool_execution_counts": dict(result.tool_execution_counts),
         "latency_ms": round(result.latency_ms, 2),
@@ -5373,7 +5390,7 @@ def post_conversation_message(thread_id: str):
                 # remaining budget cannot cover retrieval + persistence.
                 installed = current_deadline()
                 if installed is not None and _legacy_handoff_budget_exhausted(
-                    GlobalDeadline(deadline=float(installed))
+                    _global_deadline_from_installed(float(installed))
                 ):
                     agent_result = _legacy_handoff_budget_result(
                         retrieval_cache=retrieval_cache,
@@ -5981,7 +5998,7 @@ def post_conversation_message_stream(thread_id: str):
             elif not deterministic_request:
                 installed = current_deadline()
                 if installed is not None and _legacy_handoff_budget_exhausted(
-                    GlobalDeadline(deadline=float(installed))
+                    _global_deadline_from_installed(float(installed))
                 ):
                     deterministic_result = _legacy_handoff_budget_result(
                         retrieval_cache=retrieval_cache,

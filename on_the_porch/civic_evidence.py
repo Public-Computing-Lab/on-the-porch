@@ -1,7 +1,7 @@
 """Domain-neutral evidence contracts for deterministic civic tools.
 
-The contracts are not wired into resident traffic in Phase 1. The legacy 311
-adapter provides a migration boundary without changing current answer behavior.
+Phase 3 wires these contracts into crime, documents, entity, and grounded
+synthesis paths used by the authoritative model-led turn service.
 """
 
 from __future__ import annotations

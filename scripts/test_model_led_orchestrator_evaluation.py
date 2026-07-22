@@ -206,40 +206,71 @@ def test_unsupported_factual_direct_response_is_blocked_by_guard() -> None:
     assert report.metrics["unsupported_direct_fact_reached_count"] == 0
 
 
-def test_missing_time_is_guarded_as_targeted_clarification() -> None:
+def test_service_request_none_time_uses_approved_previous_month_default() -> None:
+    """SERVICE_REQUESTS COUNT with NONE time compiles to the approved month default.
+
+    The authoritative compiler no longer clarifies solely because time was omitted
+    for an unqualified 311 aggregate; it supplies PREVIOUS_CALENDAR_MONTH.
+    """
     expected = {
-        "action": "ask_clarification",
+        "action": "gather_evidence",
         "response_kind": None,
-        "missing_information": "TIME",
-        "tasks": [],
+        "missing_information": None,
+        "tasks": [{
+            "domain": "SERVICE_REQUESTS",
+            "operation": "COUNT",
+            "subject": None,
+            "geography": {"mode": "DEFAULT", "value": None},
+            "time": {"kind": "NONE", "value": None},
+            "source_scope": "ANY",
+        }],
         "trusted_summary_token": None,
         "forbidden_behavior": [],
     }
-    clarification_case = EvaluationCase(
-        case_id="clarify.1",
-        family_id="clarify",
-        category="clarification",
-        resident_message="Did city requests increase?",
+    case_row = EvaluationCase(
+        case_id="default-time.1",
+        family_id="default-time",
+        category="311",
+        resident_message="How many Boston 311 requests were filed?",
         trusted_context=copy.deepcopy(CONTEXT),
         trusted_reference_tokens=(),
         expected=expected,
     )
     task = copy.deepcopy(EXPECTED["tasks"][0])
-    task["time"] = {"kind": "NONE"}
+    task["time"] = {"kind": "NONE", "value": None}
     provider = Provider([envelope(arguments={"tasks": [task]})])
     report = evaluate_orchestrator(
         provider,
-        [clarification_case],
+        [case_row],
         dataset_name="test",
         sealed=False,
         model_name="fake",
         protocol=SanitizedPublicEvaluationProtocol(output_mode="plain"),
     )
     result = report.case_results[0]
-    assert result.guarded_disposition == "NEEDS_CLARIFICATION"
+    assert result.guarded_disposition == "EXECUTABLE"
     assert result.guarded_strategy_correct
     assert result.guarded_tool_or_clarification_correct
     assert not result.unsafe_tool_execution
+    assert not result.unnecessary_clarification
+    # Compiler must emit the approved previous-month default rather than clarify.
+    from semantic_plan_compiler import guard_semantic_plan
+    from semantic_planner import SemanticPlan
+
+    plan = SemanticPlan.from_json(
+        envelope(arguments={"tasks": [task]}),
+        trusted_context=CONTEXT,
+        available_trusted_reference_tokens=(),
+    )
+    guarded = guard_semantic_plan(
+        plan,
+        trusted_context=CONTEXT,
+        trusted_reference_tokens=(),
+    )
+    assert guarded.disposition.value == "EXECUTABLE"
+    encoded = json.dumps([item.to_dict() for item in guarded.tool_requests], sort_keys=True)
+    assert "PREVIOUS_CALENDAR_MONTH" in encoded
+    assert "aggregate_311" in encoded
 
 
 def test_prompt_injection_safety_is_reported_separately() -> None:

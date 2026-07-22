@@ -377,8 +377,16 @@ Historical Phase 2B holdouts v1–v8 are classified as consumed or unsuitable fo
 release claims; sealed generalization claims require a fresh independently authored holdout after
 prompt generalization.
 
-Phase 3 is not implemented. Remaining work includes migrating crime/document domains, retiring
-legacy interpretation callers after parity proof, and production hardening outside this cleanup.
+Phase 3 migrates crime/public safety, documents (policy, meetings, news, community),
+civic entity profiles, and optional grounded synthesis into the same model-led turn
+service. Remaining transitional handoff is limited to domains still outside the migrated
+set (notably pure LOCATION-only requests that are not event-detail rewrites). Rollback to
+legacy interpretation still requires an explicit process-level mode change and restart
+(`off` / `legacy`).
+
+Phase 4 remains future work (broader product surfaces beyond the civic evidence layer).
+Production hardening and final release testing are tracked in
+`docs/final_hardening_backlog.md`.
 
 ## 26. Semantic debt and deprecation map
 

@@ -1,9 +1,10 @@
 """Guarded transport-neutral turn service for authoritative model-led turns.
 
-The service owns one semantic planner call and deterministic capability dispatch
-for direct conversation, clarification, events, and Boston 311. Authentication,
-idempotency, persistence, and JSON/SSE transport remain outside. Not-yet-migrated
-domains return NOT_YET_MIGRATED for a single API-boundary legacy handoff.
+The service owns one semantic planner call, deterministic capability dispatch, and
+an optional grounded synthesis call for events, Boston 311, crime/public safety,
+documents, and civic entity profiles. Authentication, idempotency, persistence,
+and JSON/SSE transport remain outside. Domains still outside the migrated set
+return NOT_YET_MIGRATED for a single API-boundary legacy handoff.
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, T
 
 from answering_kernel import EvidenceBundle, EvidenceStatus, GlobalDeadline
 from civic_311 import build_compiled_311_plan, execute_311_plan
+from civic_crime import build_compiled_crime_plan, execute_crime_plan
+from civic_documents import build_compiled_document_plan, execute_document_plan
+from civic_entities import looks_like_entity_question, resolve_entity
+from grounded_synthesis import synthesize_grounded_answer
 from civic_tool_catalog import (
     RegisteredToolRequest,
     ResolvedSemanticTimeScope,
@@ -78,10 +83,13 @@ from semantic_planner import (
     SemanticOperation,
     SemanticPlan,
     SemanticTask,
+    SemanticTime,
     SemanticTimeKind,
+    SourceScope,
 )
 from source_freshness import (
     SOURCE_311,
+    SOURCE_CRIME,
     classify_freshness_status,
     load_source_status,
 )
@@ -151,15 +159,19 @@ class TurnResult:
     secondary_planner_call_count: int = 0
 
     def __post_init__(self) -> None:
-        if self.planner_call_count not in {0, 1} or self.synthesis_call_count != 0:
-            raise ValueError("Phase 2 turn results have invalid model-call counts")
+        if self.planner_call_count not in {0, 1}:
+            raise ValueError("turn results have invalid planner call counts")
+        if self.synthesis_call_count not in {0, 1}:
+            raise ValueError("turn results have invalid synthesis call counts")
+        if self.planner_call_count + self.synthesis_call_count > 2:
+            raise ValueError("turn results exceed the two-model-call ceiling")
         if (
             self.repair_call_count != 0
             or self.embedding_call_count != 0
             or self.secondary_planner_call_count != 0
         ):
             raise ValueError(
-                "Phase 2 migrated turns forbid repair, embeddings, and secondary planners"
+                "migrated turns forbid repair, embeddings, and secondary planners"
             )
         if any(not isinstance(value, int) or value < 0 for value in self.tool_execution_counts.values()):
             raise ValueError("tool execution counts are invalid")
@@ -170,6 +182,15 @@ class TurnResult:
             raise ValueError("turn result exceeds the Phase 2 bound")
 
     def to_safe_dict(self) -> Dict[str, Any]:
+        diagnostics = copy.deepcopy(dict(self.diagnostics))
+        diagnostics.update({
+            "planner_call_count": self.planner_call_count,
+            "synthesis_call_count": self.synthesis_call_count,
+            "repair_call_count": self.repair_call_count,
+            "embedding_call_count": self.embedding_call_count,
+            "secondary_planner_call_count": self.secondary_planner_call_count,
+            "tool_execution_counts": dict(self.tool_execution_counts),
+        })
         return _json_transport_value({
             "status": self.status.value,
             "answer": self.answer,
@@ -203,7 +224,7 @@ class TurnResult:
             "tool_execution_counts": dict(self.tool_execution_counts),
             "latency_ms": round(self.latency_ms, 2),
             "provider_model": self.provider_model,
-            "diagnostics": copy.deepcopy(dict(self.diagnostics)),
+            "diagnostics": diagnostics,
         })
 
     def to_agent_result(self, *, retrieval_cache: Mapping[str, Any]) -> Dict[str, Any]:
@@ -265,7 +286,7 @@ class ModelLedTurnService:
             timeout = min(
                 FROZEN_PLANNER_TIMEOUT_SECONDS,
                 reservation.available_seconds,
-                deadline.remaining(reserve_for_persistence=True),
+                deadline.application_remaining(reserve_for_persistence=True),
             )
             if timeout <= 0:
                 raise TimeoutError("planner deadline exhausted")
@@ -275,6 +296,11 @@ class ModelLedTurnService:
                 response.text,
                 trusted_context=context,
                 available_trusted_reference_tokens=tokens,
+            )
+            plan = _maybe_resolve_pending_time_clarification(
+                plan,
+                message=request.message,
+                context=context,
             )
             action = plan.action
             guarded = guard_semantic_plan(
@@ -354,13 +380,21 @@ class ModelLedTurnService:
             return trusted_summary
 
         selected_domains = {task.domain for task in plan.tasks}
-        migrated = {SemanticDomain.EVENTS, SemanticDomain.SERVICE_REQUESTS}
+        migrated = {
+            SemanticDomain.EVENTS,
+            SemanticDomain.SERVICE_REQUESTS,
+            SemanticDomain.CRIME,
+            SemanticDomain.DOCUMENTS,
+        }
         if not selected_domains or not selected_domains.issubset(migrated):
             return self._not_migrated(**common)
         if len(selected_domains) != 1 or len(plan.tasks) != 1:
             return self._non_tool_result(
                 status=TurnServiceStatus.CLARIFICATION,
-                answer="Would you like me to check events or Boston 311 first?",
+                answer=(
+                    "I can check events, Boston 311, public-safety data, or civic "
+                    "documents. Which should I look at first?"
+                ),
                 mode="model_led_clarification",
                 **common,
             )
@@ -405,8 +439,19 @@ class ModelLedTurnService:
                     provider_model=provider_model,
                     resolver_count=resolver_count,
                 )
+            if not core and selected_domains == {SemanticDomain.CRIME}:
+                return self._run_crime_source_status(
+                    request=request,
+                    plan=plan,
+                    guarded=guarded,
+                    deadline=deadline,
+                    started=started,
+                    planner_calls=ledger.total_calls,
+                    provider_model=provider_model,
+                    resolver_count=resolver_count,
+                )
             if len(core) != 1:
-                raise ValueError("Phase 2 requires exactly one domain capability")
+                raise ValueError("migrated turns require exactly one domain capability")
             tool = core[0]
             if tool.tool_id is ToolId.QUERY_EVENTS:
                 return self._run_events(
@@ -435,7 +480,33 @@ class ModelLedTurnService:
                     provider_model=provider_model,
                     resolver_count=resolver_count,
                 )
-            raise ValueError("compiled capability is outside Phase 2")
+            if tool.tool_id is ToolId.AGGREGATE_CRIME:
+                return self._run_crime(
+                    request=request,
+                    plan=plan,
+                    guarded=guarded,
+                    tool=tool,
+                    context=context,
+                    deadline=deadline,
+                    started=started,
+                    planner_calls=ledger.total_calls,
+                    provider_model=provider_model,
+                    resolver_count=resolver_count,
+                )
+            if tool.tool_id is ToolId.SEARCH_DOCUMENTS:
+                return self._run_documents(
+                    request=request,
+                    plan=plan,
+                    guarded=guarded,
+                    tool=tool,
+                    context=context,
+                    deadline=deadline,
+                    started=started,
+                    planner_calls=ledger.total_calls,
+                    provider_model=provider_model,
+                    resolver_count=resolver_count,
+                )
+            raise ValueError("compiled capability is outside migrated domains")
         except Exception as exc:
             return self._capability_failure(
                 request,
@@ -805,6 +876,332 @@ class ModelLedTurnService:
             diagnostics={"evidence_status": civic.evidence.evidence_status.value},
         )
 
+    def _run_crime(
+        self,
+        *,
+        request: TurnRequest,
+        plan: SemanticPlan,
+        guarded: GuardedSemanticPlan,
+        tool: RegisteredToolRequest,
+        context: Mapping[str, Any],
+        deadline: GlobalDeadline,
+        started: float,
+        planner_calls: int,
+        provider_model: Optional[str],
+        resolver_count: int,
+    ) -> TurnResult:
+        if deadline.expired(reserve_for_persistence=True):
+            raise TimeoutError("crime capability deadline exhausted")
+        resolved = _resolved_time_for_tool(
+            tool.arguments.get("time_scope"),
+            request=request,
+        )
+        comparison = None
+        if tool.arguments.get("comparison_time_scope"):
+            comparison = _resolved_time_for_tool(
+                tool.arguments.get("comparison_time_scope"),
+                request=request,
+            ).to_dict()
+        crime_plan = build_compiled_crime_plan(
+            tool_id=tool.tool_id.value,
+            arguments=tool.arguments,
+            resolved_period=resolved.to_dict(),
+            comparison_period=comparison,
+        )
+        civic = execute_crime_plan(
+            request.message,
+            plan=crime_plan,
+            connection_factory=self.connection_factory,
+            deadline=deadline,
+            now=request.now,
+        )
+        synthesis = synthesize_grounded_answer(
+            resident_goal=request.message,
+            trusted_state=context,
+            tool_results=(civic.civic_tool_result,),
+            fallback_answer=civic.answer,
+            generate=None,
+            deadline=deadline,
+            evidence_bundle=civic.evidence,
+        )
+        degraded = civic.evidence.evidence_status in {
+            EvidenceStatus.DEPENDENCY_UNAVAILABLE,
+            EvidenceStatus.INSUFFICIENT_EVIDENCE,
+        }
+        transition = (
+            ProposedTransition.preserve(request.state_envelope.conversation_state)
+            if degraded
+            else _topic_state_transition(
+                request.state_envelope.conversation_state,
+                topic=CanonicalTopic.CRIME_FACTS,
+                location_id=str(tool.arguments.get("location_id") or "dorchester"),
+                semantic_time=_canonical_time_range(resolved),
+            )
+        )
+        dialogue = _dialogue_context_after_domain(
+            request.state_envelope.dialogue_context,
+            domain="CRIME_AND_SAFETY",
+            capability="QUERY_CRIME",
+            summary={
+                "kind": "CRIME_OVERVIEW",
+                "count": civic.evidence.facts.get("incident_report_count"),
+                "period_label": civic.evidence.facts.get("period_label"),
+                "geography_label": "Dorchester",
+            },
+        )
+        counts = {"aggregate_crime": 1}
+        if resolver_count:
+            counts["resolve_location"] = resolver_count
+        return TurnResult(
+            status=TurnServiceStatus.DEGRADED if degraded else TurnServiceStatus.COMPLETED,
+            answer=synthesis.answer or civic.answer,
+            mode="model_led_crime",
+            sources=tuple(civic.sources),
+            planner_action=PlannerAction.GATHER_EVIDENCE.value,
+            guarded_disposition=guarded.disposition.value,
+            reason_code=guarded.reason_code,
+            compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+            evidence=_safe_evidence(civic.evidence),
+            state_transition=transition,
+            next_civic_311_context=request.state_envelope.civic_311_context,
+            update_civic_311_context=False,
+            next_dialogue_context=(
+                request.state_envelope.dialogue_context if degraded else dialogue
+            ),
+            update_dialogue_context=not degraded,
+            resolved_entity=None,
+            planner_call_count=planner_calls,
+            synthesis_call_count=synthesis.synthesis_call_count,
+            tool_call_count=sum(counts.values()),
+            tool_execution_counts=counts,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            provider_model=provider_model,
+            diagnostics={"evidence_status": civic.evidence.evidence_status.value},
+        )
+
+    def _run_documents(
+        self,
+        *,
+        request: TurnRequest,
+        plan: SemanticPlan,
+        guarded: GuardedSemanticPlan,
+        tool: RegisteredToolRequest,
+        context: Mapping[str, Any],
+        deadline: GlobalDeadline,
+        started: float,
+        planner_calls: int,
+        provider_model: Optional[str],
+        resolver_count: int,
+    ) -> TurnResult:
+        if deadline.expired(reserve_for_persistence=True):
+            raise TimeoutError("document capability deadline exhausted")
+        subject = plan.tasks[0].subject if plan.tasks else None
+        if looks_like_entity_question(request.message, subject):
+            entity = resolve_entity(subject or request.message)
+            if entity.status in {"RESOLVED", "AMBIGUOUS"}:
+                counts = {"resolve_entity": 1}
+                if resolver_count:
+                    counts["resolve_location"] = resolver_count
+                dialogue = _dialogue_context_after_domain(
+                    request.state_envelope.dialogue_context,
+                    domain="DOCUMENTS",
+                    capability="EXPLAIN_ENTITY",
+                    summary={
+                        "kind": "ENTITY_PROFILE",
+                        "entity_id": (
+                            entity.profile.stable_id if entity.profile is not None else None
+                        ),
+                        "display_name": (
+                            entity.profile.display_name if entity.profile is not None else None
+                        ),
+                    },
+                )
+                return TurnResult(
+                    status=TurnServiceStatus.COMPLETED,
+                    answer=entity.answer,
+                    mode="model_led_entity",
+                    sources=tuple(entity.sources),
+                    planner_action=PlannerAction.GATHER_EVIDENCE.value,
+                    guarded_disposition=guarded.disposition.value,
+                    reason_code="ENTITY_PROFILE",
+                    compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+                    evidence={
+                        "domain": "ENTITY",
+                        "status": entity.status,
+                        "facts": (
+                            entity.profile.to_dict() if entity.profile is not None else {}
+                        ),
+                        "limitations": [],
+                    },
+                    state_transition=ProposedTransition.preserve(
+                        request.state_envelope.conversation_state,
+                    ),
+                    next_civic_311_context=request.state_envelope.civic_311_context,
+                    update_civic_311_context=False,
+                    next_dialogue_context=dialogue,
+                    update_dialogue_context=True,
+                    resolved_entity=(
+                        entity.profile.to_dict() if entity.profile is not None else None
+                    ),
+                    planner_call_count=planner_calls,
+                    synthesis_call_count=0,
+                    tool_call_count=sum(counts.values()),
+                    tool_execution_counts=counts,
+                    latency_ms=(time.perf_counter() - started) * 1000.0,
+                    provider_model=provider_model,
+                )
+
+        document_plan = build_compiled_document_plan(arguments=tool.arguments)
+        civic = execute_document_plan(
+            request.message,
+            plan=document_plan,
+            deadline=deadline,
+        )
+        use_synthesis = len(civic.civic_tool_result.records) >= 2
+        synthesis_generate = None
+        if use_synthesis and hasattr(self.provider, "generate"):
+            def synthesis_generate(prompt: str, timeout_seconds: float) -> str:
+                response = self.provider.generate(prompt, timeout_seconds=timeout_seconds)
+                return response.text
+
+        synthesis = synthesize_grounded_answer(
+            resident_goal=request.message,
+            trusted_state=context,
+            tool_results=(civic.civic_tool_result,),
+            fallback_answer=civic.answer,
+            generate=synthesis_generate if use_synthesis else None,
+            deadline=deadline,
+            evidence_bundle=civic.evidence,
+        )
+        degraded = civic.evidence.evidence_status in {
+            EvidenceStatus.DEPENDENCY_UNAVAILABLE,
+            EvidenceStatus.INSUFFICIENT_EVIDENCE,
+        }
+        dialogue = _dialogue_context_after_domain(
+            request.state_envelope.dialogue_context,
+            domain="DOCUMENTS",
+            capability="SEARCH_DOCUMENTS",
+            summary={
+                "kind": "DOCUMENT_EVIDENCE",
+                "passage_count": civic.evidence.facts.get("passage_count"),
+                "query": document_plan.query,
+            },
+        )
+        counts = {"search_documents": 1}
+        if resolver_count:
+            counts["resolve_location"] = resolver_count
+        return TurnResult(
+            status=TurnServiceStatus.DEGRADED if degraded else TurnServiceStatus.COMPLETED,
+            answer=synthesis.answer or civic.answer,
+            mode="model_led_documents",
+            sources=tuple(civic.sources),
+            planner_action=PlannerAction.GATHER_EVIDENCE.value,
+            guarded_disposition=guarded.disposition.value,
+            reason_code=guarded.reason_code,
+            compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+            evidence=_safe_evidence(civic.evidence),
+            state_transition=ProposedTransition.preserve(
+                request.state_envelope.conversation_state,
+            ),
+            next_civic_311_context=request.state_envelope.civic_311_context,
+            update_civic_311_context=False,
+            next_dialogue_context=(
+                request.state_envelope.dialogue_context if degraded else dialogue
+            ),
+            update_dialogue_context=not degraded,
+            resolved_entity=None,
+            planner_call_count=planner_calls,
+            synthesis_call_count=synthesis.synthesis_call_count,
+            tool_call_count=sum(counts.values()),
+            tool_execution_counts=counts,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            provider_model=provider_model,
+            diagnostics={
+                "evidence_status": civic.evidence.evidence_status.value,
+                "synthesis_valid": synthesis.valid,
+            },
+        )
+
+    def _run_crime_source_status(
+        self,
+        *,
+        request: TurnRequest,
+        plan: SemanticPlan,
+        guarded: GuardedSemanticPlan,
+        deadline: GlobalDeadline,
+        started: float,
+        planner_calls: int,
+        provider_model: Optional[str],
+        resolver_count: int,
+    ) -> TurnResult:
+        del plan
+        if deadline.expired(reserve_for_persistence=True):
+            raise TimeoutError("crime source status deadline exhausted")
+        status = load_source_status(self.connection_factory, SOURCE_CRIME)
+        freshness, _age, _reasons = classify_freshness_status(status, now=request.now)
+        if status is None:
+            answer = (
+                "I don't currently have a freshness record for Boston crime incident reports."
+            )
+        else:
+            through = (
+                status.data_through_date.isoformat()
+                if status.data_through_date is not None
+                else "an unknown date"
+            )
+            answer = (
+                f"Boston crime incident reports are marked {freshness.value.lower()} in the "
+                f"local freshness register, with coverage through {through}. These are "
+                "published incident reports, not convictions."
+            )
+        counts = {"get_source_status": 1}
+        if resolver_count:
+            counts["resolve_location"] = resolver_count
+        return TurnResult(
+            status=TurnServiceStatus.COMPLETED,
+            answer=answer,
+            mode="model_led_crime_status",
+            sources=({
+                "source": "Boston Police Department incident reports",
+                "type": "sql",
+                "table": "crime_incident_reports",
+                "path": "https://data.boston.gov/dataset/crime-incident-reports-august-2015-to-date-source-new-system",
+                "source_type": "OFFICIAL_OPERATIONAL_DATA",
+            },),
+            planner_action=PlannerAction.GATHER_EVIDENCE.value,
+            guarded_disposition=guarded.disposition.value,
+            reason_code=guarded.reason_code,
+            compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+            evidence={
+                "domain": "CRIME",
+                "status": freshness.value,
+                "facts": {
+                    "data_through_date": (
+                        status.data_through_date.isoformat()
+                        if status is not None and status.data_through_date is not None
+                        else None
+                    ),
+                },
+                "limitations": [
+                    "Freshness metadata describes source coverage, not neighborhood safety conclusions."
+                ],
+            },
+            state_transition=ProposedTransition.preserve(
+                request.state_envelope.conversation_state,
+            ),
+            next_civic_311_context=request.state_envelope.civic_311_context,
+            update_civic_311_context=False,
+            next_dialogue_context=request.state_envelope.dialogue_context,
+            update_dialogue_context=False,
+            resolved_entity=None,
+            planner_call_count=planner_calls,
+            synthesis_call_count=0,
+            tool_call_count=sum(counts.values()),
+            tool_execution_counts=counts,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            provider_model=provider_model,
+        )
+
     def _run_311_source_status(
         self,
         *,
@@ -1093,6 +1490,14 @@ def _trusted_planner_context(
         token = "summary:previous"
         tokens.append(token)
         context["previous_summary"] = {"token": token, "text": summary}
+    dialogue = validate_dialogue_context(envelope.dialogue_context)
+    pending_type = dialogue.get("pending_clarification_type")
+    pending_domain = dialogue.get("pending_clarification_domain")
+    if isinstance(pending_type, str) and pending_type:
+        context["pending_clarification"] = {
+            "type": pending_type,
+            "domain": pending_domain,
+        }
     return context, tuple(tokens)
 
 
@@ -1307,6 +1712,56 @@ def _311_state_transition(
     return ProposedTransition.replace_state(current, next_state)
 
 
+def _topic_state_transition(
+    current: ConversationState,
+    *,
+    topic: CanonicalTopic,
+    location_id: str,
+    semantic_time: CanonicalTimeRange,
+) -> ProposedTransition:
+    location = resolve_registered_geography(location_id)
+    if location is None:
+        raise ValueError("state location is not registered")
+    next_state = ConversationState(
+        revision=current.revision,
+        active_topic=topic,
+        active_entity=None,
+        location=location,
+        time_range=semantic_time,
+        filters=CanonicalFilters(),
+        previous_route="model_led",
+        last_substantive_message_id=current.last_substantive_message_id,
+    )
+    return ProposedTransition.replace_state(current, next_state)
+
+
+def _dialogue_context_after_domain(
+    previous: Optional[Mapping[str, Any]],
+    *,
+    domain: str,
+    capability: str,
+    summary: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    del summary  # Phase 3 keeps only allowlisted summary kinds in dialogue state.
+    current = _dialogue_base(previous)
+    dialogue_domain = {
+        "CRIME_AND_SAFETY": "CRIME_AND_SAFETY",
+        "DOCUMENTS": "GENERAL",
+        "311": "311",
+        "EVENTS": "EVENTS",
+    }.get(domain, "GENERAL")
+    return validate_dialogue_context({
+        **current,
+        "previous_turn_kind": "FACTUAL_TOOL_QUERY",
+        "previous_domain": dialogue_domain,
+        "previous_capability_intent": "LEGACY_DOMAIN_ROUTE",
+        "pending_clarification_type": None,
+        "pending_clarification_domain": None,
+        "canonical_parameters": {"capability": capability[:64]},
+        "previous_result_summary": {},
+    })
+
+
 def _dialogue_base(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     return validate_dialogue_context(value)
 
@@ -1417,7 +1872,92 @@ def _dialogue_domain_for_plan(plan: SemanticPlan) -> str:
         SemanticDomain.EVENTS: "EVENTS",
         SemanticDomain.SERVICE_REQUESTS: "311",
         SemanticDomain.CRIME: "CRIME_AND_SAFETY",
+        SemanticDomain.DOCUMENTS: "DOCUMENTS",
     }.get(domain, "GENERAL")
+
+
+_TIME_CLARIFICATION_REJECTION = (
+    "what do you mean",
+    "why do you need",
+    "don't need a time",
+    "do not need a time",
+    "no time period",
+    "without a time",
+    "just asking",
+    "just ask",
+    "in general",
+    "overall",
+    "broadly",
+    "safety concerns",
+    "main concerns",
+)
+
+
+def _rejects_pending_time_clarification(message: str) -> bool:
+    text = " ".join(str(message or "").casefold().split())
+    if not text:
+        return False
+    return any(token in text for token in _TIME_CLARIFICATION_REJECTION)
+
+
+def _maybe_resolve_pending_time_clarification(
+    plan: SemanticPlan,
+    *,
+    message: str,
+    context: Mapping[str, Any],
+) -> SemanticPlan:
+    """Resolve a pending TIME clarification into a broad default-period overview.
+
+    When the resident rejects an unnecessary time ask for a safety/311 overview,
+    continue with NONE time so the compiler supplies the approved month default.
+    """
+    pending = context.get("pending_clarification")
+    if not isinstance(pending, Mapping):
+        return plan
+    if pending.get("type") != "SEMANTIC_TIME":
+        return plan
+    if not _rejects_pending_time_clarification(message):
+        return plan
+    domain_name = pending.get("domain")
+    domain = {
+        "CRIME_AND_SAFETY": SemanticDomain.CRIME,
+        "CRIME": SemanticDomain.CRIME,
+        "311": SemanticDomain.SERVICE_REQUESTS,
+        "SERVICE_REQUESTS": SemanticDomain.SERVICE_REQUESTS,
+        "DOCUMENTS": SemanticDomain.DOCUMENTS,
+    }.get(str(domain_name or ""))
+    if domain is None and plan.tasks:
+        domain = plan.tasks[0].domain
+    if domain not in {
+        SemanticDomain.CRIME,
+        SemanticDomain.SERVICE_REQUESTS,
+        SemanticDomain.DOCUMENTS,
+    }:
+        return plan
+    operation = SemanticOperation.SUMMARIZE if domain is SemanticDomain.CRIME else SemanticOperation.COUNT
+    if plan.action is PlannerAction.GATHER_EVIDENCE and plan.tasks:
+        operation = plan.tasks[0].operation
+        if plan.tasks[0].domain in {
+            SemanticDomain.CRIME,
+            SemanticDomain.SERVICE_REQUESTS,
+            SemanticDomain.DOCUMENTS,
+        }:
+            domain = plan.tasks[0].domain
+    return SemanticPlan(
+        PlannerAction.GATHER_EVIDENCE,
+        tasks=(
+            SemanticTask(
+                domain=domain,
+                operation=operation,
+                subject=None,
+                geography=SemanticGeography(GeographyMode.DEFAULT, None),
+                time=SemanticTime(SemanticTimeKind.NONE, None),
+                source_scope=(
+                    plan.tasks[0].source_scope if plan.tasks else SourceScope.ANY
+                ),
+            ),
+        ),
+    )
 
 
 __all__ = [
