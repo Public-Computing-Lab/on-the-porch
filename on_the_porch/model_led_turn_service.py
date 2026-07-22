@@ -1,7 +1,9 @@
-"""Guarded transport-neutral turn service for the Phase 2A canary.
+"""Guarded transport-neutral turn service for authoritative model-led turns.
 
-The service owns one semantic planner call and deterministic capability dispatch.
-Authentication, idempotency, persistence, and JSON/SSE transport remain outside.
+The service owns one semantic planner call and deterministic capability dispatch
+for direct conversation, clarification, events, and Boston 311. Authentication,
+idempotency, persistence, and JSON/SSE transport remain outside. Not-yet-migrated
+domains return NOT_YET_MIGRATED for a single API-boundary legacy handoff.
 """
 
 from __future__ import annotations
@@ -144,10 +146,21 @@ class TurnResult:
     latency_ms: float
     provider_model: Optional[str] = None
     diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    repair_call_count: int = 0
+    embedding_call_count: int = 0
+    secondary_planner_call_count: int = 0
 
     def __post_init__(self) -> None:
         if self.planner_call_count not in {0, 1} or self.synthesis_call_count != 0:
             raise ValueError("Phase 2 turn results have invalid model-call counts")
+        if (
+            self.repair_call_count != 0
+            or self.embedding_call_count != 0
+            or self.secondary_planner_call_count != 0
+        ):
+            raise ValueError(
+                "Phase 2 migrated turns forbid repair, embeddings, and secondary planners"
+            )
         if any(not isinstance(value, int) or value < 0 for value in self.tool_execution_counts.values()):
             raise ValueError("tool execution counts are invalid")
         if self.answer is not None and len(self.answer) > 12_000:
@@ -183,6 +196,9 @@ class TurnResult:
             "resolved_entity": copy.deepcopy(self.resolved_entity),
             "planner_call_count": self.planner_call_count,
             "synthesis_call_count": self.synthesis_call_count,
+            "repair_call_count": self.repair_call_count,
+            "embedding_call_count": self.embedding_call_count,
+            "secondary_planner_call_count": self.secondary_planner_call_count,
             "tool_call_count": self.tool_call_count,
             "tool_execution_counts": dict(self.tool_execution_counts),
             "latency_ms": round(self.latency_ms, 2),

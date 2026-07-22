@@ -2,6 +2,8 @@
 
 The detector consumes only the current validated resident message. It does not
 accept history, client metadata, model output, or arbitrary extracted values.
+Matching is concept- and grammar-oriented (actor + harm + immediacy), not a
+catalog of one phrase per test case.
 """
 
 from __future__ import annotations
@@ -38,13 +40,17 @@ class EmergencyReasonCode(str, Enum):
     ARMED_THREAT = "armed_threat"
     ACTIVE_ATTACK = "active_attack"
     ARMED_BREAK_IN = "armed_break_in"
+    ACTIVE_BREAK_IN = "active_break_in"
     BUILDING_FIRE = "building_fire"
+    VEHICLE_FIRE = "vehicle_fire"
     SMOKE_IN_BUILDING = "smoke_in_building"
     UNRESPONSIVE_PERSON = "unresponsive_person"
     BREATHING_EMERGENCY = "breathing_emergency"
     SUSPECTED_HEART_ATTACK = "suspected_heart_attack"
     UNRESPONSIVE_OVERDOSE = "unresponsive_overdose"
+    ACTIVE_OVERDOSE = "active_overdose"
     ACTIVE_SEIZURE = "active_seizure"
+    CHILD_IN_DANGER = "child_in_danger"
     IMMINENT_SELF_HARM = "imminent_self_harm"
     IMMINENT_HARM_TO_OTHERS = "imminent_harm_to_others"
     EXPLICIT_IMMEDIATE_DANGER = "explicit_immediate_danger"
@@ -67,6 +73,27 @@ _DECISION_KEYS = frozenset(
 )
 _INACTIVE_REASONS = frozenset(
     {EmergencyReasonCode.NO_MATCH, EmergencyReasonCode.INVALID_INPUT}
+)
+
+# Shared concept fragments (compiled once).
+_PERSON = (
+    r"(?:someone|somebody|a person|a man|a woman|a stranger|they|he|she|"
+    r"my (?:kid|child|baby|partner|neighbor)|an intruder)"
+)
+_PERSON_BE = (
+    rf"(?:{_PERSON}(?:'s| is| are|'re)?|i(?:'m| am)|we(?:'re| are))"
+)
+_IMMEDIATE = (
+    r"(?:right now|now|at this moment|this (?:second|instant)|as we speak|"
+    r"currently|just (?:now|happened)|happening)"
+)
+_WEAPON = r"(?:gun|firearm|weapon|knife|pistol|rifle)"
+_STRUCTURE = r"(?:house|home|apartment|building|unit|condo|flat|room)"
+_VEHICLE = r"(?:car|vehicle|truck|van|suv)"
+_CHILD = r"(?:(?:my |our |the )?(?:kid|child|baby|toddler|infant)|a child|a baby)"
+_NONRESPONSIVE = (
+    r"(?:unconscious|unresponsive|passed out|not responding|won't (?:wake|respond)|"
+    r"will not (?:wake|respond)|can't wake|cannot wake|not waking)"
 )
 
 
@@ -189,100 +216,147 @@ _RULES: Tuple[
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ONGOING_SHOOTING,
         _patterns(
-            r"\bthere(?:'s| is) (?:a )?shooting "
-            r"(?:happening|going on|outside|nearby)"
-            r"(?:.*\b(?:right now|now)\b)?",
-            r"\b(?:someone(?:'s| is)|somebody (?:is|'s)) shooting\b"
-            r".*\b(?:outside|nearby|right now|now)\b",
+            rf"\bthere(?:'s| is) (?:a )?shooting "
+            rf"(?:happening|going on|outside|nearby)"
+            rf"(?:.*\b(?:{_IMMEDIATE})\b)?",
+            rf"\b{_PERSON_BE} shooting\b.*\b(?:outside|nearby|{_IMMEDIATE})\b",
+            rf"\bactive shooter\b",
         ),
     ),
     (
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.HEARD_GUNSHOTS_NOW,
         _patterns(
-            r"\b(?:i|we) (?:can )?(?:hear|am hearing|'m hearing) "
-            r"(?:gunshots|shots (?:being )?fired).*\b(?:right now|now)\b",
+            rf"\b(?:i|we) (?:can )?(?:hear|am hearing|'m hearing|just heard) "
+            rf"(?:gunshots|shots (?:being )?fired)"
+            rf"(?:.*\b(?:{_IMMEDIATE})\b)?",
         ),
     ),
     (
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ARMED_THREAT,
         _patterns(
-            r"\b(?:someone|somebody|a person|they) "
-            r"(?:has|have|is holding|are holding|is pointing|are pointing) "
-            r"(?:a )?(?:gun|firearm|weapon|knife)\b.*"
-            r"\b(?:threatening|pointing (?:it )?at|trying to "
-            r"(?:shoot|stab|hurt|kill))\b",
-            r"\bthere(?:'s| is) someone "
-            r"(?:outside |nearby )?(?:with|holding|carrying) "
-            r"(?:a )?(?:gun|firearm|weapon)\b",
+            rf"\b{_PERSON_BE} "
+            rf"(?:has|have|holding|pointing|pointed) (?:a )?{_WEAPON}\b.*"
+            rf"\b(?:threatening|pointing (?:it )?at|trying to "
+            rf"(?:shoot|stab|hurt|kill)|at (?:me|us|them))\b",
+            rf"\bthere(?:'s| is) someone "
+            rf"(?:outside |nearby )?(?:with|holding|carrying) "
+            rf"(?:a )?{_WEAPON}\b",
+            rf"\b(?:{_PERSON}) (?:pulled|drew) (?:a |their )?{_WEAPON}\b",
+            rf"\bat gunpoint\b",
         ),
     ),
     (
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ARMED_BREAK_IN,
         _patterns(
-            r"\b(?:someone|somebody|a person) (?:is )?"
-            r"(?:trying to break|breaking) in\b.*"
-            r"\b(?:has|with|holding|carrying) (?:a )?(?:weapon|gun|knife)\b",
-            r"\b(?:someone|somebody|a person).*\b(?:weapon|gun|knife)\b.*"
-            r"\b(?:trying to break|breaking) in\b",
+            rf"\b{_PERSON_BE} "
+            rf"(?:trying to break|breaking) in\b.*"
+            rf"\b(?:has|with|holding|carrying) (?:a )?{_WEAPON}\b",
+            rf"\b{_PERSON}.*\b(?:{_WEAPON})\b.*"
+            rf"\b(?:trying to break|breaking) in\b",
+        ),
+    ),
+    (
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_BREAK_IN,
+        _patterns(
+            rf"\b(?:{_PERSON_BE}|an intruder) "
+            rf"(?:trying to break|breaking) in\b",
+            rf"\b(?:someone|somebody|an intruder) (?:is |just )?"
+            rf"(?:broke|broken) into (?:my |our )?{_STRUCTURE}\b",
+            rf"\bthere(?:'s| is) (?:an )?intruder (?:in|inside) "
+            rf"(?:my |our )?{_STRUCTURE}\b",
+            rf"\b(?:i|we) (?:just )?(?:caught|saw) (?:someone|somebody) "
+            rf"(?:breaking|broke) in\b",
         ),
     ),
     (
         EmergencyCategory.VIOLENT_THREAT,
         EmergencyReasonCode.ACTIVE_ATTACK,
         _patterns(
-            r"\b(?:someone|somebody|a person) (?:is )?"
-            r"(?:attacking|stabbing|beating|assaulting) "
-            r"(?:someone|a person|people|me|him|her|them)\b",
+            rf"\b{_PERSON_BE} "
+            rf"(?:attacking|stabbing|beating|assaulting|hurting) "
+            rf"(?:someone|a person|people|me|him|her|them|{_CHILD})\b",
+            rf"\b(?:i(?:'m| am)|we are) being "
+            rf"(?:attacked|assaulted|beaten|robbed)\b",
+        ),
+    ),
+    (
+        EmergencyCategory.OTHER_IMMEDIATE_DANGER,
+        EmergencyReasonCode.CHILD_IN_DANGER,
+        _patterns(
+            rf"\b{_CHILD}\b.*\b(?:in (?:immediate )?danger|being "
+            rf"(?:hurt|attacked|abducted|taken)|won't wake|"
+            rf"not breathing|unconscious)\b",
+            rf"\b(?:someone|somebody) (?:is )?(?:hurting|attacking|abducting|"
+            rf"kidnapping) (?:my |our |the )?{_CHILD}\b",
         ),
     ),
     (
         EmergencyCategory.FIRE,
         EmergencyReasonCode.BUILDING_FIRE,
         _patterns(
-            r"\b(?:my|our|the) (?:house|home|apartment|building) "
-            r"(?:is|'s) on fire\b",
-            r"\bthere(?:'s| is) (?:a )?fire (?:in|inside|at) "
-            r"(?:my |our |the )?(?:house|home|apartment|building)"
-            r"(?:.*\b(?:right now|now)\b)?",
+            rf"\b(?:my|our|the) {_STRUCTURE} (?:is|'s) on fire\b",
+            rf"\bthere(?:'s| is) (?:a )?fire (?:in|inside|at) "
+            rf"(?:my |our |the )?{_STRUCTURE}"
+            rf"(?:.*\b(?:{_IMMEDIATE})\b)?",
+            rf"\b(?:kitchen|bedroom|basement|hallway) (?:is|'s) on fire\b",
+        ),
+    ),
+    (
+        EmergencyCategory.FIRE,
+        EmergencyReasonCode.VEHICLE_FIRE,
+        _patterns(
+            rf"\b(?:my|our|the) {_VEHICLE} (?:is|'s) on fire\b",
+            rf"\bthere(?:'s| is) (?:a )?fire (?:in|inside|under) "
+            rf"(?:my |our |the )?{_VEHICLE}\b",
         ),
     ),
     (
         EmergencyCategory.FIRE,
         EmergencyReasonCode.SMOKE_IN_BUILDING,
         _patterns(
-            r"\b(?:my|our|the) (?:apartment|house|home|building|room) "
-            r"(?:is )?(?:filling|filled) with smoke\b",
-            r"\bthere(?:'s| is) smoke "
-            r"(?:filling|in) (?:my |our |the )?"
-            r"(?:apartment|house|home|building|room)\b",
+            rf"\b(?:my|our|the) {_STRUCTURE} "
+            rf"(?:is )?(?:filling|filled) with smoke\b",
+            rf"\bthere(?:'s| is) smoke "
+            rf"(?:filling|in) (?:my |our |the )?{_STRUCTURE}\b",
         ),
     ),
     (
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.UNRESPONSIVE_OVERDOSE,
         _patterns(
-            r"\b(?:someone|a person|he|she|they) (?:has )?overdosed "
-            r"and (?:is |are )?not responding\b",
+            rf"\b{_PERSON_BE} (?:has )?(?:overdosed|od(?:'d|ed)?) "
+            rf"and (?:is |are )?{_NONRESPONSIVE}\b",
+        ),
+    ),
+    (
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.ACTIVE_OVERDOSE,
+        _patterns(
+            rf"\b(?:{_PERSON_BE}|i(?:'m| am)?) "
+            rf"(?:overdosing|overdosed|od(?:'d|ed)?)\b",
+            rf"\b(?:i think )?{_PERSON_BE} overdosing\b",
         ),
     ),
     (
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.ACTIVE_SEIZURE,
         _patterns(
-            r"\b(?:someone|a person|he|she|they) (?:is |are )?having "
-            r"(?:a )?seizure and (?:will not|won't|is not|isn't) "
-            r"(?:wake up|respond)\b",
+            rf"\b{_PERSON_BE} having "
+            rf"(?:a )?seizure(?: and (?:will not|won't|is not|isn't) "
+            rf"(?:wake up|respond))?\b",
         ),
     ),
     (
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.UNRESPONSIVE_PERSON,
         _patterns(
-            r"\b(?:someone|a person|he|she|they) (?:is |are )?"
-            r"(?:unconscious|passed out) and (?:is |are )?not responding\b",
+            rf"\b{_PERSON_BE} {_NONRESPONSIVE}\b",
+            rf"\b(?:i|we) (?:can't|cannot) wake "
+            rf"(?:him|her|them|someone|{_CHILD})\b",
         ),
     ),
     (
@@ -292,14 +366,14 @@ _RULES: Tuple[
             # End-of-clause / present-severity cues avoid educational,
             # historical, exertion, and figurative follow-ons.
             r"\bi (?:can't|cannot) breathe(?:[.!?]|$)",
-            r"\bi(?:'m| am) unable to breathe(?:[.!?]|$|"
-            r".*\b(?:right now|now)\b)",
-            r"\bi(?:'m| am) having (?:severe )?"
-            r"(?:trouble|difficulty) breathing"
-            r".*\b(?:right now|now)\b",
-            r"\b(?:someone|somebody|they|he|she) "
-            r"(?:has |have )?(?:just )?stopped breathing\b",
-            r"\b(?:someone|somebody|they|he|she).*"
+            rf"\bi(?:'m| am) unable to breathe(?:[.!?]|$|"
+            rf".*\b(?:{_IMMEDIATE})\b)",
+            rf"\bi(?:'m| am) having (?:severe )?"
+            rf"(?:trouble|difficulty) breathing"
+            rf".*\b(?:{_IMMEDIATE})\b",
+            rf"\b{_PERSON_BE} "
+            rf"(?:has |have )?(?:just )?stopped breathing\b",
+            rf"\b{_PERSON}.*"
             r"\b(?:can't|cannot) breathe(?:[.!?]|$)",
             r"\b(?:my|their) throat is closing and "
             r"(?:i|they|he|she) (?:can't|cannot) breathe(?:[.!?]|$)",
@@ -311,15 +385,17 @@ _RULES: Tuple[
         _patterns(
             r"\b(?:i think )?i(?:'m| am) (?:having|might be having) "
             r"(?:a )?heart attack\b",
+            rf"\b{_PERSON_BE} (?:having|might be having) "
+            r"(?:a )?heart attack\b",
         ),
     ),
     (
         EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
         EmergencyReasonCode.IMMINENT_SELF_HARM,
         _patterns(
-            r"\b(?:someone|he|she|they) (?:says? )?(?:they |he |she )?"
-            r"(?:are|is) going to (?:kill|hurt) "
-            r"(?:themselves|himself|herself).*\b(?:right now|now)\b",
+            rf"\b{_PERSON_BE} (?:says? )?(?:they |he |she )?"
+            rf"going to (?:kill|hurt) "
+            rf"(?:themselves|himself|herself).*\b(?:{_IMMEDIATE})\b",
             r"\bi(?:'m| am) (?:about to|going to) (?:hurt|kill) myself\b",
         ),
     ),
@@ -327,18 +403,19 @@ _RULES: Tuple[
         EmergencyCategory.IMMINENT_SELF_HARM_OR_HARM,
         EmergencyReasonCode.IMMINENT_HARM_TO_OTHERS,
         _patterns(
-            r"\b(?:someone|a person|he|she|they) (?:is |are )?"
-            r"threatening to (?:kill|shoot|stab|hurt) "
-            r"(?:another person|someone|people|me|him|her|them).*"
-            r"\b(?:right now|now)\b",
+            rf"\b{_PERSON_BE} "
+            rf"threatening to (?:kill|shoot|stab|hurt) "
+            rf"(?:another person|someone|people|me|him|her|them|{_CHILD}).*"
+            rf"\b(?:{_IMMEDIATE})\b",
         ),
     ),
     (
         EmergencyCategory.OTHER_IMMEDIATE_DANGER,
         EmergencyReasonCode.EXPLICIT_IMMEDIATE_DANGER,
         _patterns(
-            r"\b(?:i am|i'm|we are|someone is) in immediate danger "
-            r"(?:right now|now)\b",
+            rf"\b(?:i am|i'm|we are|someone is) in immediate danger "
+            rf"(?:{_IMMEDIATE})\b",
+            r"\b(?:i am|i'm|we are) in immediate danger\b",
         ),
     ),
 )

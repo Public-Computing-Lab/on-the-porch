@@ -338,6 +338,22 @@ def _normalize_semantic_plan(
         return plan
     task = plan.tasks[0]
     selected_for_turn = trusted_context.get("selected_entity_for_turn") == token
+    # Pronoun place/detail asks about a selected event stay in EVENTS, not LOCATION.
+    if (
+        selected_for_turn
+        and task.domain is SemanticDomain.LOCATION
+        and task.operation is SemanticOperation.FIND
+    ):
+        task = SemanticTask(
+            SemanticDomain.EVENTS,
+            SemanticOperation.FIND,
+            "LOCATION",
+            SemanticGeography(GeographyMode.NONE, None),
+            SemanticTime(SemanticTimeKind.NONE, None),
+            SourceScope.ANY,
+            SemanticGoalClarity.CLEAR,
+        )
+        plan = SemanticPlan(PlannerAction.GATHER_EVIDENCE, tasks=(task,))
     if not selected_for_turn:
         if task.geography.mode in {GeographyMode.EXPLICIT, GeographyMode.MISSING}:
             return plan
@@ -381,30 +397,47 @@ def _normalize_semantic_plan(
 
 def _normalize_task(task: SemanticTask) -> SemanticTask:
     if (
-        task.operation is SemanticOperation.STATUS
-        and task.subject is None
-        and task.time.kind is SemanticTimeKind.NONE
-    ):
-        return SemanticTask(
-            task.domain,
-            task.operation,
-            None,
-            SemanticGeography(GeographyMode.NONE, None),
-            task.time,
-            task.source_scope,
-            task.goal_clarity,
-        )
-    if (
         task.domain is SemanticDomain.SERVICE_REQUESTS
         and task.operation in {SemanticOperation.GROUP, SemanticOperation.STATUS}
         and _is_status_subject(task.subject)
     ):
+        # Open/closed breakdowns keep geography/time; strip status words from subject.
         return SemanticTask(
             task.domain,
             SemanticOperation.STATUS,
             None,
             task.geography,
             task.time,
+            task.source_scope,
+            task.goal_clarity,
+        )
+    if (
+        task.operation is SemanticOperation.STATUS
+        and task.subject is None
+        and task.time.kind is SemanticTimeKind.NONE
+    ):
+        # Null-subject STATUS with NONE time is source freshness/coverage.
+        return SemanticTask(
+            task.domain,
+            task.operation,
+            None,
+            SemanticGeography(GeographyMode.NONE, None),
+            SemanticTime(SemanticTimeKind.NONE, None),
+            task.source_scope,
+            task.goal_clarity,
+        )
+    if (
+        task.operation is SemanticOperation.STATUS
+        and task.subject is None
+        and task.time.kind in {SemanticTimeKind.NONE, SemanticTimeKind.MISSING}
+        and task.geography.mode in {GeographyMode.NONE, GeographyMode.MISSING}
+    ):
+        return SemanticTask(
+            task.domain,
+            task.operation,
+            None,
+            SemanticGeography(GeographyMode.NONE, None),
+            SemanticTime(SemanticTimeKind.NONE, None),
             task.source_scope,
             task.goal_clarity,
         )
@@ -444,14 +477,45 @@ def _compile_task(
             )
         ], [], False)
     if task.operation is SemanticOperation.STATUS \
+            and task.subject is None \
             and task.geography.mode is GeographyMode.NONE \
             and task.time.kind is SemanticTimeKind.NONE:
         return [], _status_sources(task), False
+    if (
+        task.operation is SemanticOperation.STATUS
+        and task.subject is None
+        and task.time.kind is SemanticTimeKind.MISSING
+        and task.geography.mode is GeographyMode.DEFAULT
+    ):
+        # Null-subject STATUS with DEFAULT place and MISSING time: retain a trusted
+        # service-request period for open/closed breakdowns; otherwise treat as
+        # source freshness/coverage (period immaterial).
+        retained = _time_scope(
+            task,
+            trusted_reference_tokens,
+            trusted_context=trusted_context,
+        )
+        if retained is None:
+            return [], _status_sources(task), False
     if task.geography.mode is GeographyMode.MISSING:
         # Scope-only refinements after a trusted civic result may omit geography.
         # Fresh turns still clarify when no compatible trusted topic is present.
-        if trusted_context.get("active_topic") != task.domain.value \
-                or not _default_location_id(trusted_context):
+        # Prior event-list follow-ups may also omit geography when the trusted
+        # summary already anchors the listing.
+        summary = trusted_context.get("previous_result_summary")
+        summary_kind = summary.get("kind") if isinstance(summary, Mapping) else None
+        topic_compatible = (
+            trusted_context.get("active_topic") == task.domain.value
+            or (
+                task.domain is SemanticDomain.EVENTS
+                and summary_kind == "EVENT_LIST"
+            )
+            or (
+                task.domain is SemanticDomain.SERVICE_REQUESTS
+                and summary_kind in {"SERVICE_REQUEST_SUMMARY", "CITY_SERVICES_SUMMARY"}
+            )
+        )
+        if not topic_compatible or not _default_location_id(trusted_context):
             raise SemanticCompilationError(
                 "A location is required before evidence can be gathered."
             )
@@ -465,7 +529,25 @@ def _compile_task(
             task.goal_clarity,
         )
     if task.time.kind is SemanticTimeKind.MISSING:
-        raise SemanticCompilationError("A time period is required before evidence can be gathered.")
+        retained = _time_scope(
+            task,
+            trusted_reference_tokens,
+            trusted_context=trusted_context,
+        )
+        if retained is None:
+            raise SemanticCompilationError(
+                "A time period is required before evidence can be gathered."
+            )
+        # Trusted period retained; treat as NONE for downstream named-period mapping.
+        task = SemanticTask(
+            task.domain,
+            task.operation,
+            task.subject,
+            task.geography,
+            SemanticTime(SemanticTimeKind.NONE, None),
+            task.source_scope,
+            task.goal_clarity,
+        )
     if task.geography.mode is GeographyMode.EXPLICIT \
             and not _explicit_matches_default(task, trusted_context):
         return ([
@@ -489,6 +571,14 @@ def _compile_task(
         and time_scope is None
     ):
         time_scope = {"period": SemanticPeriod.UPCOMING_DEFAULT.value}
+    if (
+        task.domain is SemanticDomain.SERVICE_REQUESTS
+        and task.operation is not SemanticOperation.STATUS
+        and task.time.kind is SemanticTimeKind.NONE
+        and time_scope is None
+    ):
+        # Unqualified service-request aggregates default to the prior calendar month.
+        time_scope = {"period": SemanticPeriod.PREVIOUS_CALENDAR_MONTH.value}
     status_sources = _status_sources(task)
     if task.domain is SemanticDomain.EVENTS:
         return _compile_events(task, trusted_context, location_id, time_scope), status_sources, False
@@ -561,6 +651,28 @@ def _compile_service_requests(
     if time_scope is None:
         raise SemanticCompilationError("Service-request evidence requires a time period.")
     issue_id = _subject_id(task.subject, task.domain)
+    # Issue-family quantity/caseload asks often arrive as FIND; align with crime by
+    # compiling them to aggregate COUNT when a reviewed family is recognized.
+    if (
+        task.operation in {
+            SemanticOperation.FIND,
+            SemanticOperation.CHECK_EXISTENCE,
+        }
+        and issue_id
+    ):
+        return [(
+            ToolId.AGGREGATE_311,
+            {
+                "operation": "COUNT",
+                "issue_scope": "SPECIFIC",
+                "issue_family_id": issue_id,
+                "location_id": location_id,
+                "time_scope": time_scope,
+                "group_by": None,
+                "limit": 10,
+            },
+            (CivicDomain.BOSTON_311,),
+        )]
     if task.operation in {
         SemanticOperation.FIND, SemanticOperation.CHECK_EXISTENCE,
         SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN,
@@ -690,7 +802,7 @@ def _time_scope(
     trusted_context: Mapping[str, Any],
 ) -> Optional[Dict[str, Any]]:
     kind = task.time.kind
-    if kind is SemanticTimeKind.NONE:
+    if kind in {SemanticTimeKind.NONE, SemanticTimeKind.MISSING}:
         active_topic = trusted_context.get("active_topic")
         active_time = trusted_context.get("time_scope")
         token = active_time.get("token") if isinstance(active_time, Mapping) else None
@@ -703,6 +815,8 @@ def _time_scope(
                 "period": SemanticPeriod.RETAIN_TRUSTED_PERIOD.value,
                 "trusted_reference_token": token,
             }
+        if kind is SemanticTimeKind.MISSING:
+            return None
         return None
     if kind is SemanticTimeKind.LAST_N_DAYS:
         return {"period": SemanticPeriod.LAST_N_DAYS.value, "n_days": int(task.time.value or "0")}
@@ -742,13 +856,47 @@ def _time_scope(
 
 def _semantic_range_period(value: str) -> Optional[SemanticPeriod]:
     normalized = " ".join(value.casefold().replace("_", " ").split())
-    return {
+    mapping = {
         "today": SemanticPeriod.CURRENT_DAY,
         "this weekend": SemanticPeriod.CURRENT_WEEKEND,
         "next weekend": SemanticPeriod.NEXT_WEEKEND,
         "previous calendar week": SemanticPeriod.PREVIOUS_CALENDAR_WEEK,
         "current calendar month": SemanticPeriod.CURRENT_CALENDAR_MONTH,
-    }.get(normalized)
+        "monthly": SemanticPeriod.PREVIOUS_CALENDAR_MONTH,
+        "this month": SemanticPeriod.CURRENT_CALENDAR_MONTH,
+        "last month": SemanticPeriod.PREVIOUS_CALENDAR_MONTH,
+        "previous month": SemanticPeriod.PREVIOUS_CALENDAR_MONTH,
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    # Remaining weekdays through Sunday / week-end are the current week, not the weekend alone.
+    if any(
+        marker in normalized
+        for marker in (
+            "through sunday",
+            "thru sunday",
+            "until sunday",
+            "before sunday",
+            "close of sunday",
+            "end of sunday",
+            "rest of the week",
+            "rest of this week",
+            "now through sunday",
+            "now until sunday",
+            "week-end",
+            "week end",
+            "week-close",
+            "week close",
+            "end of the week",
+            "end of this week",
+            "through week-end",
+            "through week-close",
+        )
+    ):
+        return SemanticPeriod.CURRENT_WEEK
+    if "saturday" in normalized and "sunday" in normalized and "week" not in normalized:
+        return SemanticPeriod.CURRENT_WEEKEND
+    return None
 
 
 def _comparison_scope(current: Mapping[str, Any]) -> Dict[str, Any]:
@@ -822,7 +970,8 @@ def _subject_id(subject: Optional[str], domain: SemanticDomain) -> Optional[str]
             "boston", "category", "categories",
             "type", "types", "all", "everything", "overall", "total", "totals",
             "a", "an", "the", "of", "in", "for", "from", "by", "most", "common",
-            "kind", "kinds", "breakdown", "mix",
+            "kind", "kinds", "breakdown", "mix", "family", "families", "volume",
+            "partition", "slice", "across",
             "month", "monthly", "period", "previous", "prior", "change", "changes",
             "comparison", "compare", "compared", "over",
         },

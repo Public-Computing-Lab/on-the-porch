@@ -80,6 +80,16 @@ TRUE_CASES = (
         EmergencyReasonCode.ARMED_BREAK_IN,
     ),
     (
+        "Someone is trying to break in.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_BREAK_IN,
+    ),
+    (
+        "There is an intruder in my apartment.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_BREAK_IN,
+    ),
+    (
         "My house is on fire.",
         EmergencyCategory.FIRE,
         EmergencyReasonCode.BUILDING_FIRE,
@@ -90,12 +100,27 @@ TRUE_CASES = (
         EmergencyReasonCode.BUILDING_FIRE,
     ),
     (
+        "My car is on fire.",
+        EmergencyCategory.FIRE,
+        EmergencyReasonCode.VEHICLE_FIRE,
+    ),
+    (
         "The apartment is filling with smoke.",
         EmergencyCategory.FIRE,
         EmergencyReasonCode.SMOKE_IN_BUILDING,
     ),
     (
         "Someone is unconscious and not responding.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.UNRESPONSIVE_PERSON,
+    ),
+    (
+        "He's unconscious.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.UNRESPONSIVE_PERSON,
+    ),
+    (
+        "I can't wake him up.",
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.UNRESPONSIVE_PERSON,
     ),
@@ -115,9 +140,24 @@ TRUE_CASES = (
         EmergencyReasonCode.UNRESPONSIVE_OVERDOSE,
     ),
     (
+        "Someone is overdosing.",
+        EmergencyCategory.MEDICAL_EMERGENCY,
+        EmergencyReasonCode.ACTIVE_OVERDOSE,
+    ),
+    (
         "A person is having a seizure and won't wake up.",
         EmergencyCategory.MEDICAL_EMERGENCY,
         EmergencyReasonCode.ACTIVE_SEIZURE,
+    ),
+    (
+        "Someone is hurting my kid.",
+        EmergencyCategory.VIOLENT_THREAT,
+        EmergencyReasonCode.ACTIVE_ATTACK,
+    ),
+    (
+        "My child is in immediate danger.",
+        EmergencyCategory.OTHER_IMMEDIATE_DANGER,
+        EmergencyReasonCode.CHILD_IN_DANGER,
     ),
     (
         "Someone says they are going to kill themselves right now.",

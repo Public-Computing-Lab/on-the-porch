@@ -1,8 +1,8 @@
-"""Strict contracts for the future model-led civic orchestrator.
+"""Strict contracts for the model-led civic orchestrator foundation.
 
-This module is intentionally disconnected from resident traffic in Phase 1. It
-normalizes input, validates one provider-neutral decision, and builds the prompt
-used by offline evaluation and future shadow diagnostics.
+Normalizes resident input and validates provider-neutral planner decisions used
+by the authoritative turn service and offline evaluation. Exact calendar bounds,
+tool arguments, and state mutations remain outside this module.
 """
 
 from __future__ import annotations

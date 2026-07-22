@@ -152,7 +152,11 @@ from conversation_state import (  # noqa: E402
     merge_for_commit,
     serialize_thread_state,
 )
-from request_budget import use_request_deadline  # noqa: E402
+from request_budget import (  # noqa: E402
+    current_deadline,
+    set_request_deadline,
+    use_request_deadline,
+)
 from civic_311 import (  # noqa: E402
     Civic311Result,
     build_311_dialogue_hint,
@@ -2742,7 +2746,7 @@ def _execute_agent_response(
     thread_id: Optional[str] = None,
     streaming: bool = False,
 ) -> Dict[str, Any]:
-    reset_request_metrics()
+    reset_request_metrics(reset_budget=False)
     cache = retrieval_cache or create_empty_cache()
     emergency_decision, detector_latency_ms = _detect_emergency(message)
     if emergency_decision.is_active_emergency:
@@ -3493,7 +3497,7 @@ def _execute_agent_response_with_event_context(
     if decision is None:
         decision, detector_latency_ms = _detect_emergency(message)
     if decision.is_active_emergency:
-        reset_request_metrics()
+        reset_request_metrics(reset_budget=False)
         return _emergency_agent_result(
             decision,
             retrieval_cache,
@@ -3507,7 +3511,7 @@ def _execute_agent_response_with_event_context(
             thread_id=thread_id,
             streaming=streaming,
         )
-    reset_request_metrics()
+    reset_request_metrics(reset_budget=False)
     result = _selected_event_agent_result(message, event_resolution, retrieval_cache)
     _log_agent_metrics(
         mode=result["mode"],
@@ -3983,7 +3987,7 @@ def _model_led_request_mode() -> Optional[str]:
 
 
 def _model_led_canary_requested() -> bool:
-    """Backward-compatible predicate used by Phase 2A integration tests."""
+    """Backward-compatible predicate used by isolated-canary integration tests."""
     return _model_led_request_mode() == "isolated_canary"
 
 
@@ -4086,6 +4090,56 @@ def _log_model_led_legacy_handoff(
         }),
         file=sys.stderr,
         flush=True,
+    )
+
+
+def _authoritative_turn_deadline(started_at: Optional[float]) -> GlobalDeadline:
+    """One 15-second wall clock shared by model-led and transitional legacy stages."""
+    origin = float(started_at) if started_at is not None else time.perf_counter()
+    return GlobalDeadline.from_started_at(origin, hard_ceiling_seconds=15.0)
+
+
+def _install_authoritative_request_deadline(started_at: Optional[float]) -> GlobalDeadline:
+    """Bind the shared authoritative deadline into request_budget for legacy stages."""
+    deadline = _authoritative_turn_deadline(started_at)
+    set_request_deadline(deadline.deadline)
+    return deadline
+
+
+def _legacy_handoff_budget_result(
+    *,
+    retrieval_cache: Optional[Dict[str, Any]],
+    intent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Safe temporary-availability answer when the shared turn budget is exhausted."""
+    from resident_response import execution_failure_message  # noqa: WPS433
+
+    cache = retrieval_cache or create_empty_cache()
+    answer = execution_failure_message(
+        path="rag",
+        intent=intent or "public-safety information",
+        timed_out=True,
+    )
+    return {
+        "answer": answer,
+        "mode": "budget_timeout",
+        "sources": [],
+        "result": {"answer": answer, "error": "request_budget_exhausted", "timed_out": True},
+        "retrieval_cache": cache,
+        "execution_degraded": True,
+    }
+
+
+# Heavy transitional RAG must not start unless enough wall time remains for
+# retrieval + persistence inside the shared 15-second authoritative deadline.
+_LEGACY_HANDOFF_MIN_REMAINING_SECONDS = 4.0
+
+
+def _legacy_handoff_budget_exhausted(turn_deadline: GlobalDeadline) -> bool:
+    """True when the shared turn budget cannot safely run transitional RAG."""
+    return (
+        turn_deadline.remaining(reserve_for_persistence=True)
+        < _LEGACY_HANDOFF_MIN_REMAINING_SECONDS
     )
 
 
@@ -5087,6 +5141,10 @@ def post_conversation_message(thread_id: str):
     turn_reservation = None
     try:
         reset_request_metrics()
+        if model_led_activation_mode == "authoritative":
+            _install_authoritative_request_deadline(
+                getattr(g, "request_started_at", None)
+            )
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
@@ -5225,30 +5283,51 @@ def post_conversation_message(thread_id: str):
                     thread_id=thread_id,
                     streaming=False,
                 )
-                legacy_conn = get_db_connection()
-                try:
-                    legacy_semantics = _prepare_legacy_semantic_turn(
-                        legacy_conn,
-                        message=message,
-                        state_envelope=state_envelope,
-                        event_context=event_context,
-                        event_resolution=event_resolution,
-                        history_rows=history_rows,
-                        thread_id=thread_id,
-                        request_started_at=getattr(g, "request_started_at", None),
+                turn_deadline = _install_authoritative_request_deadline(
+                    getattr(g, "request_started_at", None)
+                )
+                if _legacy_handoff_budget_exhausted(turn_deadline):
+                    agent_result = _legacy_handoff_budget_result(
+                        retrieval_cache=retrieval_cache,
+                        intent="public-safety information",
                     )
-                finally:
-                    legacy_conn.close()
-                relationship = legacy_semantics.relationship
-                dimensions = legacy_semantics.dimensions
-                active_event_result = legacy_semantics.active_event_result
-                state_aware_event_result = legacy_semantics.state_aware_event_result
-                civic_311_request = legacy_semantics.civic_311_request
-                event_query_plan = legacy_semantics.event_query_plan
-                stale_active_event = legacy_semantics.stale_active_event
-                dialogue_decision = legacy_semantics.dialogue_decision
-                direct_dialogue_result = legacy_semantics.direct_dialogue_result
-                model_led_turn_result = None
+                    model_led_turn_result = None
+                else:
+                    legacy_conn = get_db_connection()
+                    try:
+                        legacy_semantics = _prepare_legacy_semantic_turn(
+                            legacy_conn,
+                            message=message,
+                            state_envelope=state_envelope,
+                            event_context=event_context,
+                            event_resolution=event_resolution,
+                            history_rows=history_rows,
+                            thread_id=thread_id,
+                            request_started_at=getattr(g, "request_started_at", None),
+                        )
+                    finally:
+                        legacy_conn.close()
+                    relationship = legacy_semantics.relationship
+                    dimensions = legacy_semantics.dimensions
+                    active_event_result = legacy_semantics.active_event_result
+                    state_aware_event_result = legacy_semantics.state_aware_event_result
+                    civic_311_request = legacy_semantics.civic_311_request
+                    event_query_plan = legacy_semantics.event_query_plan
+                    stale_active_event = legacy_semantics.stale_active_event
+                    dialogue_decision = legacy_semantics.dialogue_decision
+                    direct_dialogue_result = legacy_semantics.direct_dialogue_result
+                    model_led_turn_result = None
+                    if (
+                        direct_dialogue_result is None
+                        and active_event_result is None
+                        and state_aware_event_result is None
+                        and not civic_311_request
+                        and _legacy_handoff_budget_exhausted(turn_deadline)
+                    ):
+                        agent_result = _legacy_handoff_budget_result(
+                            retrieval_cache=retrieval_cache,
+                            intent="public-safety information",
+                        )
             else:
                 agent_result = _model_led_agent_result(
                     model_led_turn_result,
@@ -5289,14 +5368,26 @@ def post_conversation_message(thread_id: str):
                     request_started_at=getattr(g, "request_started_at", None),
                 )
             else:
-                agent_result = _execute_agent_response_with_event_context(
-                    message,
-                    conversation_history=conversation_history,
-                    retrieval_cache=retrieval_cache,
-                    event_resolution=event_resolution,
-                    thread_id=thread_id,
-                    emergency_decision=emergency_decision,
-                )
+                # Authoritative model-led turns install a shared 15s deadline before
+                # transitional legacy RAG. Refuse to start heavy retrieval when the
+                # remaining budget cannot cover retrieval + persistence.
+                installed = current_deadline()
+                if installed is not None and _legacy_handoff_budget_exhausted(
+                    GlobalDeadline(deadline=float(installed))
+                ):
+                    agent_result = _legacy_handoff_budget_result(
+                        retrieval_cache=retrieval_cache,
+                        intent="public-safety information",
+                    )
+                else:
+                    agent_result = _execute_agent_response_with_event_context(
+                        message,
+                        conversation_history=conversation_history,
+                        retrieval_cache=retrieval_cache,
+                        event_resolution=event_resolution,
+                        thread_id=thread_id,
+                        emergency_decision=emergency_decision,
+                    )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
@@ -5539,6 +5630,10 @@ def post_conversation_message_stream(thread_id: str):
     turn_reservation = None
     try:
         reset_request_metrics()
+        if model_led_activation_mode == "authoritative":
+            _install_authoritative_request_deadline(
+                getattr(g, "request_started_at", None)
+            )
         conn = get_db_connection()
         thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
@@ -5684,7 +5779,9 @@ def post_conversation_message_stream(thread_id: str):
     _sse_meta = _capture_sse_completion_meta()
 
     def _generate():
-        reset_request_metrics()
+        reset_request_metrics(reset_budget=False)
+        if model_led_activation_mode == "authoritative":
+            _install_authoritative_request_deadline(request_started_at)
         if dialogue_decision is not None and dialogue_decision.controller_call_count:
             increment_llm_call_counter(dialogue_decision.controller_call_count)
         turn_relationship = relationship
@@ -5768,34 +5865,55 @@ def post_conversation_message_stream(thread_id: str):
                         thread_id=thread_id,
                         streaming=True,
                     )
-                    legacy_conn = get_db_connection()
-                    try:
-                        legacy_turn = _prepare_legacy_semantic_turn(
-                            legacy_conn,
-                            message=message,
-                            state_envelope=state_envelope,
-                            event_context=event_context,
-                            event_resolution=event_resolution,
-                            history_rows=history_rows,
-                            thread_id=thread_id,
-                            request_started_at=request_started_at,
+                    turn_deadline = _install_authoritative_request_deadline(
+                        request_started_at
+                    )
+                    if _legacy_handoff_budget_exhausted(turn_deadline):
+                        deterministic_result = _legacy_handoff_budget_result(
+                            retrieval_cache=retrieval_cache,
+                            intent="public-safety information",
                         )
-                    finally:
-                        legacy_conn.close()
-                    turn_relationship = legacy_turn.relationship
-                    turn_dimensions = legacy_turn.dimensions
-                    turn_active_event_result = legacy_turn.active_event_result
-                    turn_state_aware_event_result = legacy_turn.state_aware_event_result
-                    turn_civic_311_request = legacy_turn.civic_311_request
-                    turn_event_query_plan = legacy_turn.event_query_plan
-                    turn_stale_active_event = legacy_turn.stale_active_event
-                    turn_dialogue_decision = legacy_turn.dialogue_decision
-                    turn_direct_dialogue_result = legacy_turn.direct_dialogue_result
-                    if turn_dialogue_decision.controller_call_count:
-                        increment_llm_call_counter(
-                            turn_dialogue_decision.controller_call_count
-                        )
-                    model_led_turn_result = None
+                        model_led_turn_result = None
+                    else:
+                        legacy_conn = get_db_connection()
+                        try:
+                            legacy_turn = _prepare_legacy_semantic_turn(
+                                legacy_conn,
+                                message=message,
+                                state_envelope=state_envelope,
+                                event_context=event_context,
+                                event_resolution=event_resolution,
+                                history_rows=history_rows,
+                                thread_id=thread_id,
+                                request_started_at=request_started_at,
+                            )
+                        finally:
+                            legacy_conn.close()
+                        turn_relationship = legacy_turn.relationship
+                        turn_dimensions = legacy_turn.dimensions
+                        turn_active_event_result = legacy_turn.active_event_result
+                        turn_state_aware_event_result = legacy_turn.state_aware_event_result
+                        turn_civic_311_request = legacy_turn.civic_311_request
+                        turn_event_query_plan = legacy_turn.event_query_plan
+                        turn_stale_active_event = legacy_turn.stale_active_event
+                        turn_dialogue_decision = legacy_turn.dialogue_decision
+                        turn_direct_dialogue_result = legacy_turn.direct_dialogue_result
+                        if turn_dialogue_decision.controller_call_count:
+                            increment_llm_call_counter(
+                                turn_dialogue_decision.controller_call_count
+                            )
+                        model_led_turn_result = None
+                        if (
+                            turn_direct_dialogue_result is None
+                            and turn_active_event_result is None
+                            and turn_state_aware_event_result is None
+                            and not turn_civic_311_request
+                            and _legacy_handoff_budget_exhausted(turn_deadline)
+                        ):
+                            deterministic_result = _legacy_handoff_budget_result(
+                                retrieval_cache=retrieval_cache,
+                                intent="public-safety information",
+                            )
                 else:
                     deterministic_result = _model_led_agent_result(
                         model_led_turn_result,
@@ -5861,33 +5979,49 @@ def post_conversation_message_stream(thread_id: str):
                 for i, word in enumerate(full_answer.split()):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             elif not deterministic_request:
-                streamed_text = ""
-                for item in _iter_stream_agent_with_keepalive(
-                    message, conversation_history, retrieval_cache,
+                installed = current_deadline()
+                if installed is not None and _legacy_handoff_budget_exhausted(
+                    GlobalDeadline(deadline=float(installed))
                 ):
-                    if item is None:
-                        yield ": keepalive\n\n"
-                        continue
-                    kind, data = item
-                    if kind == "delta":
-                        streamed_text += data
-                        yield _sse({"type": "delta", "text": data})
-                    elif kind == "final":
-                        full_answer = data.get("answer", streamed_text)
-                        mode = data.get("mode", "hybrid")
-                        result_payload = data.get("result", {})
-                        next_cache = data.get("retrieval_cache", retrieval_cache)
-                        pipeline_metrics = data.get("pipeline_metrics")
-                        if isinstance(pipeline_metrics, dict):
-                            execution_metadata.update(pipeline_metrics)
-                        if "model_name" in data:
-                            execution_metadata["model_name"] = data.get("model_name")
-                    elif kind == "_execution_metrics":
-                        llm_calls = max(0, int(data.get("llm_calls", 0)))
-                        execution_metadata["llm_calls"] = llm_calls
-                        increment_llm_call_counter(llm_calls)
-                if not full_answer and streamed_text:
-                    full_answer = streamed_text
+                    deterministic_result = _legacy_handoff_budget_result(
+                        retrieval_cache=retrieval_cache,
+                        intent="public-safety information",
+                    )
+                    full_answer = deterministic_result["answer"]
+                    mode = deterministic_result["mode"]
+                    result_payload = deterministic_result["result"]
+                    next_cache = deterministic_result["retrieval_cache"]
+                    selected_sources = deterministic_result["sources"]
+                    for i, word in enumerate(full_answer.split()):
+                        yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
+                else:
+                    streamed_text = ""
+                    for item in _iter_stream_agent_with_keepalive(
+                        message, conversation_history, retrieval_cache,
+                    ):
+                        if item is None:
+                            yield ": keepalive\n\n"
+                            continue
+                        kind, data = item
+                        if kind == "delta":
+                            streamed_text += data
+                            yield _sse({"type": "delta", "text": data})
+                        elif kind == "final":
+                            full_answer = data.get("answer", streamed_text)
+                            mode = data.get("mode", "hybrid")
+                            result_payload = data.get("result", {})
+                            next_cache = data.get("retrieval_cache", retrieval_cache)
+                            pipeline_metrics = data.get("pipeline_metrics")
+                            if isinstance(pipeline_metrics, dict):
+                                execution_metadata.update(pipeline_metrics)
+                            if "model_name" in data:
+                                execution_metadata["model_name"] = data.get("model_name")
+                        elif kind == "_execution_metrics":
+                            llm_calls = max(0, int(data.get("llm_calls", 0)))
+                            execution_metadata["llm_calls"] = llm_calls
+                            increment_llm_call_counter(llm_calls)
+                    if not full_answer and streamed_text:
+                        full_answer = streamed_text
             if not full_answer and not cache_hit:
                 if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
                     _fail_active_turn()

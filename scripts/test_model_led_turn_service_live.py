@@ -270,6 +270,12 @@ def turn(
     check(latency < 15_000, f"{label} exceeded global deadline: {latency:.2f}ms")
     check(model.get("planner_call_count") == 1, f"{label} planner call count")
     check(model.get("synthesis_call_count") == 0, f"{label} synthesis count")
+    check(model.get("repair_call_count", 0) == 0, f"{label} repair count")
+    check(model.get("embedding_call_count", 0) == 0, f"{label} embedding count")
+    check(
+        model.get("secondary_planner_call_count", 0) == 0,
+        f"{label} secondary planner count",
+    )
     record = {
         "label": label,
         "message": message,
