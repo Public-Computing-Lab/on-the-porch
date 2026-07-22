@@ -408,20 +408,40 @@ def _bounded_optional_text(value: Any, maximum: int) -> Optional[str]:
 
 
 def canonical_issue_family_id(value: Any) -> Optional[str]:
-    """Map one compiler-owned issue concept to the reviewed 311 registry."""
+    """Map one compiler-owned issue concept to the reviewed 311 registry.
+
+    Exact registry phrases win first. Otherwise a unique longest contained alias
+    may match so incidental modifiers (outage, pickup, filings) do not force a
+    clarification when the core reviewed concept is already present.
+    """
     text = _normalized(str(value or "").replace("_", " "))
     if not text:
         return None
-    matches = []
+    exact: list[str] = []
+    contained: list[tuple[int, str]] = []
     for definition in FAMILY_DEFINITIONS:
         candidates = {
             _normalized(definition.family.value.replace("_", " ")),
             _normalized(definition.label),
             *(_normalized(alias) for alias in definition.aliases),
-        }
+        }.difference({""})
+        family = definition.family.value
         if text in candidates:
-            matches.append(definition.family.value)
-    return matches[0] if len(matches) == 1 else None
+            exact.append(family)
+            continue
+        best = max((len(candidate) for candidate in candidates if candidate in text), default=0)
+        if best:
+            contained.append((best, family))
+    if len(set(exact)) == 1:
+        return exact[0]
+    if exact:
+        return None
+    if not contained:
+        return None
+    contained.sort(key=lambda item: (-item[0], item[1]))
+    best_length = contained[0][0]
+    families = {family for length, family in contained if length == best_length}
+    return next(iter(families)) if len(families) == 1 else None
 
 
 def build_compiled_311_plan(

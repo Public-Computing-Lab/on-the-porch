@@ -307,17 +307,31 @@ def resolve_registered_geography(value: Any) -> Optional["CanonicalLocation"]:
         return None
     exact_matches = []
     phrase_matches = []
+    matched_phrase_tokens = set()
     for entry in GEOGRAPHY_REGISTRY:
         names = {_normalize_text(entry.id), _normalize_text(entry.name)}
         names.update(_normalize_text(alias) for alias in entry.aliases)
         if normalized in names:
             exact_matches.append(entry)
-        elif any(_contains_phrase(normalized, name) for name in names if name):
-            phrase_matches.append(entry)
+        else:
+            matched_names = {
+                name for name in names if name and _contains_phrase(normalized, name)
+            }
+            if matched_names:
+                phrase_matches.append(entry)
+                for name in matched_names:
+                    matched_phrase_tokens.update(name.split())
     if len(exact_matches) == 1:
         entry = exact_matches[0]
         return CanonicalLocation(entry.id, entry.kind)
     if exact_matches:
+        return None
+    residual = set(normalized.split()).difference(matched_phrase_tokens).difference({
+        "all", "area", "around", "at", "boston", "city", "in", "local",
+        "locally", "ma", "massachusetts", "near", "neighborhood", "of", "over",
+        "the", "within",
+    })
+    if residual:
         return None
     if len(phrase_matches) == 1:
         entry = phrase_matches[0]
@@ -934,9 +948,10 @@ def resolve_explicit_date_expression(
     text = str(value or "").strip()
     if not text:
         return None
-    resolved, _reason, ambiguous = _extract_explicit_time(
+    resolved, _reason, ambiguous = _extract_time(
         text,
-        resolve_app_now(now).date(),
+        _normalize_text(text),
+        resolve_app_now(now),
         resolve_yearless_named_dates=True,
     )
     return None if ambiguous else resolved

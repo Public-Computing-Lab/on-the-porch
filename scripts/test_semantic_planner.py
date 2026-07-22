@@ -204,6 +204,14 @@ def test_compiler_derives_tools_status_and_state() -> None:
     compiled_status = compile_semantic_plan(grouped_status, trusted_context=CONTEXT)
     assert compiled_status.tool_requests[0].arguments["operation"] == "STATUS"
 
+    explicit_status = parse(gather_payload(task={
+        "operation": "STATUS",
+        "subject": "open versus closed mix for service-request records",
+    }))
+    compiled_explicit = compile_semantic_plan(explicit_status, trusted_context=CONTEXT)
+    assert compiled_explicit.tool_requests[0].arguments["operation"] == "STATUS"
+    assert compiled_explicit.tool_requests[0].arguments["issue_scope"] == "ALL"
+
 
 def test_domain_only_goal_clarity_requires_meaning_without_tools() -> None:
     plan = parse(gather_payload(task={
@@ -272,6 +280,30 @@ def test_compiler_maps_relative_default_geography_without_resolution() -> None:
     assert aggregate.tool_id.value == "aggregate_311"
     assert aggregate.arguments["location_id"] == "dorchester"
     assert not compiled.requires_location_resolution
+
+
+def test_issue_modifiers_and_citywide_default_geography() -> None:
+    streetlight = parse(gather_payload(task={"subject": "streetlight outage filings"}))
+    compiled = compile_semantic_plan(streetlight, trusted_context=CONTEXT)
+    assert compiled.tool_requests[0].arguments["issue_family_id"] == "streetlight"
+
+    trash = parse(gather_payload(task={"subject": "trash pickup complaints"}))
+    compiled = compile_semantic_plan(trash, trusted_context=CONTEXT)
+    assert compiled.tool_requests[0].arguments["issue_family_id"] == "trash_and_illegal_dumping"
+
+    boston = parse(gather_payload(task={
+        "subject": None,
+        "geography": {"mode": "EXPLICIT", "value": "Boston"},
+    }))
+    compiled = compile_semantic_plan(boston, trusted_context=CONTEXT)
+    assert compiled.tool_requests[0].arguments["location_id"] == "dorchester"
+    assert not compiled.requires_location_resolution
+
+    trusted = copy.deepcopy(CONTEXT)
+    trusted["active_topic"] = "SERVICE_REQUESTS"
+    missing = parse(gather_payload(task={"geography": {"mode": "MISSING", "value": None}}))
+    retained = compile_semantic_plan(missing, trusted_context=trusted)
+    assert retained.tool_requests[0].arguments["location_id"] == "dorchester"
 
 
 def test_time_geography_and_selected_event_are_deterministic() -> None:
@@ -348,6 +380,8 @@ def test_time_geography_and_selected_event_are_deterministic() -> None:
 
     assert resolve_registered_geography("near Fields Corner, Dorchester").id == "fields_corner"
     assert resolve_registered_geography("Codman Square and Fields Corner") is None
+    assert resolve_registered_geography("Cedar Avenue in Dorchester") is None
+    assert resolve_registered_geography("near Codman Square") .id == "codman_square"
 
     previous = os.environ.get("OTP_FREEZE_NOW")
     os.environ["OTP_FREEZE_NOW"] = "2026-07-21T12:00:00-04:00"
@@ -358,6 +392,19 @@ def test_time_geography_and_selected_event_are_deterministic() -> None:
         result = compile_semantic_plan(june, trusted_context=CONTEXT)
         assert result.tool_requests[0].arguments["time_scope"] == {
             "period": "PREVIOUS_CALENDAR_MONTH",
+        }
+
+        tomorrow = parse(gather_payload(task={
+            "domain": "EVENTS",
+            "operation": "FIND",
+            "subject": None,
+            "time": {"kind": "EXPLICIT_DATE_RANGE", "value": "tomorrow"},
+        }))
+        result = compile_semantic_plan(tomorrow, trusted_context=CONTEXT)
+        assert result.tool_requests[0].arguments["time_scope"] == {
+            "period": "EXPLICIT_DATE_RANGE",
+            "start_date": "2026-07-22",
+            "end_date_exclusive": "2026-07-23",
         }
 
         comparison = parse(gather_payload(task={

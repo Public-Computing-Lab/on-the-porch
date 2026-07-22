@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from datetime import date, time as clock_time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -270,6 +271,8 @@ class _LiveGuestClient:
         return response.json()["thread"]["id"]
 
     def send_json(self, thread_id: str, payload: Dict[str, Any]):
+        payload = dict(payload)
+        payload.setdefault("client_turn_id", str(uuid.uuid4()))
         return self.session.post(
             f"{self.base_url}/conversations/{thread_id}/messages",
             headers=self.headers(),
@@ -278,6 +281,8 @@ class _LiveGuestClient:
         )
 
     def send_stream(self, thread_id: str, payload: Dict[str, Any]):
+        payload = dict(payload)
+        payload.setdefault("client_turn_id", str(uuid.uuid4()))
         response = self.session.post(
             f"{self.base_url}/conversations/{thread_id}/messages/stream",
             headers=self.headers(),

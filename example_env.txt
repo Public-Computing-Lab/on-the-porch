@@ -21,7 +21,8 @@ GEMINI_REQUEST_TIMEOUT=25
 GEMINI_STREAM_TIMEOUT=30
 GEMINI_MAX_ATTEMPTS=2
 
-# Future model-led orchestrator foundation. Keep off until a later cutover phase.
+# Phase 2 modes: off/legacy (process-level rollback), isolated_canary, authoritative.
+# Authoritative requires the configured planner provider. Changing modes requires restart.
 MODEL_LED_ORCHESTRATOR_MODE=off
 MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS=1.5
 # Structured 311 model policy: disabled, auto, or required.

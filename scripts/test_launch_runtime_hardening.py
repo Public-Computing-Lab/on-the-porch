@@ -1002,6 +1002,51 @@ def case_64_civic_hybrid_runtime_policy_is_authoritative() -> None:
         assert "GEMINI_API_KEY" not in safe and "configured-test-provider-key" not in json.dumps(safe)
 
 
+def case_65_model_led_authoritative_mode_validation() -> None:
+    configured = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(
+            MODEL_LED_ORCHESTRATOR_MODE="authoritative",
+            GEMINI_API_KEY="configured-test-provider-key",
+        ),
+    )
+    assert configured.ok, configured.errors
+
+    missing_provider = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(
+            MODEL_LED_ORCHESTRATOR_MODE="authoritative",
+            GEMINI_API_KEY="",
+        ),
+    )
+    assert not missing_provider.ok
+    assert any("planner provider" in error for error in missing_provider.errors)
+
+    invalid = validate_launch_runtime(
+        production_mode=True,
+        env=_valid_prod_env(MODEL_LED_ORCHESTRATOR_MODE="sometimes"),
+    )
+    assert not invalid.ok
+    assert any("MODEL_LED_ORCHESTRATOR_MODE" in error for error in invalid.errors)
+
+    import api_v2
+
+    with api_v2.app.test_request_context("/"):
+        with mock.patch.object(api_v2.Config, "MODEL_LED_ORCHESTRATOR_MODE", "authoritative"):
+            assert api_v2._model_led_request_mode() == "authoritative"
+        with mock.patch.object(api_v2.Config, "MODEL_LED_ORCHESTRATOR_MODE", "off"):
+            assert api_v2._model_led_request_mode() is None
+
+
+def case_66_production_overlay_exports_token_pepper() -> None:
+    import api_v2
+    import config
+
+    assert api_v2.Config.TOKEN_PEPPER == config.TOKEN_PEPPER
+    overlay = api_v2._production_env_overlay()
+    assert overlay["TOKEN_PEPPER"] == config.TOKEN_PEPPER
+
+
 def main() -> int:
     cases = [
         ("01_valid_production_config", case_01_valid_production_config),
@@ -1068,6 +1113,8 @@ def main() -> int:
         ("62_no_generated_artifacts_committed", case_62_no_generated_artifacts_committed),
         ("63_civic_hybrid_mode_validation", case_63_civic_hybrid_mode_validation),
         ("64_civic_hybrid_runtime_policy_is_authoritative", case_64_civic_hybrid_runtime_policy_is_authoritative),
+        ("65_model_led_authoritative_mode_validation", case_65_model_led_authoritative_mode_validation),
+        ("66_production_overlay_exports_token_pepper", case_66_production_overlay_exports_token_pepper),
     ]
     print(f"Running {len(cases)} launch-runtime hardening cases...\n")
     for name, fn in cases:
