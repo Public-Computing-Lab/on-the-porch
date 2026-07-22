@@ -147,14 +147,14 @@ class TurnResult:
 
     def __post_init__(self) -> None:
         if self.planner_call_count not in {0, 1} or self.synthesis_call_count != 0:
-            raise ValueError("Phase 2A turn results have invalid model-call counts")
+            raise ValueError("Phase 2 turn results have invalid model-call counts")
         if any(not isinstance(value, int) or value < 0 for value in self.tool_execution_counts.values()):
             raise ValueError("tool execution counts are invalid")
         if self.answer is not None and len(self.answer) > 12_000:
-            raise ValueError("turn answer exceeds the Phase 2A bound")
+            raise ValueError("turn answer exceeds the Phase 2 bound")
         encoded = json.dumps(self.to_safe_dict(), ensure_ascii=True, default=str).encode("utf-8")
         if len(encoded) > MAX_TURN_RESULT_BYTES:
-            raise ValueError("turn result exceeds the Phase 2A bound")
+            raise ValueError("turn result exceeds the Phase 2 bound")
 
     def to_safe_dict(self) -> Dict[str, Any]:
         return _json_transport_value({
@@ -390,7 +390,7 @@ class ModelLedTurnService:
                     resolver_count=resolver_count,
                 )
             if len(core) != 1:
-                raise ValueError("Phase 2A requires exactly one domain capability")
+                raise ValueError("Phase 2 requires exactly one domain capability")
             tool = core[0]
             if tool.tool_id is ToolId.QUERY_EVENTS:
                 return self._run_events(
@@ -419,7 +419,7 @@ class ModelLedTurnService:
                     provider_model=provider_model,
                     resolver_count=resolver_count,
                 )
-            raise ValueError("compiled capability is outside Phase 2A")
+            raise ValueError("compiled capability is outside Phase 2")
         except Exception as exc:
             return self._capability_failure(
                 request,
@@ -1263,7 +1263,7 @@ def _event_state_transition(
         location=location or current.location,
         time_range=time_range or current.time_range,
         filters=current.filters if current.active_topic is CanonicalTopic.EVENTS else CanonicalFilters(),
-        previous_route="model_led_canary",
+        previous_route="model_led",
         last_substantive_message_id=current.last_substantive_message_id,
     )
     return ProposedTransition.replace_state(current, next_state)
@@ -1285,7 +1285,7 @@ def _311_state_transition(
         location=location,
         time_range=semantic_time,
         filters=CanonicalFilters(),
-        previous_route="model_led_canary",
+        previous_route="model_led",
         last_substantive_message_id=current.last_substantive_message_id,
     )
     return ProposedTransition.replace_state(current, next_state)

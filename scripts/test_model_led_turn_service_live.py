@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated two-worker live acceptance for the Phase 2A model-led canary."""
+"""Isolated two-worker live acceptance for the Phase 2 model-led service."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from conversation_state import load_thread_state  # noqa: E402
 
 CANARY_HEADER = "model-led-phase2a"
 RESULTS = []
+AUTHORITATIVE = False
 
 
 def check(condition: bool, message: str) -> None:
@@ -101,6 +102,32 @@ def message_count(thread_id: str) -> int:
         connection.close()
 
 
+def latest_model_led_diagnostics(thread_id: str) -> Dict[str, Any]:
+    connection = demo_connection()
+    cursor = connection.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT message_meta_json
+            FROM conversation_messages
+            WHERE thread_id = %s AND role = 'user'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (thread_id,),
+        )
+        row = cursor.fetchone()
+        check(row is not None, "missing persisted user message diagnostics")
+        raw = row.get("message_meta_json")
+        metadata = json.loads(raw) if isinstance(raw, str) and raw else (raw or {})
+        diagnostics = metadata.get("model_led_turn") or {}
+        check(isinstance(diagnostics, dict), "invalid model-led diagnostics")
+        return diagnostics
+    finally:
+        cursor.close()
+        connection.close()
+
+
 def selected_event_fixture() -> Dict[str, Any]:
     connection = demo_connection()
     cursor = connection.cursor(dictionary=True)
@@ -147,13 +174,15 @@ class Client:
         self.csrf = str(payload["csrf_token"])
 
     def headers(self) -> Dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"Bearer {self.token}",
             "X-CSRF-Token": self.csrf,
-            "X-On-The-Porch-Canary": CANARY_HEADER,
             "Content-Type": "application/json",
             "Connection": "close",
         }
+        if not AUTHORITATIVE:
+            headers["X-On-The-Porch-Canary"] = CANARY_HEADER
+        return headers
 
     def create_thread(self, title: str) -> str:
         response = self.session.post(
@@ -234,7 +263,9 @@ def turn(
     else:
         payload, latency = client.post_json(thread_id, message, ui_context=ui_context)
     after = thread_snapshot(thread_id)
-    model = payload.get("model_led_turn") or {}
+    model = payload.get("model_led_turn") or latest_model_led_diagnostics(thread_id)
+    if AUTHORITATIVE:
+        check("model_led_turn" not in payload, f"{label} exposed internal diagnostics")
     answer = str(payload.get("answer") or payload["assistant_message"].get("content") or "")
     check(latency < 15_000, f"{label} exceeded global deadline: {latency:.2f}ms")
     check(model.get("planner_call_count") == 1, f"{label} planner call count")
@@ -246,7 +277,10 @@ def turn(
         "planner_action": model.get("planner_action"),
         "guarded_disposition": model.get("guarded_disposition"),
         "reason_code": model.get("reason_code"),
-        "compiled_tools": model.get("compiled_tools") or [],
+        "compiled_tools": model.get("compiled_tools") or [
+            {"tool_id": tool_id}
+            for tool_id in model.get("compiled_tool_ids") or []
+        ],
         "state_transition": model.get("state_transition"),
         "planner_call_count": model.get("planner_call_count"),
         "synthesis_call_count": model.get("synthesis_call_count"),
@@ -254,6 +288,7 @@ def turn(
         "latency_ms": round(latency, 2),
         "service_latency_ms": model.get("latency_ms"),
         "answer": answer,
+        "response_mode": payload.get("mode") or payload["assistant_message"].get("response_mode"),
         "sources": payload.get("sources") or payload["assistant_message"].get("sources") or [],
         "before": before,
         "after": after,
@@ -272,18 +307,20 @@ def compiled_tool_ids(record: Mapping[str, Any]) -> set[str]:
 
 def run(base_url: str) -> None:
     demo_connection().close()
+    requested_headers = "content-type" if AUTHORITATIVE else "content-type,x-on-the-porch-canary"
     preflight = requests.options(
         f"{base_url.rstrip('/')}/auth/guest",
         headers={
             "Origin": "http://127.0.0.1:8011",
             "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "content-type,x-on-the-porch-canary",
+            "Access-Control-Request-Headers": requested_headers,
         },
         timeout=10,
     )
     check(preflight.status_code == 204, f"canary CORS preflight returned {preflight.status_code}")
     allowed_headers = preflight.headers.get("Access-Control-Allow-Headers", "").lower()
-    check("x-on-the-porch-canary" in allowed_headers, "canary header is missing from CORS preflight")
+    if not AUTHORITATIVE:
+        check("x-on-the-porch-canary" in allowed_headers, "canary header is missing from CORS preflight")
     fixture = selected_event_fixture()
     client = Client(base_url)
     client.guest()
@@ -389,6 +426,19 @@ def run(base_url: str) -> None:
     check("model_led_turn" not in emergency_payload, "emergency incorrectly entered canary")
     check(emergency_latency < 15_000, "emergency exceeded deadline")
 
+    if AUTHORITATIVE:
+        legacy_thread = client.create_thread("Phase 2 transitional legacy handoff")
+        legacy = turn(
+            client,
+            legacy_thread,
+            "legacy_public_safety",
+            "What public-safety updates are available for Dorchester?",
+        )
+        check(legacy["status"] == "NOT_YET_MIGRATED", "legacy handoff disposition")
+        check(legacy["response_mode"] != "model_led_not_yet_migrated", "legacy answer was not produced")
+        check(bool(legacy["answer"].strip()), "legacy handoff answer is empty")
+        check(not legacy["tool_execution_counts"], "model-led service ran migrated tools during legacy handoff")
+
     parity_thread = client.create_thread("Phase 2A JSON SSE replay parity")
     parity_id = str(uuid.uuid4())
     json_payload, _ = client.post_json(
@@ -452,9 +502,12 @@ def run(base_url: str) -> None:
 
 
 def main() -> None:
+    global AUTHORITATIVE
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8899")
+    parser.add_argument("--authoritative", action="store_true")
     args = parser.parse_args()
+    AUTHORITATIVE = bool(args.authoritative)
     run(args.base_url)
 
 

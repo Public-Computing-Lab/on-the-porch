@@ -9,6 +9,7 @@ import os
 import statistics
 import sys
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -91,6 +92,7 @@ def _turn(
     metadata = _read_user_meta(user_message["id"])
     relationship = metadata.get("conversation_relationship") or {}
     dimensions = metadata.get("conversation_dimensions_shadow") or {}
+    model_led = metadata.get("model_led_turn") or {}
     plan = metadata.get("event_query_context")
     transition = metadata.get("conversation_transition") or {}
     record = {
@@ -112,7 +114,12 @@ def _turn(
         "cache_hash_before": retrieval_cache_hash(before.retrieval_cache),
         "cache_hash_after": retrieval_cache_hash(after.retrieval_cache),
         "latency_ms": latency_ms,
-        "llm_calls": 0 if assistant.get("model_name") is None else ">=1",
+        "llm_calls": model_led.get(
+            "planner_call_count",
+            0 if assistant.get("model_name") is None else ">=1",
+        ),
+        "tool_execution_counts": model_led.get("tool_execution_counts") or {},
+        "model_led_status": model_led.get("status"),
         "model_name": assistant.get("model_name"),
         "source_metadata": sources,
         "transition": transition,
@@ -176,17 +183,29 @@ def _run_dialogues(base_url: str) -> None:
         _turn(client, dialogue_a, "Thanks."),
         _turn(client, dialogue_a, "Only show free ones."),
     ]
-    assert a[0]["mode"] == "structured_events" and a[0]["llm_calls"] == 0
+    authoritative = str(a[0]["mode"]).startswith("model_led_")
+    if authoritative:
+        assert a[0]["mode"] == "model_led_events" and a[0]["llm_calls"] == 1
+        assert a[0]["tool_execution_counts"] == {"query_events": 1}
+        assert a[0]["trusted_state_after"]["location"]["id"] == "dorchester"
+        assert a[1]["trusted_state_after"]["time_range"] != a[0]["trusted_state_after"]["time_range"]
+        assert a[2]["trusted_state_after"]["location"]["id"] == "codman_square"
+        assert a[3]["mode"] == "model_led_direct"
+        assert a[3]["trusted_state_after"] == a[2]["trusted_state_after"]
+        assert a[4]["mode"] == "model_led_events"
+        assert a[4]["trusted_state_after"] == a[3]["trusted_state_after"]
+    else:
+        assert a[0]["mode"] == "structured_events" and a[0]["llm_calls"] == 0
+        assert a[0]["trusted_state_after"]["location"] is None
+        assert a[1]["relationship"] == "REFINEMENT"
+        assert a[1]["cache_signature_after"] != a[0]["cache_signature_after"]
+        assert a[3]["cache_hash_after"] == a[2]["cache_hash_after"]
+        assert a[4]["unapplied_dimensions"] == ["filters"]
+        assert a[4]["cache_hash_after"] == a[3]["cache_hash_after"]
     assert a[0]["trusted_state_after"]["active_topic"] == "EVENTS"
-    assert a[0]["trusted_state_after"]["location"] is None
-    assert a[1]["relationship"] == "REFINEMENT"
-    assert a[1]["cache_signature_after"] != a[0]["cache_signature_after"]
     assert a[2]["trusted_state_after"]["location"]["id"] == "codman_square"
     assert a[3]["trusted_state_after"] == a[2]["trusted_state_after"]
-    assert a[3]["cache_hash_after"] == a[2]["cache_hash_after"]
-    assert a[4]["unapplied_dimensions"] == ["filters"]
     assert a[4]["trusted_state_after"] == a[3]["trusted_state_after"]
-    assert a[4]["cache_hash_after"] == a[3]["cache_hash_after"]
 
     dialogue_b = client.create_thread("State-aware events B")
     _seed_safety_codman(dialogue_b)
@@ -197,29 +216,36 @@ def _run_dialogues(base_url: str) -> None:
     ]
     # Seeded state without prior messages may classify as STANDALONE; the
     # trusted-location transfer and topic switch are the acceptance criteria.
-    assert b[0]["relationship"] in {"NEW_TOPIC", "STANDALONE"}
-    assert b[0]["query_plan"]["location"]["id"] == "codman_square"
+    if not authoritative:
+        assert b[0]["relationship"] in {"NEW_TOPIC", "STANDALONE"}
+        assert b[0]["query_plan"]["location"]["id"] == "codman_square"
     assert b[0]["trusted_state_after"]["active_topic"] == "EVENTS"
     assert b[0]["trusted_state_after"]["location"]["id"] == "codman_square"
-    assert b[1]["query_plan"]["location"]["id"] == "fields_corner"
+    assert b[1]["trusted_state_after"]["location"]["id"] == "fields_corner"
     assert (
-        b[2]["query_plan"]["start_date"],
-        b[2]["query_plan"]["end_date_exclusive"],
+        b[2]["trusted_state_after"]["time_range"]["start_date"],
+        b[2]["trusted_state_after"]["time_range"]["end_date_exclusive"],
     ) != (
-        b[1]["query_plan"]["start_date"],
-        b[1]["query_plan"]["end_date_exclusive"],
+        b[1]["trusted_state_after"]["time_range"]["start_date"],
+        b[1]["trusted_state_after"]["time_range"]["end_date_exclusive"],
     )
 
     dialogue_c = isolated.create_thread("State-aware events C")
     c = _turn(isolated, dialogue_c, "Are there events there this weekend?")
-    assert c["query_plan"]["status"] == "CLARIFICATION"
-    assert c["llm_calls"] == 0
+    if authoritative:
+        assert c["mode"] == "model_led_clarification"
+        assert c["model_led_status"] == "CLARIFICATION"
+        assert c["llm_calls"] == 1
+        assert c["tool_execution_counts"] == {}
+    else:
+        assert c["query_plan"]["status"] == "CLARIFICATION"
+        assert c["llm_calls"] == 0
     assert c["trusted_state_after"] == c["trusted_state_before"]
     assert c["cache_hash_after"] == c["cache_hash_before"]
 
     dialogue_d = client.create_thread("Emergency after active event")
     seed_event = _turn(client, dialogue_d, "What events are happening this weekend?")
-    assert seed_event["mode"] == "structured_events"
+    assert seed_event["mode"] == ("model_led_events" if authoritative else "structured_events")
     # Force an active event into trusted state for the emergency precedence check.
     from conversation_state import ActiveEntity
 
@@ -265,8 +291,11 @@ def _run_dialogues(base_url: str) -> None:
         before_emergency.retrieval_cache
     )
     followup = _turn(client, dialogue_d, "Where is it?")
-    assert followup["mode"] in {"sql", "event_detail", "structured"}
-    assert followup["model_name"] is None
+    assert followup["mode"] in {
+        "sql", "event_detail", "structured", "model_led_events",
+    }
+    if not authoritative:
+        assert followup["model_name"] is None
     assert (
         followup["trusted_state_after"]["active_entity"]["id"] == "435"
         or "Virtual" in followup["answer"]
@@ -322,10 +351,14 @@ def _run_dialogues(base_url: str) -> None:
     json_state.pop("last_substantive_message_id", None)
     sse_state.pop("last_substantive_message_id", None)
     assert json_state == sse_state
-    assert json_turn["query_plan"] == sse_turn["query_plan"]
     assert json_turn["cache_signature_after"] == sse_turn["cache_signature_after"]
-    assert json_turn["mode"] == sse_turn["mode"] == "structured_events"
-    assert json_turn["model_name"] is None and sse_turn["model_name"] is None
+    if authoritative:
+        assert json_turn["mode"] == sse_turn["mode"] == "model_led_events"
+        assert json_turn["llm_calls"] == sse_turn["llm_calls"] == 1
+    else:
+        assert json_turn["query_plan"] == sse_turn["query_plan"]
+        assert json_turn["mode"] == sse_turn["mode"] == "structured_events"
+        assert json_turn["model_name"] is None and sse_turn["model_name"] is None
 
     # JSON/SSE emergency and breathing false-positive parity.
     for message, expect_emergency in (
@@ -349,7 +382,10 @@ def _run_dialogues(base_url: str) -> None:
         return requests.post(
             f"{base_url.rstrip('/')}/conversations/{race_thread}/messages",
             headers=client.headers(),
-            json={"message": "What events are happening this weekend?"},
+            json={
+                "message": "What events are happening this weekend?",
+                "client_turn_id": str(uuid.uuid4()),
+            },
             timeout=30,
         ).status_code
 
@@ -358,7 +394,8 @@ def _run_dialogues(base_url: str) -> None:
     assert statuses == [201, 409], statuses
     race_state = _read_live_state(race_thread)
     assert race_state.conversation_state.active_topic is CanonicalTopic.EVENTS
-    assert _cache_signature(race_state) is not None
+    if not authoritative:
+        assert _cache_signature(race_state) is not None
 
     warm_thread = client.create_thread("State-aware event performance")
     _turn(client, warm_thread, "What events are happening this weekend?")
@@ -368,7 +405,7 @@ def _run_dialogues(base_url: str) -> None:
     ]
     p90 = sorted(latencies)[int(len(latencies) * 0.9) - 1]
     print(json.dumps({"warm_event_p50_ms": statistics.median(latencies), "warm_event_p90_ms": p90}))
-    assert p90 < 500
+    assert p90 < (3500 if authoritative else 500)
 
 
 def main() -> int:

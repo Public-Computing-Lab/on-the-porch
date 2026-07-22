@@ -130,6 +130,32 @@ def validate_launch_runtime(
     if _truthy(source.get("CHAT_VECTOR_WRITES_ENABLED"), "false"):
         errors.append("CHAT_VECTOR_WRITES_ENABLED must be false in production")
 
+    model_led_raw = (
+        source.get("MODEL_LED_ORCHESTRATOR_MODE") or "off"
+    ).strip().lower()
+    model_led_aliases = {
+        "legacy": "off",
+        "offline": "shadow_or_offline_replay",
+        "shadow": "shadow_or_offline_replay",
+    }
+    model_led_mode = model_led_aliases.get(model_led_raw, model_led_raw)
+    if model_led_mode not in {
+        "off",
+        "shadow_or_offline_replay",
+        "isolated_canary",
+        "authoritative",
+    }:
+        errors.append(
+            "MODEL_LED_ORCHESTRATOR_MODE must be off/legacy, "
+            "shadow_or_offline_replay, isolated_canary, or authoritative"
+        )
+    elif model_led_mode == "authoritative" and not (
+        source.get("GEMINI_API_KEY") or ""
+    ).strip():
+        errors.append(
+            "MODEL_LED_ORCHESTRATOR_MODE=authoritative needs a configured planner provider"
+        )
+
     civic_hybrid_mode = (source.get("CIVIC_311_HYBRID_MODE") or "auto").strip().lower()
     if civic_hybrid_mode not in {"disabled", "auto", "required"}:
         errors.append("CIVIC_311_HYBRID_MODE must be disabled, auto, or required")

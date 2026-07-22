@@ -316,22 +316,31 @@ GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 25)
 GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 30)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 2)
 
-# Model-led orchestrator. The normal resident runtime remains off by default;
-# Phase 2A permits only explicit offline replay or an isolated non-production canary.
-MODEL_LED_ORCHESTRATOR_MODE = _env("MODEL_LED_ORCHESTRATOR_MODE", "off").strip().lower()
+# Model-led orchestrator deployment policy. ``off`` is the explicit legacy rollback,
+# ``isolated_canary`` requires the non-production canary header, and
+# ``authoritative`` gives ordinary resident turns the first semantic opportunity.
+_MODEL_LED_ORCHESTRATOR_MODE_RAW = _env(
+    "MODEL_LED_ORCHESTRATOR_MODE",
+    "off",
+).strip().lower()
 _MODEL_LED_MODE_ALIASES = {
     "offline": "shadow_or_offline_replay",
     "shadow": "shadow_or_offline_replay",
+    "legacy": "off",
 }
 MODEL_LED_ORCHESTRATOR_MODE = _MODEL_LED_MODE_ALIASES.get(
-    MODEL_LED_ORCHESTRATOR_MODE,
-    MODEL_LED_ORCHESTRATOR_MODE,
+    _MODEL_LED_ORCHESTRATOR_MODE_RAW,
+    _MODEL_LED_ORCHESTRATOR_MODE_RAW,
 )
-if MODEL_LED_ORCHESTRATOR_MODE not in {
+MODEL_LED_ORCHESTRATOR_MODE_VALID = MODEL_LED_ORCHESTRATOR_MODE in {
     "off",
     "shadow_or_offline_replay",
     "isolated_canary",
-}:
+    "authoritative",
+}
+if not MODEL_LED_ORCHESTRATOR_MODE_VALID:
+    # Fail closed to the legacy path in development. Production launch validation
+    # rejects the invalid raw value rather than serving with an ambiguous policy.
     MODEL_LED_ORCHESTRATOR_MODE = "off"
 MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS = max(
     0.25,
@@ -771,10 +780,12 @@ class Config:
     GEMINI_FALLBACK_MODEL = GEMINI_FALLBACK_MODEL
     GEMINI_API_KEY = GEMINI_API_KEY
     MODEL_LED_ORCHESTRATOR_MODE = MODEL_LED_ORCHESTRATOR_MODE
+    MODEL_LED_ORCHESTRATOR_MODE_VALID = MODEL_LED_ORCHESTRATOR_MODE_VALID
     MODEL_LED_CANARY_HEADER_NAME = MODEL_LED_CANARY_HEADER_NAME
     MODEL_LED_CANARY_HEADER_VALUE = MODEL_LED_CANARY_HEADER_VALUE
     STREAMING_ENABLED = STREAMING_ENABLED
     SECRET_KEY = SECRET_KEY
+    TOKEN_PEPPER = TOKEN_PEPPER
     SESSION_COOKIE_SECURE = SESSION_COOKIE_SECURE
     AUTH_SESSION_COOKIE_NAME = AUTH_SESSION_COOKIE_NAME
     AUTH_CSRF_COOKIE_NAME = AUTH_CSRF_COOKIE_NAME

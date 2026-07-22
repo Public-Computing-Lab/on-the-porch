@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict
 
@@ -146,7 +147,7 @@ class _GuestClient:
         return self.requests.post(
             f"{self.base_url}/conversations/{thread_id}/messages",
             headers=self.headers(),
-            json={"message": message},
+            json={"message": message, "client_turn_id": str(uuid.uuid4())},
             timeout=45,
         )
 
@@ -154,7 +155,7 @@ class _GuestClient:
         response = self.requests.post(
             f"{self.base_url}/conversations/{thread_id}/messages/stream",
             headers=self.headers(),
-            json={"message": message},
+            json={"message": message, "client_turn_id": str(uuid.uuid4())},
             stream=True,
             timeout=45,
         )

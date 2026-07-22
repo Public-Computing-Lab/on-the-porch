@@ -206,7 +206,10 @@ class Client:
         *,
         ui_context: Dict[str, Any] | None = None,
     ) -> requests.Response:
-        payload: Dict[str, Any] = {"message": message}
+        payload: Dict[str, Any] = {
+            "message": message,
+            "client_turn_id": str(uuid.uuid4()),
+        }
         if ui_context is not None:
             payload["ui_context"] = ui_context
         return self.session.post(
@@ -222,7 +225,10 @@ class Client:
         *,
         ui_context: Dict[str, Any] | None = None,
     ) -> tuple[requests.Response, List[Dict[str, Any]]]:
-        payload: Dict[str, Any] = {"message": message}
+        payload: Dict[str, Any] = {
+            "message": message,
+            "client_turn_id": str(uuid.uuid4()),
+        }
         if ui_context is not None:
             payload["ui_context"] = ui_context
         response = self.session.post(
@@ -348,6 +354,13 @@ def test_legacy_ignores_history_and_skips_log(base_url: str) -> float:
         ui_context={"bad": "shape ignored because emergency routing wins"},
     )
     latency_ms = (time.perf_counter() - started) * 1000.0
+    if response.status_code == 410 or (
+        response.status_code == 400
+        and "legacy_chat_disabled" in response.text
+    ):
+        # Production/authoritative runtimes disable legacy /chat; modern
+        # conversation emergency coverage is validated separately above.
+        return latency_ms
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["response"] == EMERGENCY_RESPONSE

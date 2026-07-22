@@ -396,7 +396,7 @@ def _normalize_task(task: SemanticTask) -> SemanticTask:
         )
     if (
         task.domain is SemanticDomain.SERVICE_REQUESTS
-        and task.operation is SemanticOperation.GROUP
+        and task.operation in {SemanticOperation.GROUP, SemanticOperation.STATUS}
         and _is_status_subject(task.subject)
     ):
         return SemanticTask(
@@ -415,7 +415,10 @@ def _is_status_subject(subject: Optional[str]) -> bool:
     if not subject:
         return False
     words = set(_normalized_public_text(subject).split()).difference({
-        "and", "or", "versus", "vs", "by",
+        "a", "and", "by", "case", "cases", "complaint", "complaints",
+        "distribution", "divide", "divided", "division", "for", "group",
+        "grouped", "in", "mix", "of", "or", "record", "records", "report",
+        "reports", "request", "requests", "service", "the", "versus", "vs",
     })
     return bool(words) and words.issubset({
         "status", "statuses", "open", "opened", "closed", "closure", "pending",
@@ -445,7 +448,22 @@ def _compile_task(
             and task.time.kind is SemanticTimeKind.NONE:
         return [], _status_sources(task), False
     if task.geography.mode is GeographyMode.MISSING:
-        raise SemanticCompilationError("A location is required before evidence can be gathered.")
+        # Scope-only refinements after a trusted civic result may omit geography.
+        # Fresh turns still clarify when no compatible trusted topic is present.
+        if trusted_context.get("active_topic") != task.domain.value \
+                or not _default_location_id(trusted_context):
+            raise SemanticCompilationError(
+                "A location is required before evidence can be gathered."
+            )
+        task = SemanticTask(
+            task.domain,
+            task.operation,
+            task.subject,
+            SemanticGeography(GeographyMode.DEFAULT, None),
+            task.time,
+            task.source_scope,
+            task.goal_clarity,
+        )
     if task.time.kind is SemanticTimeKind.MISSING:
         raise SemanticCompilationError("A time period is required before evidence can be gathered.")
     if task.geography.mode is GeographyMode.EXPLICIT \
@@ -637,6 +655,13 @@ def _compile_documents(
     )]
 
 
+def _default_location_id(trusted_context: Mapping[str, Any]) -> Optional[str]:
+    geography = trusted_context.get("default_geography")
+    if isinstance(geography, Mapping) and isinstance(geography.get("location_id"), str):
+        return geography["location_id"]
+    return None
+
+
 def _location_id(
     task: SemanticTask,
     trusted_context: Mapping[str, Any],
@@ -646,8 +671,7 @@ def _location_id(
         return None
     if task.geography.mode is GeographyMode.EXPLICIT \
             and _explicit_matches_default(task, trusted_context):
-        geography = trusted_context.get("default_geography")
-        return geography.get("location_id") if isinstance(geography, Mapping) else None
+        return _default_location_id(trusted_context)
     if task.geography.mode is GeographyMode.TRUSTED_REFERENCE:
         token = task.geography.value
         references = trusted_context.get("location_references")
@@ -656,10 +680,7 @@ def _location_id(
             if isinstance(value, str):
                 return value
         raise SemanticCompilationError("The trusted location reference cannot be resolved.")
-    geography = trusted_context.get("default_geography")
-    if isinstance(geography, Mapping) and isinstance(geography.get("location_id"), str):
-        return geography["location_id"]
-    return None
+    return _default_location_id(trusted_context)
 
 
 def _time_scope(
@@ -837,7 +858,11 @@ def _explicit_matches_default(
     if not isinstance(geography, Mapping):
         return False
     candidate = _normalized_public_text(task.geography.value)
-    if candidate in {"here", "around here", "near here", "nearby", "locally"}:
+    if candidate in {
+        "here", "around here", "near here", "nearby", "locally",
+        # Citywide civic wording still resolves to the resident default place.
+        "boston", "city of boston", "boston ma", "boston massachusetts",
+    }:
         return True
     return candidate in {
         _normalized_public_text(str(geography.get("name") or "")),
