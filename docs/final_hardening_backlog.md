@@ -4,8 +4,10 @@ Single backlog for nonblocking polish after Phase 3. Do not scatter TODO files.
 
 ## Semantic edge cases
 - Rare paraphrases that still ask for an unnecessary time period after a broad safety overview.
+- Occasional planner `DOMAIN_ONLY` / `USER_MEANING` clarifications on broad “safety concerns” or “summarize recent crime” wording; clearer crime-category asks already succeed.
 - Multi-entity names that partially overlap multiple profiles and need better disambiguation ranking.
 - Cross-domain asks that currently clarify “which domain first” instead of combining evidence when both are clearly requested.
+- Crime GROUP currently surfaces many `Unknown` offense labels when `offense_code_group` is sparse; reuse the richer prepared-SQL offense expression.
 
 ## UI polish
 - Final citation chip visual design and accessibility contrast pass.
