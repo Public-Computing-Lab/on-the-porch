@@ -396,33 +396,41 @@ def _normalize_semantic_plan(
 
 
 def _normalize_task(task: SemanticTask) -> SemanticTask:
-    if (
-        task.domain is SemanticDomain.CRIME
-        and task.goal_clarity is SemanticGoalClarity.DOMAIN_ONLY
-        and task.operation in {
+    if task.domain is SemanticDomain.CRIME:
+        operation = task.operation
+        # Null-subject CRIME SUMMARIZE/EXPLAIN is an overview → GROUP breakdown.
+        if (
+            operation in {SemanticOperation.SUMMARIZE, SemanticOperation.EXPLAIN}
+            and (task.subject is None or _subject_id(task.subject, task.domain) is None)
+        ):
+            operation = SemanticOperation.GROUP
+        clarity = task.goal_clarity
+        time = task.time
+        if clarity is SemanticGoalClarity.DOMAIN_ONLY and operation in {
             SemanticOperation.SUMMARIZE,
             SemanticOperation.GROUP,
             SemanticOperation.FIND,
             SemanticOperation.COUNT,
             SemanticOperation.EXPLAIN,
             SemanticOperation.COMPARE,
-        }
-    ):
-        # Broad public-safety overviews are executable evidence goals. Domain-only
-        # clarity must not block the default calendar-month overview path.
-        return SemanticTask(
-            task.domain,
-            task.operation,
-            task.subject,
-            task.geography,
-            (
-                SemanticTime(SemanticTimeKind.NONE, None)
-                if task.time.kind is SemanticTimeKind.MISSING
-                else task.time
-            ),
-            task.source_scope,
-            SemanticGoalClarity.CLEAR,
-        )
+        }:
+            clarity = SemanticGoalClarity.CLEAR
+            if time.kind is SemanticTimeKind.MISSING:
+                time = SemanticTime(SemanticTimeKind.NONE, None)
+        if (
+            operation != task.operation
+            or clarity != task.goal_clarity
+            or time != task.time
+        ):
+            return SemanticTask(
+                task.domain,
+                operation,
+                task.subject,
+                task.geography,
+                time,
+                task.source_scope,
+                clarity,
+            )
     if (
         task.domain is SemanticDomain.SERVICE_REQUESTS
         and task.operation in {SemanticOperation.GROUP, SemanticOperation.STATUS}
