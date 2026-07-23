@@ -676,6 +676,53 @@ def _validate_previous_result_summary(value: Any) -> Dict[str, Any]:
         if through is not None:
             date.fromisoformat(str(through))
         return copied
+    if kind == "DOCUMENT_EVIDENCE":
+        allowed = {
+            "kind",
+            "status",
+            "subject",
+            "fiscal_year",
+            "source_scope",
+            "geography_label",
+            "passage_count",
+            "evidence_status",
+        }
+        if not set(copied).issubset(allowed):
+            raise ValueError("document result summary has invalid fields")
+        if copied.get("status") not in {
+            "EVIDENCE_FOUND",
+            "NO_EVIDENCE",
+            "SOURCE_UNAVAILABLE",
+            "PERIOD_UNAVAILABLE",
+        }:
+            raise ValueError("document result summary has invalid status")
+        subject = copied.get("subject")
+        if not isinstance(subject, str) or not subject.strip() or len(subject) > 160:
+            raise ValueError("document result summary has invalid subject")
+        copied["subject"] = " ".join(subject.split())[:160]
+        for key, maximum in (("fiscal_year", 8), ("source_scope", 32), ("geography_label", 96), ("evidence_status", 48)):
+            item = copied.get(key)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or len(item) > maximum:
+                raise ValueError("document result summary has invalid text")
+        count = copied.get("passage_count")
+        if count is not None and (isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100):
+            raise ValueError("document result summary has invalid count")
+        return copied
+    if kind == "ENTITY_PROFILE":
+        allowed = {"kind", "status", "entity_id", "display_name"}
+        if not set(copied).issubset(allowed):
+            raise ValueError("entity result summary has invalid fields")
+        if copied.get("status") not in {"RESOLVED", "AMBIGUOUS", "UNRESOLVED"}:
+            raise ValueError("entity result summary has invalid status")
+        for key, maximum in (("entity_id", 96), ("display_name", 160)):
+            item = copied.get(key)
+            if item is None:
+                continue
+            if not isinstance(item, str) or not item or len(item) > maximum:
+                raise ValueError("entity result summary has invalid text")
+        return copied
     raise ValueError("previous result summary has an unknown kind")
 
 

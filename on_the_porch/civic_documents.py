@@ -411,7 +411,12 @@ def _no_relevant_evidence_result(
     constraints: Any,
     reason: str,
 ) -> DocumentResult:
-    answer = format_no_evidence_answer(constraints, reason)
+    subject_hint = None
+    if hasattr(constraints, "raw_query"):
+        subject_hint = None
+    if isinstance(plan.query, str) and plan.query.strip():
+        subject_hint = plan.query.strip()
+    answer = format_no_evidence_answer(constraints, reason, subject_hint=subject_hint)
     bundle = EvidenceBundle(
         question_scope={
             "domain": "DOCUMENTS",

@@ -42,10 +42,10 @@ _MEETING_TERMS = (
 
 _HOUSING_POLICY_TERMS = (
     "housing policy", "affordable housing", "anti-displacement", "inclusionary",
-    "development policy",
+    "development policy", "housing concern", "housing concerns",
 )
 # Short tokens need word boundaries ("rent" must not match "currently").
-_HOUSING_POLICY_TOKEN_RE = re.compile(r"\b(?:rent|rents|rental)\b")
+_HOUSING_POLICY_TOKEN_RE = re.compile(r"\b(?:rent|rents|rental|housing)\b")
 
 _OFFICIAL_BUDGET_PUBLISHER_HINTS = (
     "city of boston", "mayor", "omb", "office of budget", "budget office",
@@ -90,7 +90,14 @@ class PassageRelevance:
 
 def extract_document_constraints(query: str) -> DocumentConstraints:
     raw = str(query or "").strip()
-    lowered = raw.casefold()
+    # Topic binders are subject carriers for follow-ups; exclude them from topic
+    # detection so prior subject text cannot reintroduce an old source family.
+    content_lines = []
+    for line in raw.splitlines():
+        if line.casefold().startswith("topic:"):
+            continue
+        content_lines.append(line)
+    lowered = "\n".join(content_lines).casefold() if content_lines else raw.casefold()
     tokens = tuple(
         token for token in re.findall(r"[a-z0-9']+", lowered)
         if token not in _STOPWORDS and len(token) > 1
@@ -115,7 +122,7 @@ def extract_document_constraints(query: str) -> DocumentConstraints:
 
     if any(term in lowered for term in _BUDGET_TERMS) or "budget" in tokens:
         topics.append("budget")
-    if re.search(r"\bmayor(?:'s|s)?\b", lowered) and "budget" in topics:
+    if re.search(r"\bmayor(?:'s|s|al)?\b", lowered) and "budget" in topics:
         topics.append("mayoral_budget")
         entities.append("city_of_boston_mayor")
         require_official_budget = True
@@ -360,7 +367,97 @@ def validate_answerable_bundle(
     return True, ""
 
 
-def format_no_evidence_answer(constraints: DocumentConstraints, reason: str) -> str:
+def canonical_document_subject(constraints: DocumentConstraints) -> Optional[str]:
+    """Resident-facing subject label for trusted dialogue state (not a source id)."""
+    if "mayoral_budget" in constraints.topics or constraints.require_official_budget:
+        if constraints.fiscal_years:
+            return f"Boston mayoral budget FY{constraints.fiscal_years[0]}"
+        return "Boston mayoral budget"
+    if "budget" in constraints.topics:
+        if constraints.fiscal_years:
+            return f"Boston budget FY{constraints.fiscal_years[0]}"
+        return "Boston budget"
+    if "zoning" in constraints.topics:
+        return "Boston zoning"
+    if "housing_policy" in constraints.topics:
+        return "Boston housing policy"
+    if "meeting" in constraints.topics:
+        return "neighborhood meeting discussion"
+    # Do not invent a subject from leftover stopword-ish query tokens.
+    return None
+
+
+def message_needs_prior_document_subject(message: str) -> bool:
+    lowered = str(message or "").casefold()
+    if re.search(
+        r"\b(this|that|it|the issue|the proposal|the policy|the budget|"
+        r"the organization|the event|the report|the same topic)\b",
+        lowered,
+    ):
+        return True
+    # Source-family switches without restating the subject.
+    if re.search(
+        r"\b(news|meeting|transcript|official (?:source|policy|document)|"
+        r"why don'?t you have|latest year|another (?:source|year))\b",
+        lowered,
+    ) and not re.search(r"\b(budget|zoning|housing|mayor|eversource)\b", lowered):
+        return True
+    return False
+
+
+def followup_constraint_query(
+    resident_message: str,
+    *,
+    prior_subject: Optional[str],
+) -> str:
+    """Blend a referential follow-up with the prior trusted subject for constraint extraction."""
+    message = str(resident_message or "").strip()
+    subject = str(prior_subject or "").strip()
+    if not subject:
+        return message
+    if not message_needs_prior_document_subject(message):
+        return message
+    # Keep the subject in normal prose so topic/year extractors still fire, while
+    # avoiding a structured Topic: line that could reintroduce old source-family words.
+    if subject.casefold() in message.casefold():
+        return message
+    return f"{message} about {subject}"
+
+
+def _message_needs_prior_document_subject(message: str) -> bool:
+    return message_needs_prior_document_subject(message)
+
+
+def format_no_evidence_answer(
+    constraints: DocumentConstraints,
+    reason: str,
+    *,
+    subject_hint: Optional[str] = None,
+) -> str:
+    subject = canonical_document_subject(constraints) or (
+        str(subject_hint).strip() if subject_hint else None
+    )
+    if subject and subject.casefold() in {"dorchester civic information", "this", "that", "it"}:
+        subject = canonical_document_subject(constraints)
+    # Recover an explicit follow-up subject binder when present.
+    if not subject:
+        about = re.search(r"\babout\s+(.+)$", constraints.raw_query, flags=re.IGNORECASE | re.DOTALL)
+        if about:
+            candidate = " ".join(about.group(1).split()).strip(" .")
+            if candidate and candidate.casefold() not in {"this", "that", "it"}:
+                subject = candidate[:160]
+    if "news" in constraints.topics:
+        topic = subject or "that topic"
+        return (
+            f"I don’t currently have recent news coverage about {topic} "
+            f"in my available news sources."
+        )
+    if "meeting" in constraints.topics and not constraints.require_official_budget:
+        topic = subject or "that topic"
+        return (
+            f"I couldn’t find a matching neighborhood meeting transcript about {topic} "
+            f"in the current evidence index."
+        )
     if constraints.require_official_budget:
         if constraints.fiscal_years:
             year_bit = ", ".join(f"FY{year}" for year in constraints.fiscal_years)
@@ -397,11 +494,6 @@ def format_no_evidence_answer(constraints: DocumentConstraints, reason: str) -> 
     if "zoning" in constraints.topics:
         return (
             "I couldn’t find a matching zoning reference for that question in the current evidence index."
-        )
-    if "meeting" in constraints.topics:
-        return (
-            "I couldn’t find a matching neighborhood meeting transcript for that question "
-            "in the current evidence index."
         )
     return (
         "I don’t currently have enough relevant source material to answer that reliably. "
@@ -493,10 +585,13 @@ __all__ = [
     "PassageRelevance",
     "REQUESTED_PERIOD_UNAVAILABLE",
     "SOURCE_SCOPE_UNAVAILABLE",
+    "canonical_document_subject",
     "extract_document_constraints",
     "filter_relevant_passages",
+    "followup_constraint_query",
     "format_no_evidence_answer",
     "format_resident_document_answer",
+    "message_needs_prior_document_subject",
     "score_passage_relevance",
     "strip_internal_retrieval_language",
     "validate_answerable_bundle",

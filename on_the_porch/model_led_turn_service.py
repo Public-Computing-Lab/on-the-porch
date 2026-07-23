@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -22,9 +23,15 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, T
 from answering_kernel import EvidenceBundle, EvidenceStatus, GlobalDeadline
 from civic_311 import build_compiled_311_plan, execute_311_plan
 from civic_crime import build_compiled_crime_plan, execute_crime_plan
-from civic_documents import build_compiled_document_plan, execute_document_plan
+from civic_documents import DocumentPlan, build_compiled_document_plan, execute_document_plan
 from civic_entities import looks_like_entity_question, resolve_entity
-from document_relevance import strip_internal_retrieval_language
+from document_relevance import (
+    canonical_document_subject,
+    extract_document_constraints,
+    followup_constraint_query,
+    message_needs_prior_document_subject,
+    strip_internal_retrieval_language,
+)
 from grounded_synthesis import SynthesisGenerate, synthesize_grounded_answer
 from civic_tool_catalog import (
     RegisteredToolRequest,
@@ -82,6 +89,7 @@ from semantic_planner import (
     PlannerAction,
     SemanticDomain,
     SemanticGeography,
+    SemanticGoalClarity,
     SemanticOperation,
     SemanticPlan,
     SemanticTask,
@@ -359,12 +367,21 @@ class ModelLedTurnService:
                 **common,
             )
         if guarded.disposition is GuardedDisposition.NEEDS_CLARIFICATION:
-            return self._non_tool_result(
-                status=TurnServiceStatus.CLARIFICATION,
-                answer=guarded.resident_response,
-                mode="model_led_clarification",
-                **common,
+            recovered = _recover_document_followup_from_clarification(
+                request=request,
+                plan=plan,
+                context=context,
+                tokens=tokens,
             )
+            if recovered is not None:
+                plan, guarded, action = recovered
+            else:
+                return self._non_tool_result(
+                    status=TurnServiceStatus.CLARIFICATION,
+                    answer=guarded.resident_response,
+                    mode="model_led_clarification",
+                    **common,
+                )
         if action is PlannerAction.RESPOND_DIRECTLY:
             return self._non_tool_result(
                 status=TurnServiceStatus.COMPLETED,
@@ -1015,24 +1032,33 @@ class ModelLedTurnService:
         if deadline.expired(reserve_for_persistence=True):
             raise TimeoutError("document capability deadline exhausted")
         subject = plan.tasks[0].subject if plan.tasks else None
-        if looks_like_entity_question(request.message, subject):
+        source_followup = _message_requests_document_source_family(request.message)
+        if (
+            looks_like_entity_question(request.message, subject)
+            and not source_followup
+        ):
             entity = resolve_entity(subject or request.message)
             if entity.status in {"RESOLVED", "AMBIGUOUS"}:
                 counts = {"resolve_entity": 1}
                 if resolver_count:
                     counts["resolve_location"] = resolver_count
+                display_name = (
+                    entity.profile.display_name if entity.profile is not None else None
+                ) or (subject or "the organization")
+                # Persist as DOCUMENT_EVIDENCE so anaphoric source-family follow-ups
+                # can reuse the same subject binder as policy/news/meeting turns.
                 dialogue = _dialogue_context_after_domain(
                     request.state_envelope.dialogue_context,
                     domain="DOCUMENTS",
                     capability="EXPLAIN_ENTITY",
                     summary={
-                        "kind": "ENTITY_PROFILE",
-                        "entity_id": (
-                            entity.profile.stable_id if entity.profile is not None else None
-                        ),
-                        "display_name": (
-                            entity.profile.display_name if entity.profile is not None else None
-                        ),
+                        "kind": "DOCUMENT_EVIDENCE",
+                        "status": "EVIDENCE_FOUND",
+                        "subject": str(display_name)[:160],
+                        "source_scope": "ANY",
+                        "geography_label": "Boston",
+                        "passage_count": 1,
+                        "evidence_status": "COMPLETE",
                     },
                 )
                 return TurnResult(
@@ -1070,9 +1096,77 @@ class ModelLedTurnService:
                     provider_model=provider_model,
                 )
 
-        document_plan = build_compiled_document_plan(arguments=tool.arguments)
-        civic = execute_document_plan(
+        prior_document = _previous_document_summary(request.state_envelope.dialogue_context)
+        if not prior_document:
+            prior_entity = _previous_entity_summary(request.state_envelope.dialogue_context)
+            if prior_entity and prior_entity.get("display_name"):
+                prior_document = {
+                    "subject": prior_entity["display_name"],
+                    "status": prior_entity.get("status") or "RESOLVED",
+                    "source_scope": "ANY",
+                }
+        ambiguous = _ambiguous_document_referents(
             request.message,
+            dialogue_context=request.state_envelope.dialogue_context,
+            conversation_state=request.state_envelope.conversation_state,
+        )
+        if ambiguous is not None:
+            return TurnResult(
+                status=TurnServiceStatus.CLARIFICATION,
+                answer=ambiguous,
+                mode="model_led_clarification",
+                sources=(),
+                planner_action=PlannerAction.ASK_CLARIFICATION.value,
+                guarded_disposition=guarded.disposition.value,
+                reason_code="AMBIGUOUS_DOCUMENT_REFERENCE",
+                compiled_tools=(),
+                evidence={},
+                state_transition=ProposedTransition.preserve(
+                    request.state_envelope.conversation_state,
+                ),
+                next_civic_311_context=request.state_envelope.civic_311_context,
+                update_civic_311_context=False,
+                next_dialogue_context=request.state_envelope.dialogue_context,
+                update_dialogue_context=False,
+                resolved_entity=None,
+                planner_call_count=planner_calls,
+                synthesis_call_count=0,
+                tool_call_count=0,
+                tool_execution_counts={},
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                provider_model=provider_model,
+            )
+
+        effective_message = followup_constraint_query(
+            request.message,
+            prior_subject=(prior_document or {}).get("subject"),
+        )
+        document_plan = build_compiled_document_plan(arguments=tool.arguments)
+        # Prefer trusted prior subject over anaphoric planner subjects for retrieval.
+        bound_subject = _bound_document_subject(
+            planner_subject=document_plan.query,
+            resident_message=request.message,
+            prior_document=prior_document,
+            trusted_context=context,
+        )
+        override_corpora = _document_corpora_for_message(request.message)
+        plan_kwargs = {
+            "query": (bound_subject or document_plan.query)[:500],
+            "corpora": override_corpora or document_plan.corpora,
+            "location_id": document_plan.location_id,
+            "time_scope": document_plan.time_scope,
+            "source_types": document_plan.source_types,
+            "limit": document_plan.limit,
+        }
+        if override_corpora:
+            # Keep source_types aligned with the resident-requested family.
+            plan_kwargs["source_types"] = ()
+        if (
+            bound_subject and bound_subject != document_plan.query
+        ) or override_corpora:
+            document_plan = DocumentPlan(**plan_kwargs)
+        civic = execute_document_plan(
+            effective_message,
             plan=document_plan,
             deadline=deadline,
             connection_factory=self.connection_factory,
@@ -1108,18 +1202,59 @@ class ModelLedTurnService:
                 deadline=deadline,
                 evidence_bundle=civic.evidence,
             )
-        degraded = civic.evidence.evidence_status in {
-            EvidenceStatus.DEPENDENCY_UNAVAILABLE,
+        degraded = civic.evidence.evidence_status is EvidenceStatus.DEPENDENCY_UNAVAILABLE
+        no_evidence = civic.evidence.evidence_status in {
             EvidenceStatus.INSUFFICIENT_EVIDENCE,
+            EvidenceStatus.NO_MATCHING_RECORDS,
+            EvidenceStatus.OUTSIDE_COVERAGE,
         }
+        constraints_raw = (civic.evidence.question_scope or {}).get("constraints") or {}
+        if isinstance(constraints_raw, Mapping) and constraints_raw.get("raw_query"):
+            constraints = extract_document_constraints(str(constraints_raw.get("raw_query")))
+        else:
+            constraints = extract_document_constraints(effective_message)
+        subject_label = (
+            canonical_document_subject(constraints)
+            or (prior_document or {}).get("subject")
+            or document_plan.query
+            or "civic documents"
+        )
+        rejection = None
+        if isinstance(civic.evidence.facts, Mapping):
+            rejection = civic.evidence.facts.get("relevance_rejection")
+        if civic.civic_tool_result.records:
+            doc_status = "EVIDENCE_FOUND"
+        elif rejection == "REQUESTED_PERIOD_UNAVAILABLE":
+            doc_status = "PERIOD_UNAVAILABLE"
+        elif rejection == "SOURCE_SCOPE_UNAVAILABLE":
+            doc_status = "SOURCE_UNAVAILABLE"
+        else:
+            doc_status = "NO_EVIDENCE"
+        source_scope = "ANY"
+        if document_plan.source_types:
+            source_scope = str(document_plan.source_types[0])
+        elif document_plan.corpora == ("NEWS",):
+            source_scope = "NEWS"
+        elif document_plan.corpora == ("TRANSCRIPT",):
+            source_scope = "MEETING_TRANSCRIPT"
+        elif document_plan.corpora == ("POLICY",):
+            source_scope = "OFFICIAL"
+        fiscal_year = constraints.fiscal_years[0] if constraints.fiscal_years else (
+            (prior_document or {}).get("fiscal_year")
+        )
         dialogue = _dialogue_context_after_domain(
             request.state_envelope.dialogue_context,
             domain="DOCUMENTS",
             capability="SEARCH_DOCUMENTS",
             summary={
                 "kind": "DOCUMENT_EVIDENCE",
-                "passage_count": civic.evidence.facts.get("passage_count"),
-                "query": document_plan.query,
+                "status": doc_status,
+                "subject": str(subject_label)[:160],
+                "fiscal_year": str(fiscal_year) if fiscal_year else None,
+                "source_scope": source_scope[:32],
+                "geography_label": "Boston",
+                "passage_count": int(civic.evidence.facts.get("passage_count") or 0),
+                "evidence_status": civic.evidence.evidence_status.value,
             },
         )
         counts = {"search_documents": 1}
@@ -1142,7 +1277,11 @@ class ModelLedTurnService:
             ):
                 answer = strip_internal_retrieval_language(civic.answer)
         return TurnResult(
-            status=TurnServiceStatus.DEGRADED if degraded else TurnServiceStatus.COMPLETED,
+            status=(
+                TurnServiceStatus.DEGRADED
+                if degraded
+                else TurnServiceStatus.COMPLETED
+            ),
             answer=answer,
             mode="model_led_documents",
             sources=sources,
@@ -1170,6 +1309,11 @@ class ModelLedTurnService:
             diagnostics={
                 "evidence_status": civic.evidence.evidence_status.value,
                 "synthesis_valid": synthesis.valid,
+                "document_completion": (
+                    "DEPENDENCY_UNAVAILABLE"
+                    if degraded
+                    else ("COMPLETED_NO_EVIDENCE" if no_evidence else "COMPLETED")
+                ),
             },
         )
 
@@ -1655,7 +1799,16 @@ def _trusted_planner_context(
             "title": "selected event",
         }
     summary = _trusted_summary_text(envelope.dialogue_context)
-    if summary:
+    document = _previous_document_summary(envelope.dialogue_context)
+    # Prefer compact previous_document over a verbose summary token so the
+    # planner payload stays under its byte bound.
+    if document and document.get("subject"):
+        context["previous_document"] = {
+            "subject": document.get("subject"),
+            "fiscal_year": document.get("fiscal_year"),
+            "status": document.get("status"),
+        }
+    elif summary:
         token = "summary:previous"
         tokens.append(token)
         context["previous_summary"] = {"token": token, "text": summary}
@@ -1685,6 +1838,18 @@ def _trusted_summary_text(value: Optional[Mapping[str, Any]]) -> Optional[str]:
             f"{summary.get('request_label') or 'service requests'} in "
             f"{summary.get('geography_label') or 'Dorchester'}."
         )
+    if summary.get("kind") == "DOCUMENT_EVIDENCE" and isinstance(summary.get("subject"), str):
+        status = summary.get("status") or "NO_EVIDENCE"
+        year = summary.get("fiscal_year")
+        year_bit = f" for FY{year}" if year else ""
+        if status == "EVIDENCE_FOUND":
+            return f"The previous document lookup covered {summary['subject']}{year_bit}."
+        return (
+            f"The previous document lookup found no authoritative sources for "
+            f"{summary['subject']}{year_bit}."
+        )
+    if summary.get("kind") == "ENTITY_PROFILE" and isinstance(summary.get("display_name"), str):
+        return f"The previous entity lookup described {summary['display_name']}."
     return None
 
 
@@ -1911,7 +2076,6 @@ def _dialogue_context_after_domain(
     capability: str,
     summary: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    del summary  # Phase 3 keeps only allowlisted summary kinds in dialogue state.
     current = _dialogue_base(previous)
     dialogue_domain = {
         "CRIME_AND_SAFETY": "CRIME_AND_SAFETY",
@@ -1919,6 +2083,19 @@ def _dialogue_context_after_domain(
         "311": "311",
         "EVENTS": "EVENTS",
     }.get(domain, "GENERAL")
+    result_summary: Dict[str, Any] = {}
+    if isinstance(summary, Mapping) and summary.get("kind") in {
+        "DOCUMENT_EVIDENCE",
+        "ENTITY_PROFILE",
+        "EVENT_LIST",
+        "CIVIC_311",
+        "CIVIC_311_COUNT",
+    }:
+        result_summary = dict(summary)
+        # Drop null optional fields so schema validation stays strict.
+        result_summary = {
+            key: value for key, value in result_summary.items() if value is not None
+        }
     return validate_dialogue_context({
         **current,
         "previous_turn_kind": "FACTUAL_TOOL_QUERY",
@@ -1927,8 +2104,124 @@ def _dialogue_context_after_domain(
         "pending_clarification_type": None,
         "pending_clarification_domain": None,
         "canonical_parameters": {"capability": capability[:64]},
-        "previous_result_summary": {},
+        "previous_result_summary": result_summary,
     })
+
+
+def _previous_document_summary(value: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    context = validate_dialogue_context(value)
+    summary = context.get("previous_result_summary") or {}
+    if summary.get("kind") != "DOCUMENT_EVIDENCE":
+        return None
+    return dict(summary)
+
+
+def _previous_entity_summary(value: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    context = validate_dialogue_context(value)
+    summary = context.get("previous_result_summary") or {}
+    if summary.get("kind") != "ENTITY_PROFILE":
+        return None
+    return dict(summary)
+
+
+def _message_requests_document_source_family(message: str) -> bool:
+    lowered = str(message or "").casefold()
+    return bool(
+        re.search(
+            r"\b(news|meeting|transcript|discussed|official (?:source|policy|document)|"
+            r"community (?:discussion|concern))\b",
+            lowered,
+        )
+    )
+
+
+def _document_corpora_for_message(message: str) -> Optional[Tuple[str, ...]]:
+    lowered = str(message or "").casefold()
+    if re.search(r"\bnews\b", lowered):
+        return ("NEWS",)
+    if re.search(r"\b(meeting|transcript|discussed at)\b", lowered):
+        return ("TRANSCRIPT",)
+    if re.search(r"\bofficial (?:source|policy|document)\b", lowered):
+        return ("POLICY",)
+    if re.search(r"\bcommunity (?:discussion|concern|said)\b", lowered):
+        return ("COMMUNITY",)
+    return None
+
+
+def _bound_document_subject(
+    *,
+    planner_subject: Optional[str],
+    resident_message: str,
+    prior_document: Optional[Mapping[str, Any]],
+    trusted_context: Mapping[str, Any],
+) -> Optional[str]:
+    prior_subject = None
+    if isinstance(prior_document, Mapping):
+        prior_subject = prior_document.get("subject")
+    entity = trusted_context.get("previous_entity_profile")
+    if isinstance(entity, Mapping) and entity.get("display_name"):
+        # Prefer an explicit prior document subject when both exist and message
+        # does not name the entity.
+        if prior_subject and str(entity.get("display_name")).casefold() not in resident_message.casefold():
+            pass
+        elif not prior_subject:
+            prior_subject = entity.get("display_name")
+    if not prior_subject:
+        return planner_subject
+    subject = str(planner_subject or "").strip()
+    lowered_subject = subject.casefold()
+    lowered_message = resident_message.casefold()
+    anaphoric = bool(
+        re.search(
+            r"\b(this|that|it|the issue|the proposal|the policy|the budget|"
+            r"the organization|the event|the report|the same topic)\b",
+            lowered_message,
+        )
+    )
+    weak_planner = (
+        not subject
+        or lowered_subject in {"this", "that", "it", "the issue", "the proposal", "the policy", "the budget"}
+        or "dorchester civic information" in lowered_subject
+    )
+    if anaphoric or weak_planner:
+        return str(prior_subject)
+    return planner_subject
+
+
+def _ambiguous_document_referents(
+    message: str,
+    *,
+    dialogue_context: Optional[Mapping[str, Any]],
+    conversation_state: ConversationState,
+) -> Optional[str]:
+    """Ask a targeted clarification only when multiple durable referents compete."""
+    lowered = str(message or "").casefold()
+    if not re.search(r"\b(this|that|it)\b", lowered):
+        return None
+    # Explicit topic noun cues remove ambiguity (source-family words like "news"
+    # do not name which prior subject is meant).
+    if re.search(r"\b(budget|zoning|housing|policy|meeting|eversource)\b", lowered):
+        return None
+    document = _previous_document_summary(dialogue_context)
+    entity = _previous_entity_summary(dialogue_context)
+    options: List[str] = []
+    if document and document.get("subject"):
+        options.append(str(document["subject"]))
+    if entity and entity.get("display_name"):
+        name = str(entity["display_name"])
+        if name not in options:
+            options.append(name)
+    if conversation_state.active_entity is not None:
+        options.append("the previously selected event")
+    # Deduplicate while preserving order.
+    unique: List[str] = []
+    for item in options:
+        if item not in unique:
+            unique.append(item)
+    if len(unique) < 2:
+        return None
+    joined = ", or ".join(unique[:3])
+    return f"Just to confirm — are you asking about {joined}?"
 
 
 def _dialogue_base(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -2035,13 +2328,74 @@ def _dialogue_context_after_non_tool(
     })
 
 
+def _recover_document_followup_from_clarification(
+    *,
+    request: TurnRequest,
+    plan: SemanticPlan,
+    context: Mapping[str, Any],
+    tokens: Sequence[str],
+) -> Optional[Tuple[SemanticPlan, GuardedSemanticPlan, PlannerAction]]:
+    """When trusted document subject exists, bind anaphoric source-family follow-ups."""
+    prior = context.get("previous_document")
+    if not isinstance(prior, Mapping) or not prior.get("subject"):
+        return None
+    if not message_needs_prior_document_subject(request.message):
+        return None
+    if plan.missing_information not in {
+        None,
+        MissingInformation.REFERENCE,
+        MissingInformation.SUBJECT,
+        MissingInformation.USER_MEANING,
+        MissingInformation.SOURCE_TYPE,
+    }:
+        return None
+    corpora = _document_corpora_for_message(request.message)
+    source_scope = SourceScope.ANY
+    if corpora == ("NEWS",):
+        source_scope = SourceScope.NEWS
+    elif corpora == ("TRANSCRIPT",):
+        source_scope = SourceScope.MEETING_TRANSCRIPT
+    elif corpora == ("POLICY",):
+        source_scope = SourceScope.OFFICIAL
+    elif corpora == ("COMMUNITY",):
+        source_scope = SourceScope.COMMUNITY
+    task = SemanticTask(
+        domain=SemanticDomain.DOCUMENTS,
+        operation=SemanticOperation.SUMMARIZE,
+        subject=str(prior["subject"])[:180],
+        geography=SemanticGeography(mode=GeographyMode.DEFAULT, value=None),
+        time=SemanticTime(kind=SemanticTimeKind.NONE, value=None),
+        source_scope=source_scope,
+        goal_clarity=SemanticGoalClarity.CLEAR,
+    )
+    recovered = SemanticPlan(
+        action=PlannerAction.GATHER_EVIDENCE,
+        response_kind=None,
+        response_text=None,
+        trusted_summary_token=None,
+        clarification_question=None,
+        missing_information=None,
+        tasks=(task,),
+    )
+    guarded = guard_semantic_plan(
+        recovered,
+        trusted_context=context,
+        trusted_reference_tokens=tokens,
+    )
+    if guarded.disposition is not GuardedDisposition.EXECUTABLE:
+        return None
+    return recovered, guarded, PlannerAction.GATHER_EVIDENCE
+
+
 def _dialogue_domain_for_plan(plan: SemanticPlan) -> str:
     domain = plan.tasks[0].domain if plan.tasks else None
     return {
         SemanticDomain.EVENTS: "EVENTS",
         SemanticDomain.SERVICE_REQUESTS: "311",
         SemanticDomain.CRIME: "CRIME_AND_SAFETY",
-        SemanticDomain.DOCUMENTS: "DOCUMENTS",
+        # DialogueDomain has no DOCUMENTS member; keep document clarifications in GENERAL.
+        SemanticDomain.DOCUMENTS: "GENERAL",
+        SemanticDomain.LOCATION: "GENERAL",
     }.get(domain, "GENERAL")
 
 

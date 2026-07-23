@@ -392,6 +392,7 @@ def build_semantic_provider_payload(
         "SERVICE_REQUESTS: issue-scope corrections keep the prior operation plus trusted geography and time. Open/closed status breakdowns use STATUS while retaining scope. Source freshness or coverage asks use STATUS with NONE geography/time. One overall total uses COUNT with null subject; an issue-family quantity uses COUNT; category breakdown uses GROUP. Unqualified monthly aggregates use PREVIOUS_CALENDAR_MONTH.",
         "CRIME: broad public-safety or safety-concern overviews for the configured place are CLEAR gather_evidence with GROUP (preferred) or COUNT, DEFAULT geography, NONE time, and a null or generic subject—code supplies the latest complete calendar month. Do not use SUMMARIZE with a null subject. Do not ask for a time period unless the resident requested a comparison or a specific historical window. Do not invent offense-family filters for broad overviews. Source freshness uses STATUS with NONE geography/time. Organization or utility identity questions belong to DOCUMENTS/EXPLAIN, not SERVICE_REQUESTS.",
         "DOCUMENTS covers policy, law, news, meetings, and community discussion; content questions use SUMMARIZE or EXPLAIN. Preserve distinct requested source classes as separate tasks.",
+        "If previous_document.subject is supplied, anaphora keep that subject and may change only source_scope; do not clarify REFERENCE when exactly one subject is supplied.",
         "LOCATION/FIND with EXPLICIT geography resolves a place-only request unrelated to a selected event.",
         "Use source_scope ANY unless a source type is requested. Do not invent a comparison period, selected reference, or unnamed personal place. Questions about a selection without a selected-event token clarify REFERENCE.",
         "A trusted-summary rephrase may use only previous_summary.text.",
@@ -653,13 +654,21 @@ def _public_trusted_state(context: Mapping[str, Any], tokens: Tuple[str, ...]) -
         public_summary = {"token": summary[0], "text": summary[1]}
     topic = context.get("active_topic")
     topic_map = {"BOSTON_311": "SERVICE_REQUESTS", "CRIME_AND_SAFETY": "CRIME"}
-    return {
+    previous_document = context.get("previous_document")
+    public = {
         "default_geography": public_geography,
         "active_topic": topic_map.get(topic, topic if isinstance(topic, str) else None),
         "active_entity": public_entity,
         "time_reference": time_token,
         "previous_summary": public_summary,
     }
+    if isinstance(previous_document, Mapping) and previous_document.get("subject"):
+        public["previous_document"] = {
+            "subject": previous_document.get("subject"),
+            "fiscal_year": previous_document.get("fiscal_year"),
+            "status": previous_document.get("status"),
+        }
+    return public
 
 
 def validate_semantic_task(
