@@ -220,8 +220,16 @@ def execute_crime_plan(
             }
         elif plan.operation == "GROUP":
             current_count = _count_incidents(connection, plan.period, plan.offense_category_id)
-            raw_groups = _group_incidents(connection, plan.period, plan.limit * 4)
-            overview = _build_category_overview(raw_groups, total_count=current_count, limit=plan.limit)
+            unmapped_count = _count_unmapped_incidents(connection, plan.period)
+            # Fetch enough raw labels to cover a full month of Dorchester categories
+            # (~tens of distinct offense_description values), not only the display limit.
+            raw_groups = _group_incidents(connection, plan.period, limit=200)
+            overview = _build_category_overview(
+                raw_groups,
+                total_count=current_count,
+                unmapped_count=unmapped_count,
+                limit=plan.limit,
+            )
             groups = list(overview["leading_categories"])
             facts = {
                 "incident_report_count": current_count,
@@ -509,6 +517,23 @@ def _count_incidents(
     return int(rows[0].get("cnt") or 0)
 
 
+def _count_unmapped_incidents(
+    connection: Any,
+    period: Mapping[str, Any],
+) -> int:
+    """Count rows where both offense_code_group and offense_description are empty."""
+    date_sql, date_params = _period_params(period)
+    sql = (
+        "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
+        f"WHERE {_DORCHESTER_CRIME} AND {date_sql} "
+        f"AND {_OFFENSE_CATEGORY_SQL} IS NULL"
+    )
+    rows = _fetch_all(connection, sql, date_params)
+    if not rows:
+        return 0
+    return int(rows[0].get("cnt") or 0)
+
+
 def _group_incidents(
     connection: Any,
     period: Mapping[str, Any],
@@ -516,7 +541,7 @@ def _group_incidents(
 ) -> List[Dict[str, Any]]:
     """Return raw source-category aggregates using the authoritative COALESCE field."""
     date_sql, date_params = _period_params(period)
-    bounded_limit = max(1, min(int(limit), MAX_GROUPS * 4))
+    bounded_limit = max(1, min(int(limit), 250))
     sql = (
         f"SELECT {_OFFENSE_CATEGORY_SQL} AS offense_category, "
         "COUNT(*) AS cnt "
@@ -604,13 +629,14 @@ def _build_category_overview(
     *,
     total_count: int,
     limit: int,
+    unmapped_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Aggregate normalized categories and apply Unknown/coverage rules."""
     family_counts: Counter[str] = Counter()
     family_display: Dict[str, str] = {}
     raw_samples: List[Dict[str, Any]] = []
     categorized = 0
-    unmapped = 0
+    empty_in_groups = 0
     for item in raw_groups:
         count = int(item.get("count") or 0)
         if count <= 0:
@@ -621,7 +647,7 @@ def _build_category_overview(
         raw_samples.append({"offense_category": raw, "count": count})
         norm = normalize_offense_category(raw)
         if not norm["mapped"] or not norm["category"]:
-            unmapped += count
+            empty_in_groups += count
             continue
         categorized += count
         key = str(norm["internal_key"])
@@ -650,13 +676,20 @@ def _build_category_overview(
         if len(leading) >= max(1, min(int(limit), MAX_GROUPS)):
             break
 
-    # Rows beyond the GROUP BY LIMIT are not in raw_groups; attribute remainder to unmapped
-    # only when the summed raw counts fall short of the known total.
-    observed = categorized + unmapped
-    if total_count > observed:
-        unmapped += total_count - observed
+    if unmapped_count is None:
+        unmapped = empty_in_groups
+    else:
+        unmapped = max(0, int(unmapped_count))
+    # Labels present in the source but outside a truncated GROUP window are still
+    # categorized; do not treat the unread remainder as unmapped.
+    if total_count > 0 and categorized + unmapped > total_count:
+        unmapped = max(0, total_count - categorized)
 
-    coverage = (float(categorized) / float(total_count)) if total_count else 0.0
+    coverage = (
+        float(max(0, total_count - unmapped)) / float(total_count)
+        if total_count
+        else 0.0
+    )
     reliable = bool(total_count > 0 and coverage >= _MIN_CATEGORY_COVERAGE and leading)
     if total_count > 0 and categorized == 0:
         reliable = False
@@ -664,7 +697,9 @@ def _build_category_overview(
 
     return {
         "leading_categories": leading if reliable else [],
-        "categorized_incident_count": categorized,
+        "categorized_incident_count": (
+            max(0, total_count - unmapped) if total_count else categorized
+        ),
         "unmapped_incident_count": unmapped,
         "category_coverage": round(coverage, 4),
         "category_coverage_reliable": reliable,

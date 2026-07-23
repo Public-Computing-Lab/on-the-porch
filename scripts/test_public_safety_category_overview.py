@@ -55,10 +55,12 @@ class _FakeConnection:
         count_rows: Sequence[Mapping[str, Any]],
         group_rows: Sequence[Mapping[str, Any]],
         status_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+        unmapped_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     ):
         self.count_rows = [dict(r) for r in count_rows]
         self.group_rows = [dict(r) for r in group_rows]
         self.status_rows = [dict(r) for r in (status_rows or [])]
+        self.unmapped_rows = [dict(r) for r in (unmapped_rows or [{"cnt": 0}])]
         self.closed = False
         self.sql_log: List[str] = []
 
@@ -68,6 +70,8 @@ class _FakeConnection:
             return list(self.status_rows)
         if "group by" in lowered:
             return list(self.group_rows)
+        if "is null" in lowered and "count(*)" in lowered:
+            return list(self.unmapped_rows)
         if "count(*)" in lowered:
             return list(self.count_rows)
         return []
@@ -236,6 +240,7 @@ def test_group_query_uses_coalesce_alias_and_total_count():
     def factory():
         shared["conn"] = _FakeConnection(
             count_rows=[{"cnt": 100}],
+            unmapped_rows=[{"cnt": 5}],
             group_rows=[
                 {"offense_category": "LARCENY SHOPLIFTING", "cnt": 31},
                 {"offense_category": "ASSAULT - SIMPLE", "cnt": 22},
