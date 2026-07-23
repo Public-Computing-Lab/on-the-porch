@@ -24,6 +24,7 @@ from civic_311 import build_compiled_311_plan, execute_311_plan
 from civic_crime import build_compiled_crime_plan, execute_crime_plan
 from civic_documents import build_compiled_document_plan, execute_document_plan
 from civic_entities import looks_like_entity_question, resolve_entity
+from document_relevance import strip_internal_retrieval_language
 from grounded_synthesis import SynthesisGenerate, synthesize_grounded_answer
 from civic_tool_catalog import (
     RegisteredToolRequest,
@@ -1124,11 +1125,25 @@ class ModelLedTurnService:
         counts = {"search_documents": 1}
         if resolver_count:
             counts["resolve_location"] = resolver_count
+        raw_answer = synthesis.answer or civic.answer
+        answer = strip_internal_retrieval_language(raw_answer)
+        sources = tuple(civic.sources)
+        # If jargon stripping replaced a synthesized dump, prefer the deterministic
+        # relevant-document answer when passages were admitted.
+        if (
+            answer != raw_answer
+            and civic.civic_tool_result.records
+            and "bounded source passage" in str(raw_answer).casefold()
+        ):
+            answer = strip_internal_retrieval_language(civic.answer)
+            sources = tuple(civic.sources)
+        elif answer != raw_answer and not civic.civic_tool_result.records:
+            sources = ()
         return TurnResult(
             status=TurnServiceStatus.DEGRADED if degraded else TurnServiceStatus.COMPLETED,
-            answer=synthesis.answer or civic.answer,
+            answer=answer,
             mode="model_led_documents",
-            sources=tuple(civic.sources),
+            sources=sources,
             planner_action=PlannerAction.GATHER_EVIDENCE.value,
             guarded_disposition=guarded.disposition.value,
             reason_code=guarded.reason_code,

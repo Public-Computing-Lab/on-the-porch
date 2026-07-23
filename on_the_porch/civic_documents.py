@@ -21,6 +21,14 @@ from source_provenance import (
     normalize_provenance,
     resident_label_for,
 )
+from document_relevance import (
+    extract_document_constraints,
+    filter_relevant_passages,
+    format_no_evidence_answer,
+    format_resident_document_answer,
+    strip_internal_retrieval_language,
+    validate_answerable_bundle,
+)
 
 
 RetrieveFn = Callable[..., Mapping[str, Any]]
@@ -263,9 +271,14 @@ def execute_document_plan(
         if len(passages) >= plan.limit:
             break
 
-    if not passages:
-        return _empty_result(plan, unavailable=False)
+    constraints = extract_document_constraints(plan.query)
+    relevant_passages, rejection = filter_relevant_passages(passages, constraints)
+    answerable, answerable_reason = validate_answerable_bundle(relevant_passages, constraints)
+    if not relevant_passages or not answerable:
+        reason = rejection or answerable_reason or "NO_RELEVANT_EVIDENCE"
+        return _no_relevant_evidence_result(plan, constraints, reason)
 
+    passages = relevant_passages
     sources: List[CivicSourceRecord] = []
     atoms: List[CivicEvidenceAtom] = []
     resident_sources: List[Dict[str, Any]] = []
@@ -307,18 +320,29 @@ def execute_document_plan(
             "doc_type": passage["corpus"].lower(),
         })
 
-    answer = _deterministic_summary(plan, passages)
+    answer = strip_internal_retrieval_language(
+        format_resident_document_answer(plan.query, passages, constraints)
+    )
     limitations = sorted({str(item.get("limitation")) for item in passages if item.get("limitation")})
-    limitations.append("Passages are bounded excerpts; they are not a complete document dump.")
+    limitations.append("Excerpts are incomplete source samples and are not legal advice.")
     bundle = EvidenceBundle(
-        question_scope={"domain": "DOCUMENTS", "query": plan.query, "corpora": list(plan.corpora)},
+        question_scope={
+            "domain": "DOCUMENTS",
+            "query": plan.query,
+            "corpora": list(plan.corpora),
+            "constraints": constraints.to_dict(),
+        },
         issue_family=None,
         geography={"location_id": plan.location_id} if plan.location_id else {},
         requested_period=dict(plan.time_scope or {}),
         executed_period=dict(plan.time_scope or {}),
         freshness={},
         coverage={"status": "PARTIAL", "passage_count": len(passages)},
-        facts={"passage_count": len(passages), "corpora": list(plan.corpora)},
+        facts={
+            "passage_count": len(passages),
+            "corpora": list(plan.corpora),
+            "relevance_rejection": None,
+        },
         limitations=limitations,
         source_records=resident_sources,
         evidence_status=EvidenceStatus.PARTIAL,
@@ -375,23 +399,58 @@ def _corpus_limitation(corpus: str, provenance: str) -> str:
 
 
 def _deterministic_summary(plan: DocumentPlan, passages: Sequence[Mapping[str, Any]]) -> str:
-    lines = [
-        f"I found {len(passages)} bounded source passage(s) related to “{plan.query}”.",
-        "Source types and provenance are kept distinct below:",
-    ]
-    for index, passage in enumerate(passages[:6], start=1):
-        date = f" ({passage['date']})" if passage.get("date") else ""
-        excerpt = str(passage["passage"])[:220]
-        label = passage.get("provenance_label") or passage["source_type"]
-        lines.append(
-            f"{index}. [{label}] {passage['source_name']}{date}: {excerpt}"
-        )
-        if passage.get("limitation"):
-            lines.append(f"   Note: {passage['limitation']}")
-    lines.append(
-        "These excerpts are evidence candidates only; they do not invent additional civic facts."
+    """Backward-compatible helper; prefer format_resident_document_answer. """
+    constraints = extract_document_constraints(plan.query)
+    return format_resident_document_answer(plan.query, passages, constraints)
+
+
+def _no_relevant_evidence_result(
+    plan: DocumentPlan,
+    constraints: Any,
+    reason: str,
+) -> DocumentResult:
+    answer = format_no_evidence_answer(constraints, reason)
+    bundle = EvidenceBundle(
+        question_scope={
+            "domain": "DOCUMENTS",
+            "query": plan.query,
+            "constraints": constraints.to_dict() if hasattr(constraints, "to_dict") else {},
+        },
+        issue_family=None,
+        geography={"location_id": plan.location_id} if plan.location_id else {},
+        requested_period=dict(plan.time_scope or {}),
+        executed_period=dict(plan.time_scope or {}),
+        freshness={},
+        coverage={"status": "ABSENT", "reason": reason},
+        facts={"passage_count": 0, "relevance_rejection": reason},
+        limitations=[
+            "No sufficiently relevant source material was available for this question.",
+        ],
+        missing_evidence=[reason],
+        source_records=[],
+        evidence_status=EvidenceStatus.INSUFFICIENT_EVIDENCE,
     )
-    return "\n".join(lines)
+    tool_result = CivicToolResult(
+        request_id="documents_1",
+        tool_id="search_documents",
+        status=ToolResultStatus.ABSENT,
+        requested_scope=plan.to_dict(),
+        executed_scope=plan.to_dict(),
+        typed_facts={"passage_count": 0, "relevance_rejection": reason},
+        records=(),
+        evidence_atoms=(),
+        source_records=(),
+        coverage={"status": "ABSENT", "reason": reason},
+        limitations=("No sufficiently relevant source material was available for this question.",),
+        missing_evidence=(reason,),
+    )
+    return DocumentResult(
+        answer=answer,
+        sources=(),
+        evidence=bundle,
+        civic_tool_result=tool_result,
+        plan=plan,
+    )
 
 
 def _empty_result(plan: DocumentPlan, *, unavailable: bool) -> DocumentResult:
@@ -400,14 +459,14 @@ def _empty_result(plan: DocumentPlan, *, unavailable: bool) -> DocumentResult:
         status = EvidenceStatus.DEPENDENCY_UNAVAILABLE
         tool_status = ToolResultStatus.TEMPORARILY_UNAVAILABLE
         failure = ("TOOL_DEADLINE_EXCEEDED",)
+        missing = ["TOOL_DEADLINE_EXCEEDED"]
     else:
-        answer = (
-            "I didn't find matching policy, meeting, news, or community passages for that question "
-            "in the current Dorchester evidence index."
-        )
+        constraints = extract_document_constraints(plan.query)
+        answer = format_no_evidence_answer(constraints, "NO_RELEVANT_EVIDENCE")
         status = EvidenceStatus.NO_MATCHING_RECORDS
         tool_status = ToolResultStatus.ABSENT
         failure = ()
+        missing = ["NO_MATCHING_PASSAGES"]
     bundle = EvidenceBundle(
         question_scope={"domain": "DOCUMENTS", "query": plan.query},
         issue_family=None,
@@ -417,8 +476,8 @@ def _empty_result(plan: DocumentPlan, *, unavailable: bool) -> DocumentResult:
         freshness={},
         coverage={"status": "ABSENT"},
         facts={"passage_count": 0},
-        limitations=["No matching bounded passages were available."],
-        missing_evidence=["NO_MATCHING_PASSAGES"] if not unavailable else ["TOOL_DEADLINE_EXCEEDED"],
+        limitations=["No matching relevant passages were available."],
+        missing_evidence=missing,
         source_records=[],
         evidence_status=status,
         partial_failures=list(failure),
@@ -429,9 +488,14 @@ def _empty_result(plan: DocumentPlan, *, unavailable: bool) -> DocumentResult:
         status=tool_status,
         requested_scope=plan.to_dict(),
         executed_scope=plan.to_dict(),
-        limitations=("No matching bounded passages were available.",),
-        missing_evidence=("NO_MATCHING_PASSAGES",) if not unavailable else ("TOOL_DEADLINE_EXCEEDED",),
-        partial_failures=("TOOL_DEADLINE_EXCEEDED",) if unavailable else (),
+        typed_facts={"passage_count": 0},
+        records=(),
+        evidence_atoms=(),
+        source_records=(),
+        coverage={"status": "ABSENT"},
+        limitations=("No matching relevant passages were available.",),
+        missing_evidence=tuple(missing),
+        partial_failures=tuple(failure) if failure else (),
     )
     return DocumentResult(
         answer=answer,
