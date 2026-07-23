@@ -397,6 +397,33 @@ def _normalize_semantic_plan(
 
 def _normalize_task(task: SemanticTask) -> SemanticTask:
     if (
+        task.domain is SemanticDomain.CRIME
+        and task.goal_clarity is SemanticGoalClarity.DOMAIN_ONLY
+        and task.operation in {
+            SemanticOperation.SUMMARIZE,
+            SemanticOperation.GROUP,
+            SemanticOperation.FIND,
+            SemanticOperation.COUNT,
+            SemanticOperation.EXPLAIN,
+            SemanticOperation.COMPARE,
+        }
+    ):
+        # Broad public-safety overviews are executable evidence goals. Domain-only
+        # clarity must not block the default calendar-month overview path.
+        return SemanticTask(
+            task.domain,
+            task.operation,
+            task.subject,
+            task.geography,
+            (
+                SemanticTime(SemanticTimeKind.NONE, None)
+                if task.time.kind is SemanticTimeKind.MISSING
+                else task.time
+            ),
+            task.source_scope,
+            SemanticGoalClarity.CLEAR,
+        )
+    if (
         task.domain is SemanticDomain.SERVICE_REQUESTS
         and task.operation in {SemanticOperation.GROUP, SemanticOperation.STATUS}
         and _is_status_subject(task.subject)
