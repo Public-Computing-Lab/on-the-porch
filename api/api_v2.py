@@ -1752,6 +1752,17 @@ def _serialize_message(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     if isinstance(meta.get("resolved_entity"), dict):
         serialized["resolved_entity"] = meta["resolved_entity"]
+    limitations = meta.get("limitations")
+    if isinstance(limitations, list) and limitations:
+        serialized["limitations"] = limitations
+    evidence = meta.get("evidence")
+    if isinstance(evidence, dict) and isinstance(evidence.get("limitations"), list):
+        serialized.setdefault("limitations", evidence.get("limitations"))
+    model_led = meta.get("model_led_turn")
+    if isinstance(model_led, dict):
+        evidence = model_led.get("evidence")
+        if isinstance(evidence, dict) and isinstance(evidence.get("limitations"), list):
+            serialized.setdefault("limitations", evidence.get("limitations"))
     return serialized
 
 
@@ -6562,6 +6573,25 @@ def _build_detailed_readiness() -> Dict[str, Any]:
         pass
 
     status["materialized_views_enabled"] = Config.MATERIALIZED_VIEWS_ENABLED
+    status["model_led_orchestrator_mode"] = Config.MODEL_LED_ORCHESTRATOR_MODE
+    status["chat_vector_writes_enabled"] = Config.CHAT_VECTOR_WRITES_ENABLED
+    status["dynamic_sql_enabled"] = Config.DYNAMIC_SQL_ENABLED
+    try:
+        from document_catalog import catalog_stats, verify_index_parity
+        from source_registry import ensure_registry_seeded, registry_health_summary
+
+        _reg_conn = get_db_connection()
+        try:
+            ensure_registry_seeded(_reg_conn)
+            status["source_registry"] = registry_health_summary(_reg_conn)
+            status["document_catalog"] = catalog_stats(_reg_conn)
+            status["index_parity"] = verify_index_parity(_reg_conn)
+            if status["source_registry"].get("failed", 0) > 0:
+                status["status"] = "degraded"
+        finally:
+            _reg_conn.close()
+    except Exception as exc:  # noqa: BLE001
+        status["source_registry"] = {"error": type(exc).__name__}
 
     _, prod_issues = validate_production_config(
         production_mode=Config.PRODUCTION_MODE,
@@ -6587,6 +6617,163 @@ def admin_health_ready():
     if result:
         return result
     return jsonify(_build_detailed_readiness())
+
+
+@app.route("/admin/sources", methods=["GET"])
+def admin_list_sources():
+    result = _require_admin()
+    if result:
+        return result
+    conn = None
+    try:
+        from document_catalog import catalog_stats
+        from source_registry import (
+            ensure_registry_seeded,
+            list_sources,
+            registry_health_summary,
+        )
+
+        conn = get_db_connection()
+        ensure_registry_seeded(conn)
+        return jsonify({
+            "summary": registry_health_summary(conn),
+            "catalog": catalog_stats(conn),
+            "sources": list_sources(conn),
+        })
+    except Exception as exc:
+        _log_exception("admin sources failed", exc)
+        return _json_error("Failed to load sources.", 500, "admin_sources_failed")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/admin/sources/<path:source_id>/enabled", methods=["PUT"])
+def admin_set_source_enabled(source_id: str):
+    result = _require_admin_mutation()
+    if result:
+        return result
+    payload = request.get_json() or {}
+    enabled = bool(payload.get("enabled", True))
+    conn = None
+    try:
+        from source_registry import record_operator_action, set_source_enabled
+
+        conn = get_db_connection()
+        ok = set_source_enabled(conn, source_id, enabled)
+        if not ok:
+            return _json_error("Source not found.", 404, "source_not_found")
+        record_operator_action(
+            conn,
+            action="enable_source" if enabled else "disable_source",
+            target_type="source",
+            target_id=source_id,
+            actor_user_id=g.current_user_row.get("id"),
+            actor_email=g.current_user_row.get("email"),
+            details={"enabled": enabled},
+        )
+        return jsonify({"ok": True, "source_id": source_id, "enabled": enabled})
+    except Exception as exc:
+        _log_exception("admin source enable failed", exc)
+        return _json_error("Failed to update source.", 500, "admin_source_update_failed")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/admin/ingestion/runs", methods=["GET"])
+def admin_ingestion_runs():
+    result = _require_admin()
+    if result:
+        return result
+    conn = None
+    try:
+        from ingestion_pipeline import list_ingestion_runs
+
+        conn = get_db_connection()
+        limit = min(200, max(1, int(request.args.get("limit", 50))))
+        return jsonify({"runs": list_ingestion_runs(conn, limit=limit)})
+    except Exception as exc:
+        _log_exception("admin ingestion runs failed", exc)
+        return _json_error("Failed to load ingestion runs.", 500, "admin_runs_failed")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/admin/ingestion/bootstrap", methods=["POST"])
+def admin_ingestion_bootstrap():
+    """Admin-only bootstrap: seed registry, sync structured freshness, catalog/index local corpus."""
+    result = _require_admin_mutation()
+    if result:
+        return result
+    payload = request.get_json() or {}
+    write_vectors = bool(payload.get("write_vectors", False))
+    if write_vectors and not Config.ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED:
+        # Reuse the existing admin write gate; public chat writes remain disabled.
+        return _json_error(
+            "Vector writes require ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED.",
+            403,
+            "vector_writes_disabled",
+        )
+    conn = None
+    try:
+        from ingestion_pipeline import bootstrap_phase5
+        from source_registry import record_operator_action
+
+        conn = get_db_connection()
+        outcome = bootstrap_phase5(
+            conn,
+            include_local_corpus=bool(payload.get("include_local_corpus", True)),
+            write_vectors=write_vectors,
+        )
+        record_operator_action(
+            conn,
+            action="ingestion_bootstrap",
+            target_type="registry",
+            target_id="phase5",
+            actor_user_id=g.current_user_row.get("id"),
+            actor_email=g.current_user_row.get("email"),
+            details={
+                "seeded_rows": outcome.get("seeded_rows"),
+                "catalog": outcome.get("catalog"),
+                "parity": outcome.get("parity"),
+                "run_count": len(outcome.get("runs") or []),
+            },
+        )
+        return jsonify({
+            "ok": True,
+            "seeded_rows": outcome.get("seeded_rows"),
+            "catalog": outcome.get("catalog"),
+            "parity": outcome.get("parity"),
+            "runs": outcome.get("runs"),
+        })
+    except Exception as exc:
+        _log_exception("admin ingestion bootstrap failed", exc)
+        return _json_error("Bootstrap failed.", 500, "admin_bootstrap_failed")
+    finally:
+        if conn:
+            conn.close()
+
+
+@app.route("/admin/documents", methods=["GET"])
+def admin_list_documents():
+    result = _require_admin()
+    if result:
+        return result
+    conn = None
+    try:
+        from document_catalog import list_recent_documents
+
+        conn = get_db_connection()
+        limit = min(200, max(1, int(request.args.get("limit", 50))))
+        return jsonify({"documents": list_recent_documents(conn, limit=limit)})
+    except Exception as exc:
+        _log_exception("admin documents failed", exc)
+        return _json_error("Failed to load documents.", 500, "admin_documents_failed")
+    finally:
+        if conn:
+            conn.close()
 
 
 # =============================================================================

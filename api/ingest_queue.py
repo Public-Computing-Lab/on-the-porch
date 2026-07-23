@@ -23,6 +23,10 @@ KNOWN_INGEST_JOBS = (
     "google_drive",
     "guest_cleanup",
     "materialized_refresh",
+    "local_directory",
+    "chroma_catalog_sync",
+    "structured_sync",
+    "phase5_bootstrap",
 )
 
 

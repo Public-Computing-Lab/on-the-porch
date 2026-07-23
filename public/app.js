@@ -505,20 +505,36 @@ function isPublicSourcePath(path) {
 function formatSource(rawSource) {
   const source = normalizeSourceEntry(rawSource);
   if (!source) {
-    return { label: 'Community data', path: null };
+    return { label: 'Community data', path: null, sourceType: '', sourceDate: '', detail: '' };
   }
 
   if (source.doc_type === 'transcript' || source.source === 'Community Transcripts') {
-    return { label: 'Community Transcripts', path: null };
+    return {
+      label: 'Community Transcripts',
+      path: null,
+      sourceType: 'MEETING_DISCUSSION',
+      sourceDate: (source.date || source.publication_or_data_date || '').trim(),
+      detail: 'Meeting discussion',
+    };
   }
 
   const label = (source.source || source.label || source.name || '').trim();
   let path = source.path || source.link || source.url || null;
   const sourceType = (source.source_type || source.sourceType || '').trim();
   const sourceDate = (source.date || source.publication_or_data_date || '').trim();
+  const authority = (source.authority || source.publisher || '').trim();
 
   if (path && !isPublicSourcePath(path)) {
     path = null;
+  }
+  // Prefer short host labels over raw long URLs in the chip text.
+  let pathLabel = null;
+  if (path && /^https?:\/\//i.test(path)) {
+    try {
+      pathLabel = new URL(path).hostname.replace(/^www\./, '');
+    } catch (_err) {
+      pathLabel = null;
+    }
   }
 
   let displayLabel = label;
@@ -529,14 +545,19 @@ function formatSource(rawSource) {
     displayLabel = `${displayLabel} · ${sourceDate}`;
   }
 
+  const detailParts = [];
+  if (authority) detailParts.push(authority);
+  if (pathLabel) detailParts.push(pathLabel);
+  const detail = detailParts.join(' · ');
+
   if (source.type === 'event' && label) {
-    return { label: displayLabel || label, path };
+    return { label: displayLabel || label, path, sourceType, sourceDate, detail };
   }
   if (source.type === 'entity_profile' && label) {
-    return { label: displayLabel || label, path };
+    return { label: displayLabel || label, path, sourceType, sourceDate, detail };
   }
   if ((displayLabel || label) && path) {
-    return { label: displayLabel || label, path };
+    return { label: displayLabel || label, path, sourceType, sourceDate, detail };
   }
   if (source.type === 'sql' && source.table) {
     const key = source.table.toLowerCase();
@@ -544,12 +565,15 @@ function formatSource(rawSource) {
     return {
       label: sourceType ? `${mapped.label} · ${sourceType.replace(/_/g, ' ')}` : mapped.label,
       path: mapped.path || path,
+      sourceType,
+      sourceDate,
+      detail,
     };
   }
   if (source.type === 'rag' && (displayLabel || label)) {
-    return { label: displayLabel || label, path };
+    return { label: displayLabel || label, path, sourceType, sourceDate, detail };
   }
-  return { label: displayLabel || label || 'Community data', path };
+  return { label: displayLabel || label || 'Community data', path, sourceType, sourceDate, detail };
 }
 
 function setAuthMode(mode) {
@@ -724,6 +748,8 @@ function createMessageElement(message) {
   if (messageSources.length > 0) {
     const meta = document.createElement('div');
     meta.className = 'message-meta';
+    meta.setAttribute('role', 'group');
+    meta.setAttribute('aria-label', 'Answer sources');
     const label = document.createElement('span');
     label.className = 'meta-label';
     label.textContent = 'Sources';
@@ -734,21 +760,59 @@ function createMessageElement(message) {
       const formatted = formatSource(source);
       if (seen.has(formatted.label)) return;
       seen.add(formatted.label);
-      const pill = document.createElement('span');
-      pill.className = 'meta-pill';
+      const pill = document.createElement(formatted.path ? 'a' : 'button');
+      pill.className = 'meta-pill source-chip';
+      pill.type = formatted.path ? undefined : 'button';
+      pill.setAttribute(
+        'aria-label',
+        [
+          'Source',
+          formatted.label,
+          formatted.sourceType ? formatted.sourceType.replace(/_/g, ' ') : '',
+          formatted.sourceDate || '',
+        ].filter(Boolean).join(', ')
+      );
       if (formatted.path) {
-        const anchor = document.createElement('a');
-        anchor.href = formatted.path;
-        anchor.textContent = formatted.label;
-        anchor.target = '_blank';
-        anchor.rel = 'noreferrer';
-        pill.appendChild(anchor);
+        pill.href = formatted.path;
+        pill.target = '_blank';
+        pill.rel = 'noreferrer';
+        pill.textContent = formatted.label;
+        if (formatted.detail) {
+          pill.title = formatted.detail;
+        }
       } else {
         pill.textContent = formatted.label;
+        pill.tabIndex = 0;
+        if (formatted.detail) {
+          pill.title = formatted.detail;
+        }
       }
       meta.appendChild(pill);
     });
     content.appendChild(meta);
+  }
+
+  const limitations = Array.isArray(message.limitations)
+    ? message.limitations
+    : (Array.isArray(message.evidence?.limitations)
+      ? message.evidence.limitations
+      : (Array.isArray(message.metadata?.limitations) ? message.metadata.limitations : []));
+  if (message.role === 'assistant' && limitations.length > 0) {
+    const note = document.createElement('div');
+    note.className = 'message-limitations';
+    note.setAttribute('role', 'note');
+    note.setAttribute('aria-label', 'Answer limitations');
+    const noteLabel = document.createElement('strong');
+    noteLabel.textContent = 'Limitations';
+    note.appendChild(noteLabel);
+    const list = document.createElement('ul');
+    limitations.slice(0, 4).forEach((item) => {
+      const li = document.createElement('li');
+      li.textContent = typeof item === 'string' ? item : (item?.code || item?.message || String(item));
+      list.appendChild(li);
+    });
+    note.appendChild(list);
+    content.appendChild(note);
   }
 
   if (message.role === 'assistant' && message.log_id) {
