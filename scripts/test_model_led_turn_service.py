@@ -175,15 +175,32 @@ def test_targeted_clarification_updates_only_dialogue_context():
     assert result.tool_call_count == 0
 
 
-def test_unmigrated_domain_is_explicit_and_non_resident():
-    # LOCATION-only place resolution without a selected event remains transitional.
+def test_unknown_location_clarifies_without_legacy_handoff():
+    # Unknown place names clarify; they must not emit NOT_YET_MIGRATED.
     _provider, result = run(
         task("LOCATION", "FIND", geography="EXPLICIT", geo_value="unknown hamlet"),
         "Where is unknown hamlet?",
     )
-    assert result.status is TurnServiceStatus.NOT_YET_MIGRATED
-    assert result.answer is None and result.tool_call_count == 0
+    assert result.status is TurnServiceStatus.CLARIFICATION
+    assert result.answer and "Dorchester" in result.answer
+    assert result.reason_code in {"LOCATION_NOT_REGISTERED", "DOMAIN_UNSUPPORTED"}
     assert result.state_transition.action is TransitionAction.PRESERVE
+    assert result.repair_call_count == 0
+
+
+def test_registered_location_resolves_without_legacy_handoff():
+    _provider, result = run(
+        task("LOCATION", "FIND", geography="EXPLICIT", geo_value="Codman Square"),
+        "Where is Codman Square?",
+    )
+    assert result.status is TurnServiceStatus.COMPLETED
+    assert result.mode == "model_led_location"
+    assert result.answer and "Codman" in result.answer
+    assert result.planner_call_count == 1
+    assert result.synthesis_call_count == 0
+    assert result.repair_call_count == 0
+    assert result.embedding_call_count == 0
+    assert result.secondary_planner_call_count == 0
 
 
 def test_documents_domain_is_migrated():

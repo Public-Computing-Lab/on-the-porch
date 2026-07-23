@@ -2,9 +2,10 @@
 
 The service owns one semantic planner call, deterministic capability dispatch, and
 an optional grounded synthesis call for events, Boston 311, crime/public safety,
-documents, and civic entity profiles. Authentication, idempotency, persistence,
-and JSON/SSE transport remain outside. Domains still outside the migrated set
-return NOT_YET_MIGRATED for a single API-boundary legacy handoff.
+documents, civic entity profiles, and registered geography resolution.
+Authentication, idempotency, persistence, and JSON/SSE transport remain outside.
+Unsupported domain combinations return a bounded clarification; there is no
+legacy semantic handoff from this service.
 """
 
 from __future__ import annotations
@@ -385,9 +386,10 @@ class ModelLedTurnService:
             SemanticDomain.SERVICE_REQUESTS,
             SemanticDomain.CRIME,
             SemanticDomain.DOCUMENTS,
+            SemanticDomain.LOCATION,
         }
         if not selected_domains or not selected_domains.issubset(migrated):
-            return self._not_migrated(**common)
+            return self._unsupported_domain(**common)
         if len(selected_domains) != 1 or len(plan.tasks) != 1:
             return self._non_tool_result(
                 status=TurnServiceStatus.CLARIFICATION,
@@ -445,6 +447,17 @@ class ModelLedTurnService:
                     plan=plan,
                     guarded=guarded,
                     deadline=deadline,
+                    started=started,
+                    planner_calls=ledger.total_calls,
+                    provider_model=provider_model,
+                    resolver_count=resolver_count,
+                )
+            if not core and selected_domains == {SemanticDomain.LOCATION}:
+                return self._run_location(
+                    request=request,
+                    plan=plan,
+                    guarded=guarded,
+                    context=context,
                     started=started,
                     planner_calls=ledger.total_calls,
                     provider_model=provider_model,
@@ -1336,18 +1349,132 @@ class ModelLedTurnService:
             provider_model=provider_model,
         )
 
-    def _not_migrated(self, **common: Any) -> TurnResult:
+    def _run_location(
+        self,
+        *,
+        request: TurnRequest,
+        plan: SemanticPlan,
+        guarded: GuardedSemanticPlan,
+        context: Mapping[str, Any],
+        started: float,
+        planner_calls: int,
+        provider_model: Optional[str],
+        resolver_count: int,
+    ) -> TurnResult:
+        references = context.get("location_references")
+        location_id = None
+        if isinstance(references, Mapping):
+            for value in references.values():
+                if isinstance(value, str) and value.strip():
+                    location_id = value.strip()
+                    break
+        location = resolve_registered_geography(location_id) if location_id else None
+        if location is None and plan.tasks:
+            location = resolve_registered_geography(plan.tasks[0].geography.value)
+        if location is None:
+            return TurnResult(
+                status=TurnServiceStatus.CLARIFICATION,
+                answer=(
+                    "Which Dorchester area did you mean? I can currently use "
+                    "Dorchester, Codman Square, or Fields Corner."
+                ),
+                mode="model_led_clarification",
+                sources=(),
+                planner_action=PlannerAction.GATHER_EVIDENCE.value,
+                guarded_disposition=guarded.disposition.value,
+                reason_code="LOCATION_NOT_REGISTERED",
+                compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+                evidence=None,
+                state_transition=ProposedTransition.preserve(
+                    request.state_envelope.conversation_state,
+                ),
+                next_civic_311_context=request.state_envelope.civic_311_context,
+                update_civic_311_context=False,
+                next_dialogue_context=request.state_envelope.dialogue_context,
+                update_dialogue_context=False,
+                resolved_entity=None,
+                planner_call_count=planner_calls,
+                synthesis_call_count=0,
+                tool_call_count=max(0, resolver_count),
+                tool_execution_counts=(
+                    {"resolve_location": resolver_count} if resolver_count else {}
+                ),
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                provider_model=provider_model,
+            )
+        place = geography_name(location) or location.id.replace("_", " ").title()
+        answer = (
+            f"{place} is a registered Dorchester area I can use for events, "
+            f"Boston 311, and public-safety questions. Ask what you want to know "
+            f"about that area."
+        )
+        evidence = {
+            "domain": "LOCATION",
+            "status": "COMPLETE",
+            "facts": {"location_id": location.id, "location_name": place},
+            "limitations": [],
+            "sources": [{
+                "source_id": "geo:registered",
+                "title": "On the Porch geography registry",
+                "publisher": "On the Porch",
+                "url": None,
+            }],
+        }
+        return TurnResult(
+            status=TurnServiceStatus.COMPLETED,
+            answer=answer,
+            mode="model_led_location",
+            sources=tuple(evidence["sources"]),
+            planner_action=PlannerAction.GATHER_EVIDENCE.value,
+            guarded_disposition=guarded.disposition.value,
+            reason_code="LOCATION_RESOLVED",
+            compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
+            evidence=evidence,
+            state_transition=ProposedTransition.replace_state(
+                request.state_envelope.conversation_state,
+                ConversationState(
+                    schema_version=request.state_envelope.conversation_state.schema_version,
+                    revision=request.state_envelope.conversation_state.revision,
+                    active_topic=request.state_envelope.conversation_state.active_topic,
+                    active_entity=request.state_envelope.conversation_state.active_entity,
+                    location=location,
+                    time_range=request.state_envelope.conversation_state.time_range,
+                    filters=request.state_envelope.conversation_state.filters,
+                    previous_route=request.state_envelope.conversation_state.previous_route,
+                    last_substantive_message_id=(
+                        request.state_envelope.conversation_state.last_substantive_message_id
+                    ),
+                ),
+            ),
+            next_civic_311_context=request.state_envelope.civic_311_context,
+            update_civic_311_context=False,
+            next_dialogue_context=request.state_envelope.dialogue_context,
+            update_dialogue_context=False,
+            resolved_entity=None,
+            planner_call_count=planner_calls,
+            synthesis_call_count=0,
+            tool_call_count=max(1, resolver_count),
+            tool_execution_counts={"resolve_location": max(1, resolver_count)},
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            provider_model=provider_model,
+        )
+
+    def _unsupported_domain(self, **common: Any) -> TurnResult:
+        """Bounded clarification for domain sets outside the authoritative runtime."""
         request: TurnRequest = common["request"]
         guarded: GuardedSemanticPlan = common["guarded"]
         action: Optional[PlannerAction] = common["action"]
         return TurnResult(
-            status=TurnServiceStatus.NOT_YET_MIGRATED,
-            answer=None,
-            mode="model_led_not_yet_migrated",
+            status=TurnServiceStatus.CLARIFICATION,
+            answer=(
+                "I can help with Dorchester events, Boston 311, public-safety data, "
+                "civic documents, or a registered neighborhood. Which should I check?"
+            ),
+            mode="model_led_clarification",
             sources=(),
             planner_action=action.value if action else None,
             guarded_disposition=guarded.disposition.value,
-            reason_code="DOMAIN_NOT_YET_MIGRATED",
+            reason_code="DOMAIN_UNSUPPORTED",
             compiled_tools=tuple(item.to_dict() for item in guarded.tool_requests),
             evidence=None,
             state_transition=ProposedTransition.preserve(
@@ -1365,6 +1492,10 @@ class ModelLedTurnService:
             latency_ms=(time.perf_counter() - float(common["started"])) * 1000.0,
             provider_model=common.get("provider_model"),
         )
+
+    def _not_migrated(self, **common: Any) -> TurnResult:
+        """Offline-compatibility alias; resident traffic uses ``_unsupported_domain``."""
+        return self._unsupported_domain(**common)
 
     def _planner_failure(
         self,

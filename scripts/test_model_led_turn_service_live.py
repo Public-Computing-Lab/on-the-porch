@@ -458,21 +458,20 @@ def run(base_url: str) -> None:
         check(entity.get("synthesis_call_count", 0) in {0, 1}, "entity synthesis count")
         check("Eversource" in entity["answer"] or entity["status"] == "CLARIFICATION", "entity answer")
 
-        legacy_thread = client.create_thread("Phase 3 remaining location handoff")
-        legacy = turn(
+        location_thread = client.create_thread("Phase 4 location clarification")
+        location = turn(
             client,
-            legacy_thread,
-            "legacy_location_only",
+            location_thread,
+            "location_unknown",
             "Where exactly is unknown hamlet twelve?",
         )
-        # LOCATION-only remains outside migrated domains unless the planner routes elsewhere.
-        if legacy["status"] == "NOT_YET_MIGRATED":
-            check(legacy["response_mode"] != "model_led_not_yet_migrated", "legacy answer was not produced")
-            check(bool(legacy["answer"].strip()), "legacy handoff answer is empty")
-            check(not legacy["tool_execution_counts"], "model-led tools during location handoff")
-        else:
-            check(legacy.get("repair_call_count", 0) == 0, "location path repair count")
-            check(legacy.get("secondary_planner_call_count", 0) == 0, "location path secondary planner")
+        # Phase 4: LOCATION clarifies or resolves inside the turn service — no legacy handoff.
+        check(location["status"] != "NOT_YET_MIGRATED", "location must not emit NOT_YET_MIGRATED")
+        check(bool(location["answer"].strip()), "location answer is empty")
+        check(location.get("repair_call_count", 0) == 0, "location path repair count")
+        check(location.get("secondary_planner_call_count", 0) == 0, "location path secondary planner")
+        check(location.get("planner_call_count", 0) <= 1, "location planner count")
+        check(location.get("synthesis_call_count", 0) <= 1, "location synthesis count")
 
     parity_thread = client.create_thread("Phase 2A JSON SSE replay parity")
     parity_id = str(uuid.uuid4())

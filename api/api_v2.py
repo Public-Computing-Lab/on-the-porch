@@ -241,6 +241,11 @@ from sanitized_orchestrator_protocol import (  # noqa: E402
     FROZEN_MODEL_ID as MODEL_LED_PLANNER_MODEL,
     FROZEN_OUTPUT_MODE as MODEL_LED_OUTPUT_MODE,
 )
+from conversation_turn import (  # noqa: E402
+    ConversationTurnProposal,
+    build_authoritative_turn_proposal,
+    model_led_finalization_proposal,
+)
 
 try:
     from ingest_community_notes import ingest_community_notes as _ingest_community_notes  # noqa: E402
@@ -3878,7 +3883,8 @@ def _run_civic_311_answer(
             request_started_at=started_at,
             planner_llm=planner,
             synthesis_llm=synthesis,
-            repair_llm=synthesis,
+            # Repair model calls are forbidden on all resident paths (Phase 4).
+            repair_llm=None,
         )
     result = civic_result.to_agent_result()
     result["civic_311_runtime"] = runtime_policy.to_safe_dict()
@@ -4280,14 +4286,44 @@ def _model_led_finalization(
     next_cache: Mapping[str, Any],
 ) -> _ModelLedFinalization:
     """Shared JSON/SSE persistence proposal for a completed model-led turn."""
+    finals = model_led_finalization_proposal(result, next_cache=next_cache)
     return _ModelLedFinalization(
-        transition=result.state_transition,
-        persisted_cache=next_cache,
-        invalidate_retrieval_cache=False,
-        civic_311_context_update=result.update_civic_311_context,
-        civic_311_next_context=result.next_civic_311_context,
-        dialogue_next_context=result.next_dialogue_context,
-        dialogue_context_update=result.update_dialogue_context,
+        transition=finals["transition"],
+        persisted_cache=finals["persisted_cache"],
+        invalidate_retrieval_cache=finals["invalidate_retrieval_cache"],
+        civic_311_context_update=finals["civic_311_context_update"],
+        civic_311_next_context=finals["civic_311_next_context"],
+        dialogue_next_context=finals["dialogue_next_context"],
+        dialogue_context_update=finals["dialogue_context_update"],
+    )
+
+
+def _execute_authoritative_resident_turn(
+    *,
+    message: str,
+    state_envelope: ThreadStateEnvelope,
+    event_resolution: Optional[EventResolution],
+    emergency_decision: EmergencyDecision,
+    detector_latency_ms: float,
+    request_started_at: float,
+    activation_mode: str,
+) -> ConversationTurnProposal:
+    """One transport-neutral authoritative execution path for JSON and SSE."""
+    return build_authoritative_turn_proposal(
+        emergency_decision=emergency_decision,
+        detector_latency_ms=detector_latency_ms,
+        retrieval_cache=state_envelope.retrieval_cache,
+        conversation_state=state_envelope.conversation_state,
+        state_envelope=state_envelope,
+        event_resolution=event_resolution,
+        message=message,
+        request_started_at=request_started_at,
+        activation_mode=activation_mode,
+        run_model_led=_run_model_led_turn,
+        emergency_agent_result=_emergency_agent_result,
+        model_led_agent_result=_model_led_agent_result,
+        emergency_transition=_emergency_conversation_transition,
+        unsupported_status=ModelLedTurnStatus.NOT_YET_MIGRATED,
     )
 
 
@@ -5265,93 +5301,39 @@ def post_conversation_message(thread_id: str):
         # long LLM/sql execution does not hold row locks on the conversation.
         maybe_fault("before_generation")
         agent_result = None
-        if emergency_decision.is_active_emergency:
-            agent_result = _emergency_agent_result(
-                emergency_decision,
-                retrieval_cache,
-                detector_latency_ms=detector_latency_ms,
-            )
-        elif model_led_request:
-            model_led_turn_result = _run_model_led_turn(
-                message,
+        turn_proposal: Optional[ConversationTurnProposal] = None
+        if model_led_request:
+            # Authoritative/canary: one shared lifecycle. No legacy semantic handoff.
+            turn_proposal = _execute_authoritative_resident_turn(
+                message=message,
                 state_envelope=state_envelope,
                 event_resolution=event_resolution,
+                emergency_decision=emergency_decision,
+                detector_latency_ms=detector_latency_ms,
                 request_started_at=float(
                     getattr(g, "request_started_at", time.perf_counter())
                 ),
                 activation_mode=str(model_led_activation_mode),
             )
-            model_led_diagnostics_result = model_led_turn_result
-            if model_led_turn_result.status is ModelLedTurnStatus.NOT_YET_MIGRATED:
-                if model_led_activation_mode == "isolated_canary":
-                    if turn_reservation is not None and not getattr(turn_reservation, "replay", False):
-                        fail_turn(
-                            get_db_connection,
-                            turn_row_id=turn_reservation.turn_row_id,
-                            lease_owner=turn_reservation.lease_owner,
-                        )
-                    return _json_error(
-                        "This topic is not part of the isolated Phase 2A canary.",
-                        409,
-                        "model_led_domain_not_migrated",
-                    )
-                _log_model_led_legacy_handoff(
-                    model_led_turn_result,
-                    thread_id=thread_id,
-                    streaming=False,
-                )
-                turn_deadline = _install_authoritative_request_deadline(
-                    getattr(g, "request_started_at", None)
-                )
-                if _legacy_handoff_budget_exhausted(turn_deadline):
-                    agent_result = _legacy_handoff_budget_result(
-                        retrieval_cache=retrieval_cache,
-                        intent="public-safety information",
-                    )
-                    model_led_turn_result = None
-                else:
-                    legacy_conn = get_db_connection()
-                    try:
-                        legacy_semantics = _prepare_legacy_semantic_turn(
-                            legacy_conn,
-                            message=message,
-                            state_envelope=state_envelope,
-                            event_context=event_context,
-                            event_resolution=event_resolution,
-                            history_rows=history_rows,
-                            thread_id=thread_id,
-                            request_started_at=getattr(g, "request_started_at", None),
-                        )
-                    finally:
-                        legacy_conn.close()
-                    relationship = legacy_semantics.relationship
-                    dimensions = legacy_semantics.dimensions
-                    active_event_result = legacy_semantics.active_event_result
-                    state_aware_event_result = legacy_semantics.state_aware_event_result
-                    civic_311_request = legacy_semantics.civic_311_request
-                    event_query_plan = legacy_semantics.event_query_plan
-                    stale_active_event = legacy_semantics.stale_active_event
-                    dialogue_decision = legacy_semantics.dialogue_decision
-                    direct_dialogue_result = legacy_semantics.direct_dialogue_result
-                    model_led_turn_result = None
-                    if (
-                        direct_dialogue_result is None
-                        and active_event_result is None
-                        and state_aware_event_result is None
-                        and not civic_311_request
-                        and _legacy_handoff_budget_exhausted(turn_deadline)
-                    ):
-                        agent_result = _legacy_handoff_budget_result(
-                            retrieval_cache=retrieval_cache,
-                            intent="public-safety information",
-                        )
-            else:
-                agent_result = _model_led_agent_result(
-                    model_led_turn_result,
-                    retrieval_cache=retrieval_cache,
-                )
-
+            agent_result = turn_proposal.agent_result
+            model_led_turn_result = turn_proposal.model_led_turn_result
+            model_led_diagnostics_result = turn_proposal.model_led_diagnostics_result
+            conversation_transition = turn_proposal.conversation_transition
+            transition = turn_proposal.transition
+            persisted_cache = turn_proposal.persisted_cache
+            invalidate_retrieval_cache = turn_proposal.invalidate_retrieval_cache
+            civic_311_context_update = turn_proposal.civic_311_context_update
+            civic_311_next_context = turn_proposal.civic_311_next_context
+            dialogue_next_context = turn_proposal.dialogue_next_context
+            dialogue_context_update = turn_proposal.dialogue_context_update
+        elif emergency_decision.is_active_emergency:
+            agent_result = _emergency_agent_result(
+                emergency_decision,
+                retrieval_cache,
+                detector_latency_ms=detector_latency_ms,
+            )
         if agent_result is None:
+            # Process-level rollback only (MODEL_LED_ORCHESTRATOR_MODE=off/legacy).
             if direct_dialogue_result is not None:
                 agent_result = direct_dialogue_result
                 _log_agent_metrics(
@@ -5385,45 +5367,20 @@ def post_conversation_message(thread_id: str):
                     request_started_at=getattr(g, "request_started_at", None),
                 )
             else:
-                # Authoritative model-led turns install a shared 15s deadline before
-                # transitional legacy RAG. Refuse to start heavy retrieval when the
-                # remaining budget cannot cover retrieval + persistence.
-                installed = current_deadline()
-                if installed is not None and _legacy_handoff_budget_exhausted(
-                    _global_deadline_from_installed(float(installed))
-                ):
-                    agent_result = _legacy_handoff_budget_result(
-                        retrieval_cache=retrieval_cache,
-                        intent="public-safety information",
-                    )
-                else:
-                    agent_result = _execute_agent_response_with_event_context(
-                        message,
-                        conversation_history=conversation_history,
-                        retrieval_cache=retrieval_cache,
-                        event_resolution=event_resolution,
-                        thread_id=thread_id,
-                        emergency_decision=emergency_decision,
-                    )
+                agent_result = _execute_agent_response_with_event_context(
+                    message,
+                    conversation_history=conversation_history,
+                    retrieval_cache=retrieval_cache,
+                    event_resolution=event_resolution,
+                    thread_id=thread_id,
+                    emergency_decision=emergency_decision,
+                )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
         resolved_entity = agent_result.get("resolved_entity")
-        if model_led_turn_result is not None:
-            conversation_transition = None
-            model_led_finalization = _model_led_finalization(
-                model_led_turn_result,
-                next_cache=next_cache,
-            )
-            transition = model_led_finalization.transition
-            persisted_cache = model_led_finalization.persisted_cache
-            invalidate_retrieval_cache = model_led_finalization.invalidate_retrieval_cache
-            civic_311_context_update = model_led_finalization.civic_311_context_update
-            civic_311_next_context = model_led_finalization.civic_311_next_context
-            dialogue_next_context = model_led_finalization.dialogue_next_context
-            dialogue_context_update = model_led_finalization.dialogue_context_update
-        else:
+        if turn_proposal is None:
             conversation_transition = (
                 _emergency_conversation_transition(conversation_state)
                 if emergency_decision.is_active_emergency
@@ -5848,100 +5805,37 @@ def post_conversation_message_stream(thread_id: str):
             )
             turn_failed = True
 
+        turn_proposal: Optional[ConversationTurnProposal] = None
         try:
             yield ": keepalive\n\n"
             maybe_fault("before_generation")
-            if emergency_request:
+            if model_led_request:
+                # Same authoritative lifecycle as JSON; SSE only frames the answer.
+                turn_proposal = _execute_authoritative_resident_turn(
+                    message=message,
+                    state_envelope=state_envelope,
+                    event_resolution=event_resolution,
+                    emergency_decision=emergency_decision,
+                    detector_latency_ms=detector_latency_ms,
+                    request_started_at=request_started_at,
+                    activation_mode=str(model_led_activation_mode),
+                )
+                deterministic_result = turn_proposal.agent_result
+                model_led_turn_result = turn_proposal.model_led_turn_result
+                model_led_diagnostics_result = turn_proposal.model_led_diagnostics_result
+            elif emergency_request:
                 deterministic_result = _emergency_agent_result(
                     emergency_decision,
                     retrieval_cache,
                     detector_latency_ms=detector_latency_ms,
                 )
-            elif model_led_request:
-                model_led_turn_result = _run_model_led_turn(
-                    message,
-                    state_envelope=state_envelope,
-                    event_resolution=event_resolution,
-                    request_started_at=request_started_at,
-                    activation_mode=str(model_led_activation_mode),
-                )
-                model_led_diagnostics_result = model_led_turn_result
-                if model_led_turn_result.status is ModelLedTurnStatus.NOT_YET_MIGRATED:
-                    if model_led_activation_mode == "isolated_canary":
-                        _fail_active_turn()
-                        completion_status = "rejected"
-                        error_code = "model_led_domain_not_migrated"
-                        yield _sse({
-                            "type": "error",
-                            "error": "This topic is not part of the isolated Phase 2A canary.",
-                            "code": error_code,
-                        })
-                        return
-                    _log_model_led_legacy_handoff(
-                        model_led_turn_result,
-                        thread_id=thread_id,
-                        streaming=True,
-                    )
-                    turn_deadline = _install_authoritative_request_deadline(
-                        request_started_at
-                    )
-                    if _legacy_handoff_budget_exhausted(turn_deadline):
-                        deterministic_result = _legacy_handoff_budget_result(
-                            retrieval_cache=retrieval_cache,
-                            intent="public-safety information",
-                        )
-                        model_led_turn_result = None
-                    else:
-                        legacy_conn = get_db_connection()
-                        try:
-                            legacy_turn = _prepare_legacy_semantic_turn(
-                                legacy_conn,
-                                message=message,
-                                state_envelope=state_envelope,
-                                event_context=event_context,
-                                event_resolution=event_resolution,
-                                history_rows=history_rows,
-                                thread_id=thread_id,
-                                request_started_at=request_started_at,
-                            )
-                        finally:
-                            legacy_conn.close()
-                        turn_relationship = legacy_turn.relationship
-                        turn_dimensions = legacy_turn.dimensions
-                        turn_active_event_result = legacy_turn.active_event_result
-                        turn_state_aware_event_result = legacy_turn.state_aware_event_result
-                        turn_civic_311_request = legacy_turn.civic_311_request
-                        turn_event_query_plan = legacy_turn.event_query_plan
-                        turn_stale_active_event = legacy_turn.stale_active_event
-                        turn_dialogue_decision = legacy_turn.dialogue_decision
-                        turn_direct_dialogue_result = legacy_turn.direct_dialogue_result
-                        if turn_dialogue_decision.controller_call_count:
-                            increment_llm_call_counter(
-                                turn_dialogue_decision.controller_call_count
-                            )
-                        model_led_turn_result = None
-                        if (
-                            turn_direct_dialogue_result is None
-                            and turn_active_event_result is None
-                            and turn_state_aware_event_result is None
-                            and not turn_civic_311_request
-                            and _legacy_handoff_budget_exhausted(turn_deadline)
-                        ):
-                            deterministic_result = _legacy_handoff_budget_result(
-                                retrieval_cache=retrieval_cache,
-                                intent="public-safety information",
-                            )
-                else:
-                    deterministic_result = _model_led_agent_result(
-                        model_led_turn_result,
-                        retrieval_cache=retrieval_cache,
-                    )
 
             direct_dialogue_request = turn_direct_dialogue_result is not None
             active_event_request = turn_active_event_result is not None
             state_aware_event_request = turn_state_aware_event_result is not None
             civic_311_structured_request = turn_civic_311_request
             if deterministic_result is None:
+                # Process-level rollback only (MODE=off/legacy).
                 if direct_dialogue_request:
                     deterministic_result = turn_direct_dialogue_result
                 elif active_event_request:
@@ -6139,23 +6033,15 @@ def post_conversation_message_stream(thread_id: str):
                 "retrieval_cache": next_cache,
                 "execution_degraded": bool(execution_metadata.get("execution_degraded")),
             }
-            if model_led_turn_result is not None:
-                conversation_transition = None
-                model_led_finalization = _model_led_finalization(
-                    model_led_turn_result,
-                    next_cache=next_cache,
-                )
-                transition = model_led_finalization.transition
-                persisted_cache = model_led_finalization.persisted_cache
-                invalidate_retrieval_cache = (
-                    model_led_finalization.invalidate_retrieval_cache
-                )
-                civic_311_context_update = (
-                    model_led_finalization.civic_311_context_update
-                )
-                civic_311_next_context = model_led_finalization.civic_311_next_context
-                dialogue_next_context = model_led_finalization.dialogue_next_context
-                dialogue_context_update = model_led_finalization.dialogue_context_update
+            if turn_proposal is not None:
+                conversation_transition = turn_proposal.conversation_transition
+                transition = turn_proposal.transition
+                persisted_cache = turn_proposal.persisted_cache
+                invalidate_retrieval_cache = turn_proposal.invalidate_retrieval_cache
+                civic_311_context_update = turn_proposal.civic_311_context_update
+                civic_311_next_context = turn_proposal.civic_311_next_context
+                dialogue_next_context = turn_proposal.dialogue_next_context
+                dialogue_context_update = turn_proposal.dialogue_context_update
             else:
                 conversation_transition = (
                     _emergency_conversation_transition(conversation_state)
