@@ -647,7 +647,9 @@ def _compile_task(
     if task.domain is SemanticDomain.CRIME:
         return _compile_crime(task, location_id, time_scope), status_sources, False
     if task.domain is SemanticDomain.DOCUMENTS:
-        return _compile_documents(task, location_id, time_scope), status_sources, False
+        return _compile_documents(
+            task, location_id, time_scope, trusted_context=trusted_context,
+        ), status_sources, False
     raise SemanticCompilationError("The semantic domain has no registered compiler mapping.")
 
 
@@ -807,16 +809,34 @@ def _compile_documents(
     task: SemanticTask,
     location_id: Optional[str],
     time_scope: Optional[Dict[str, Any]],
+    *,
+    trusted_context: Optional[Mapping[str, Any]] = None,
 ) -> List[Tuple[ToolId, Dict[str, Any], Tuple[CivicDomain, ...]]]:
     corpora, domains = _document_corpora(task.source_scope)
     source_types = []
     if task.source_scope in _DOCUMENT_SOURCE_TYPES:
         source_types = [_DOCUMENT_SOURCE_TYPES[task.source_scope].value]
+    query = task.subject or "Dorchester civic information"
+    prior = None
+    if isinstance(trusted_context, Mapping):
+        prior = trusted_context.get("previous_document")
+        if not (isinstance(prior, Mapping) and prior.get("subject")):
+            entity = trusted_context.get("previous_entity_profile")
+            if isinstance(entity, Mapping) and entity.get("display_name"):
+                prior = {"subject": entity.get("display_name")}
+    if isinstance(prior, Mapping) and prior.get("subject"):
+        lowered = str(query).casefold().strip()
+        if lowered in {
+            "this", "that", "it", "the issue", "the proposal", "the policy",
+            "the budget", "the organization", "the event", "the report",
+            "dorchester civic information",
+        }:
+            query = str(prior["subject"])
     return [(
         ToolId.SEARCH_DOCUMENTS,
         {
             "operation": "SEARCH",
-            "query": task.subject or "Dorchester civic information",
+            "query": query,
             "corpora": corpora,
             "location_id": location_id,
             "time_scope": time_scope,
