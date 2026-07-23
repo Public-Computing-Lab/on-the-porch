@@ -163,6 +163,12 @@ freshness operations; crime count, category, comparison, and freshness operation
 bounded meeting, news, community, and transcript retrieval. Every implementation uses a
 prepared query or bounded retrieval. There is no model-generated SQL or public vector write.
 
+Crime category aggregation uses a server-owned field priority:
+`offense_code_group` when present, otherwise `offense_description`. Results are normalized
+into readable offense families when patterns match, otherwise cleaned source labels.
+`Unknown` is never presented as a leading safety concern; category coverage below 40% yields
+a total-count limitation instead of fabricated categories.
+
 ## 9. Civic concept ontology
 
 Resident phrases map to a small reviewed set of canonical civic concepts, not directly to
