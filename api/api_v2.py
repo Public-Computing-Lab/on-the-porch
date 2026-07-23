@@ -4059,6 +4059,8 @@ def _run_model_led_turn(
     service = ModelLedTurnService(
         provider=provider,
         connection_factory=get_db_connection,
+        # Plain-text synthesis only — never the function-calling planner provider.
+        synthesis_generate=_civic_311_synthesis_call,
     )
     result = service.run(ModelLedTurnRequest(
         message=message,
@@ -4066,7 +4068,9 @@ def _run_model_led_turn(
         request_started_at=request_started_at,
         selected_entity_token=selected_entity_token,
     ))
-    increment_llm_call_counter(result.planner_call_count)
+    increment_llm_call_counter(
+        int(result.planner_call_count or 0) + int(result.synthesis_call_count or 0)
+    )
     print(
         json_dumps({
             "event": "model_led_turn",

@@ -8,8 +8,9 @@ Single backlog for nonblocking polish after Phase 5. Do not scatter TODO files.
 - Occasional entity-profile asks that clarify instead of resolving a seeded profile.
 - Cross-domain asks that clarify “which domain first” instead of combining evidence.
 
-## Source quality
-- Expand verified civic entity profiles beyond the current seed set.
+- Expand local news RSS bootstrap so neighborhood-news asks return passages instead of empty-index disclosures when corpus rows exist but retrieval misses.
+- Reject / sanitize any residual protocol-shaped synthesis text at the API response boundary (defense in depth beyond grounded_synthesis validation).
+
 - Stronger meeting-transcript metadata (speaker, meeting date) when ingestion provides it.
 - Broader allowlisted official announcement pages beyond the initial Boston.gov hosts.
 - Stronger stale/invalid source exclusion during incremental refresh.

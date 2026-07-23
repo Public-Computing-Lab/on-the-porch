@@ -104,6 +104,12 @@ def build_synthesis_prompt(
     )
 
 
+_PLANNER_ENVELOPE = re.compile(
+    r'^\s*\{\s*"action"\s*:\s*"(?:respond_directly|ask_clarification|gather_evidence)"',
+    re.IGNORECASE,
+)
+
+
 def validate_synthesis_against_evidence(
     answer: str,
     tool_results: Sequence[CivicToolResult],
@@ -114,6 +120,17 @@ def validate_synthesis_against_evidence(
     issues = []
     if not text:
         issues.append("empty_answer")
+        return False, tuple(issues)
+    # Planner function-call JSON must never surface as resident prose.
+    if _PLANNER_ENVELOPE.search(text) or (
+        text.startswith("{")
+        and '"arguments"' in text
+        and any(
+            key in text
+            for key in ('"response_text"', '"tasks"', '"response_kind"')
+        )
+    ):
+        issues.append("protocol_envelope")
         return False, tuple(issues)
     if _INTERNAL_TERMS.search(text):
         issues.append("internal_term")

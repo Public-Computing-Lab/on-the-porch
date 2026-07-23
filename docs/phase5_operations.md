@@ -78,7 +78,7 @@ python scripts/otp_ops.py bootstrap --write-vectors
 3. Restart gunicorn with the prior `.env`.
 4. Keep MySQL backups; do not drop `source_registry` unless intentionally rolling schema back.
 
-Phase 4 merge commit reference: `152dcc75`. Phase 5 merge commit is recorded after merge.
+Phase 4 merge commit reference: `152dcc75`. Phase 5 merge commit: `4c9c6092`.
 
 ## Privacy notes
 

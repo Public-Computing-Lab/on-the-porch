@@ -24,7 +24,7 @@ from civic_311 import build_compiled_311_plan, execute_311_plan
 from civic_crime import build_compiled_crime_plan, execute_crime_plan
 from civic_documents import build_compiled_document_plan, execute_document_plan
 from civic_entities import looks_like_entity_question, resolve_entity
-from grounded_synthesis import synthesize_grounded_answer
+from grounded_synthesis import SynthesisGenerate, synthesize_grounded_answer
 from civic_tool_catalog import (
     RegisteredToolRequest,
     ResolvedSemanticTimeScope,
@@ -259,9 +259,12 @@ class ModelLedTurnService:
         *,
         provider: OrchestratorProvider,
         connection_factory: ConnectionFactory,
+        synthesis_generate: Optional[SynthesisGenerate] = None,
     ) -> None:
         self.provider = provider
         self.connection_factory = connection_factory
+        # Plain-text synthesis only. Never reuse the function-calling planner provider.
+        self.synthesis_generate = synthesis_generate
         self.protocol = SanitizedPublicEvaluationProtocol(output_mode=FROZEN_OUTPUT_MODE)
 
     def run(self, request: TurnRequest) -> TurnResult:
@@ -1070,19 +1073,17 @@ class ModelLedTurnService:
             plan=document_plan,
             deadline=deadline,
         )
-        use_synthesis = len(civic.civic_tool_result.records) >= 2
-        synthesis_generate = None
-        if use_synthesis and hasattr(self.provider, "generate"):
-            def synthesis_generate(prompt: str, timeout_seconds: float) -> str:
-                response = self.provider.generate(prompt, timeout_seconds=timeout_seconds)
-                return response.text
+        use_synthesis = (
+            len(civic.civic_tool_result.records) >= 2
+            and callable(self.synthesis_generate)
+        )
 
         synthesis = synthesize_grounded_answer(
             resident_goal=request.message,
             trusted_state=context,
             tool_results=(civic.civic_tool_result,),
             fallback_answer=civic.answer,
-            generate=synthesis_generate if use_synthesis else None,
+            generate=self.synthesis_generate if use_synthesis else None,
             deadline=deadline,
             evidence_bundle=civic.evidence,
         )

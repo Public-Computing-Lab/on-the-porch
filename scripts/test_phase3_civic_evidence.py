@@ -140,6 +140,12 @@ def test_synthesis_validator() -> None:
     )
     assert not bad_ok
     assert bad_issues
+    envelope_ok, envelope_issues = validate_synthesis_against_evidence(
+        '{"action":"respond_directly","arguments":{"response_kind":"SOCIAL","response_text":"Dorchester had 12 reports."}}',
+        (tool,),
+    )
+    assert not envelope_ok
+    assert "protocol_envelope" in envelope_issues
 
 
 def test_entity_turn_call_counts() -> None:
