@@ -16,7 +16,6 @@ Nonblocking work after public-beta readiness. Do not scatter TODO files.
 
 ## Ranking / retrieval
 - Passage ranking across POLICY / TRANSCRIPT / NEWS / COMMUNITY.
-- Crime offense-group display names when `offense_code_group` is sparse.
 
 ## UI polish
 - Final citation chip visual design and source-type legend.
