@@ -370,6 +370,17 @@ window.ApiClient = {
   adminFlags: () => apiRequest('/admin/flags', { method: 'GET' }),
   adminInteractions: () => apiRequest('/admin/interactions', { method: 'GET' }),
   adminNoResults: () => apiRequest('/admin/no-results', { method: 'GET' }),
+  adminSources: () => apiRequest('/admin/sources', { method: 'GET' }),
+  adminIngestionRuns: (limit = 50) => apiRequest(`/admin/ingestion/runs?limit=${limit}`, { method: 'GET' }),
+  adminDocuments: (limit = 50) => apiRequest(`/admin/documents?limit=${limit}`, { method: 'GET' }),
+  adminBootstrapIngestion: (payload = {}) => apiRequest('/admin/ingestion/bootstrap', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  adminSetSourceEnabled: (sourceId, enabled) => apiRequest(`/admin/sources/${encodeURIComponent(sourceId)}/enabled`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled: Boolean(enabled) }),
+  }),
   adminCommentFlag: (flagId, comment, resolved) => apiRequest(`/admin/flags/${flagId}/comment`, {
     method: 'PUT',
     body: JSON.stringify({ moderator_comment: comment, resolved }),

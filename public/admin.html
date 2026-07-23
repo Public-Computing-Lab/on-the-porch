@@ -1431,6 +1431,7 @@
       <button class="tab" data-tab="flags" type="button">Flags</button>
       <button class="tab" data-tab="interactions" type="button">Interactions</button>
       <button class="tab" data-tab="noresults" type="button">No results</button>
+      <button class="tab" data-tab="sources" type="button">Sources</button>
       <button class="tab" data-tab="knowledge" type="button">Community Notes</button>
     </nav>
 
@@ -1513,6 +1514,48 @@
         </div>
       </section>
 
+      <section class="panel tab-panel" data-panel="sources" hidden>
+        <h2>Source registry</h2>
+        <p class="panel-copy">Registered civic sources, freshness status, and recent ingestion runs. Bootstrap seeds the registry and catalogs indexed documents.</p>
+        <div class="pill-row" style="margin-bottom: 16px;">
+          <button class="btn-primary" id="sources-bootstrap" type="button">Run bootstrap</button>
+          <span id="sources-summary" class="panel-copy">—</span>
+        </div>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Family</th>
+                <th>Status</th>
+                <th>Enabled</th>
+                <th>Chunks</th>
+                <th>Last success</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="sources-body"></tbody>
+          </table>
+        </div>
+        <h2 style="margin-top: 24px;">Recent ingestion runs</h2>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Source</th>
+                <th>Job</th>
+                <th>Status</th>
+                <th>Docs</th>
+                <th>Chunks</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody id="ingestion-runs-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="panel tab-panel" data-panel="knowledge" hidden>
         <h2>Community Notes</h2>
         <p class="panel-copy">Add local knowledge the chatbot uses when answering questions. Notes with an expiry automatically stop being used after that date.</p>
@@ -1572,8 +1615,8 @@
     </div>
   </div>
 
-  <script src="config.js?v=20260317b"></script>
-  <script src="api.js?v=20260317b"></script>
+  <script src="config.js?v=20260722p5"></script>
+  <script src="api.js?v=20260722p5"></script>
   <script>
     const state = {
       user: null,
@@ -1581,6 +1624,10 @@
       flags: [],
       interactions: [],
       noResults: [],
+      sources: [],
+      sourceSummary: null,
+      catalog: null,
+      ingestionRuns: [],
       activeTab: 'overview',
       theme: 'dark',
       knowledge: [],
@@ -2077,6 +2124,8 @@
       });
       if (nextTab === 'knowledge') {
         loadKnowledge();
+      } else if (nextTab === 'sources') {
+        loadSources();
       } else {
         closeAdminNoteModal();
       }
@@ -2087,13 +2136,117 @@
       window.location.href = 'index.html';
     }
 
+    function renderSources() {
+      const summary = state.sourceSummary || {};
+      const catalog = state.catalog || {};
+      const summaryEl = document.getElementById('sources-summary');
+      if (summaryEl) {
+        summaryEl.textContent = [
+          `${summary.total || 0} sources`,
+          `${summary.healthy || 0} healthy`,
+          `${summary.failed || 0} failed`,
+          `${catalog.documents || 0} docs`,
+          `${catalog.chunks || 0} chunks`,
+        ].join(' · ');
+      }
+      const body = document.getElementById('sources-body');
+      if (!body) return;
+      body.innerHTML = '';
+      if (!state.sources.length) {
+        body.innerHTML = '<tr><td class="empty" colspan="7">No registered sources yet. Run bootstrap.</td></tr>';
+      } else {
+        state.sources.forEach((row) => {
+          const tr = document.createElement('tr');
+          const enabled = Boolean(row.enabled);
+          tr.innerHTML = `
+            <td><div>${escapeHtml(row.title || row.source_id)}</div><div class="muted mono" style="font-size:12px">${escapeHtml(row.source_id)}</div></td>
+            <td>${escapeHtml(row.family || '—')}</td>
+            <td>${escapeHtml(row.status || '—')}</td>
+            <td>${enabled ? 'yes' : 'no'}</td>
+            <td class="mono">${escapeHtml(String(row.chunk_count ?? '—'))}</td>
+            <td class="muted">${escapeHtml(formatDate(row.last_successful_ingest_at))}</td>
+            <td><button class="btn-ghost btn-sm" type="button" data-source-toggle="${escapeHtml(row.source_id)}" data-enabled="${enabled ? '1' : '0'}">${enabled ? 'Disable' : 'Enable'}</button></td>
+          `;
+          body.appendChild(tr);
+        });
+        body.querySelectorAll('[data-source-toggle]').forEach((button) => {
+          button.addEventListener('click', async () => {
+            const sourceId = button.getAttribute('data-source-toggle');
+            const currentlyEnabled = button.getAttribute('data-enabled') === '1';
+            const result = await ApiClient.adminSetSourceEnabled(sourceId, !currentlyEnabled);
+            if (!result.success) {
+              window.alert(result.error || 'Failed to update source');
+              return;
+            }
+            await loadSources();
+          });
+        });
+      }
+      const runsBody = document.getElementById('ingestion-runs-body');
+      if (!runsBody) return;
+      runsBody.innerHTML = '';
+      if (!state.ingestionRuns.length) {
+        runsBody.innerHTML = '<tr><td class="empty" colspan="7">No ingestion runs yet.</td></tr>';
+        return;
+      }
+      state.ingestionRuns.forEach((run) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="mono">${escapeHtml(String(run.id || run.run_id || '—'))}</td>
+          <td>${escapeHtml(run.source_id || '—')}</td>
+          <td>${escapeHtml(run.job_name || '—')}</td>
+          <td>${escapeHtml(run.status || '—')}</td>
+          <td class="mono">${escapeHtml(String(run.documents_upserted ?? 0))}</td>
+          <td class="mono">${escapeHtml(String(run.chunks_upserted ?? 0))}</td>
+          <td class="muted">${escapeHtml(run.error_message || '—')}</td>
+        `;
+        runsBody.appendChild(tr);
+      });
+    }
+
+    async function loadSources() {
+      const [sources, runs] = await Promise.all([
+        ApiClient.adminSources(),
+        ApiClient.adminIngestionRuns(40),
+      ]);
+      if (!sources.success) {
+        window.alert(sources.error || 'Failed to load sources');
+        return;
+      }
+      state.sources = sources.data.sources || [];
+      state.sourceSummary = sources.data.summary || null;
+      state.catalog = sources.data.catalog || null;
+      state.ingestionRuns = runs.success ? (runs.data.runs || []) : [];
+      renderSources();
+    }
+
+    async function runSourcesBootstrap() {
+      const button = document.getElementById('sources-bootstrap');
+      if (button) button.disabled = true;
+      try {
+        const result = await ApiClient.adminBootstrapIngestion({
+          include_local_corpus: true,
+          write_vectors: false,
+        });
+        if (!result.success) {
+          window.alert(result.error || 'Bootstrap failed');
+          return;
+        }
+        await loadSources();
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+
     async function loadAll() {
       setRefreshStatus('Refreshing…');
-      const [stats, flags, interactions, noResults] = await Promise.all([
+      const [stats, flags, interactions, noResults, sources, runs] = await Promise.all([
         ApiClient.adminStats(),
         ApiClient.adminFlags(),
         ApiClient.adminInteractions(),
         ApiClient.adminNoResults(),
+        ApiClient.adminSources(),
+        ApiClient.adminIngestionRuns(40),
       ]);
 
       const failed = [stats, flags, interactions, noResults].find((result) => !result.success);
@@ -2122,10 +2275,19 @@
       state.flags = flags.data.flags || [];
       state.interactions = interactions.data.interactions || [];
       state.noResults = noResults.data.no_results || [];
+      if (sources.success) {
+        state.sources = sources.data.sources || [];
+        state.sourceSummary = sources.data.summary || null;
+        state.catalog = sources.data.catalog || null;
+      }
+      if (runs.success) {
+        state.ingestionRuns = runs.data.runs || [];
+      }
       renderOverview();
       renderFlags();
       renderInteractions();
       renderNoResults();
+      renderSources();
       setRefreshStatus(`Updated ${new Date().toLocaleTimeString()}`);
     }
 
@@ -2169,6 +2331,10 @@
     elements.refreshButton.addEventListener('click', loadAll);
     elements.logoutButton.addEventListener('click', logout);
     elements.accessLogout.addEventListener('click', logout);
+    const sourcesBootstrap = document.getElementById('sources-bootstrap');
+    if (sourcesBootstrap) {
+      sourcesBootstrap.addEventListener('click', runSourcesBootstrap);
+    }
     elements.openNoteModal.addEventListener('click', openAdminNoteModal);
     elements.closeNoteModal.addEventListener('click', closeAdminNoteModal);
     elements.noteModal.addEventListener('click', handleNoteModalBackdropClick);

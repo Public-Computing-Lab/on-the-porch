@@ -109,6 +109,28 @@
       "official_url": "https://www.boston.gov/departments/inspectional-services",
       "source_authority": "City of Boston",
       "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "bpl",
+      "display_name": "Boston Public Library",
+      "aliases": ["bpl", "boston library", "public library"],
+      "entity_kind": "agency",
+      "role_summary": "City library system providing free books, digital resources, programs, and neighborhood branch services.",
+      "resident_relevance": "Dorchester residents use local BPL branches for programs, computers, and community meeting space.",
+      "official_url": "https://www.bpl.org/",
+      "source_authority": "Boston Public Library",
+      "verification_status": "verified_profile"
+    },
+    {
+      "stable_id": "dothouse",
+      "display_name": "DotHouse Health",
+      "aliases": ["dothouse", "dot house", "dothouse health center"],
+      "entity_kind": "organization",
+      "role_summary": "Community health center serving Dorchester residents with primary care and related health services.",
+      "resident_relevance": "Residents seek DotHouse for local primary care, behavioral health, and community health programs.",
+      "official_url": "https://www.dothousehealth.org/",
+      "source_authority": "DotHouse Health",
+      "verification_status": "verified_profile"
     }
   ]
 }

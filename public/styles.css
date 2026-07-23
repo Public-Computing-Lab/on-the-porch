@@ -1194,6 +1194,52 @@ body[data-events-collapsed='true'] .events-resizer {
   word-break: break-word;
 }
 
+.source-chip {
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.source-chip:focus-visible {
+  outline: 2px solid var(--accent, #30837b);
+  outline-offset: 2px;
+}
+
+.message-limitations {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.message-limitations ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
+}
+
+.message-limitations li {
+  margin: 0 0 4px;
+}
+
+@media (max-width: 720px) {
+  .message-meta {
+    gap: 8px;
+  }
+
+  .source-chip,
+  .meta-pill {
+    max-width: 100%;
+  }
+
+  .events-panel {
+    max-height: 42vh;
+  }
+}
+
 .chat-container {
   display: flex;
   flex-direction: column;

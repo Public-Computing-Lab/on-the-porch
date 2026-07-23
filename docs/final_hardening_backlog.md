@@ -1,46 +1,60 @@
 # Final hardening backlog
 
-Single backlog for nonblocking polish after Phase 4. Do not scatter TODO files.
+Single backlog for nonblocking polish after Phase 5. Do not scatter TODO files.
 
-## Semantic edge cases
+## Semantic quality
 - Rare paraphrases that still ask for an unnecessary time period after a broad safety overview.
-- Occasional planner `DOMAIN_ONLY` / `USER_MEANING` clarifications on broad “safety concerns” or “summarize recent crime” wording; clearer crime-category asks already succeed.
-- Occasional entity-profile asks (for example “What is Eversource?”) that clarify instead of resolving the seeded profile; clearer org-name asks usually succeed.
-- Multi-entity names that partially overlap multiple profiles and need better disambiguation ranking.
-- Cross-domain asks that currently clarify “which domain first” instead of combining evidence when both are clearly requested.
-- Crime GROUP currently surfaces many `Unknown` offense labels when `offense_code_group` is sparse; reuse the richer prepared-SQL offense expression.
+- Occasional planner clarifications on broad “safety concerns” wording; clearer crime-category asks succeed.
+- Occasional entity-profile asks that clarify instead of resolving a seeded profile.
+- Cross-domain asks that clarify “which domain first” instead of combining evidence.
+
+## Source quality
+- Expand verified civic entity profiles beyond the current seed set.
+- Stronger meeting-transcript metadata (speaker, meeting date) when ingestion provides it.
+- Broader allowlisted official announcement pages beyond the initial Boston.gov hosts.
+- Stronger stale/invalid source exclusion during incremental refresh.
+
+## Ranking / retrieval
+- Document passage ranking across POLICY / TRANSCRIPT / NEWS / COMMUNITY when several corpora return hits.
+- Crime offense-group display names for uncommon BPD labels when `offense_code_group` is sparse.
 
 ## UI polish
-- Final citation chip visual design and accessibility contrast pass.
-- Long multi-source answers: collapsible source groups and clearer source-type legend.
-- Event sidebar spacing when Phase 3 source chips are present.
-- Final visual redesign / brand pass (explicitly deferred past Phase 4).
+- Final citation chip visual design and source-type legend.
+- Long multi-source answers: collapsible source groups.
+- Event sidebar spacing with source chips present.
+- Final brand / visual redesign (explicitly deferred).
 
-## Ranking refinements
-- Document passage ranking across POLICY / TRANSCRIPT / NEWS / COMMUNITY when several corpora return hits.
-- Crime offense-group display names for uncommon BPD labels.
+## Accessibility
+- Additional screen-reader polish for streaming deltas.
+- Ensure limitation text remains visible when many citation chips wrap.
 
-## Optional performance optimization
+## Mobile
+- Further events-panel compaction on very small phones.
+- Conversation list gesture polish.
+
+## Performance
 - Shared connection reuse for crime freshness + aggregate queries.
 - Avoid loading retrieval stack for pure entity-profile turns beyond the current short-circuit.
 
-## Source-quality improvements (Phase 5)
-- Populate and maintain the local document/source index (empty index currently returns safe limitations).
-- Expand verified civic entity profiles beyond the initial seed set.
-- Stronger meeting-transcript metadata (speaker, meeting date) when ingestion provides it.
-- Stale/invalid source exclusion during ingestion.
+## Load
+- Multi-worker soak and latency percentiles under production-like concurrent guests.
 
-## Final accessibility work
-- Source chip keyboard focus order and screen-reader labels.
-- Ensure limitation text remains visible when citations wrap on narrow screens.
+## Security / privacy
+- Final review of operator audit retention windows.
+- Optional redaction policy for admin interaction viewers.
 
-## Rollback / legacy retirement (post Phase 4)
-- Delete deprecated `isolated_canary` and `shadow_or_offline_replay` mode names after no callers remain.
-- Further delete or gate `unified_chatbot` / `intent_router` / phrase planners once MODE=off rollback is no longer required.
-- Migrate remaining offline ingest scripts from `google.generativeai` to `google-genai` when Phase 5 touches them.
+## Operations
+- Remote staging host provisioning (FQDN, TLS, staging DB) still operator-blocked.
+- Automate DreamHost/process-supervisor restart verification on a real staging host.
+- Migrate remaining offline ingest scripts from `google.generativeai` to `google-genai`.
 
-## Final release testing
-- Full semantic holdout / external audit after Phase 5 ingestion and UI completion.
-- Load and latency soak under multi-worker authoritative mode.
+## Release evaluation
+- Full semantic holdout / external audit after UI and staging host are complete.
 - Design QA for the end-of-product visual pass.
-- Public deployment checklist (not started in Phase 4).
+
+## Deployment
+- Public production deploy checklist (not authorized in Phase 5).
+- Production secret management path confirmation.
+
+## Documentation
+- Keep a single architecture doc (`docs/answering_architecture.md`) and operations pack (`docs/phase5_operations.md`); avoid overlapping manuals.

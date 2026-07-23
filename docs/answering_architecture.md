@@ -420,7 +420,8 @@ vector writes disabled; `CIVIC_311_HYBRID_MODE` rollback-only (prefer `disabled`
 **Phase 5 boundaries:** source ingestion and index population; remaining UI/accessibility
 polish; load tests; final release holdout; removal of deprecated canary/shadow mode names
 and further rollback-stack deletion after caller proof. Tracked in
-`docs/final_hardening_backlog.md`.
+`docs/final_hardening_backlog.md`. Operator workflows and the source registry are
+documented in `docs/phase5_operations.md`.
 
 ## 26. Semantic debt and deprecation map
 
