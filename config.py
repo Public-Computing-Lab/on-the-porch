@@ -268,7 +268,9 @@ EXECUTION_LLM_PLANNER_ENABLED = _truthy("EXECUTION_LLM_PLANNER_ENABLED", "true")
 EXECUTION_PIPELINE_LOG = _truthy("EXECUTION_PIPELINE_LOG", "true")
 EXECUTION_PIPELINE_MAX_WORKERS = _int("EXECUTION_PIPELINE_MAX_WORKERS", 4)
 ANSWER_SYNTHESIS_ENABLED = _truthy("ANSWER_SYNTHESIS_ENABLED", "true")
-CIVIC_311_HYBRID_MODE = _env("CIVIC_311_HYBRID_MODE", "auto").strip().lower()
+# Rollback-only when MODEL_LED_ORCHESTRATOR_MODE=off. Authoritative turns never
+# use this hybrid stack (repair is always disabled on resident paths).
+CIVIC_311_HYBRID_MODE = _env("CIVIC_311_HYBRID_MODE", "disabled").strip().lower()
 CIVIC_311_PROVIDER_COOLDOWN_SECONDS = _int("CIVIC_311_PROVIDER_COOLDOWN_SECONDS", 60)
 FAST_FOLLOWUP_GATE_ENABLED = _truthy("FAST_FOLLOWUP_GATE_ENABLED", "true")
 CONVERSATION_RELATIONSHIP_SHADOW_ENABLED = _truthy(
@@ -316,12 +318,15 @@ GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 25)
 GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 30)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 2)
 
-# Model-led orchestrator deployment policy. ``off`` is the explicit legacy rollback,
-# ``isolated_canary`` requires the non-production canary header, and
-# ``authoritative`` gives ordinary resident turns the first semantic opportunity.
+# Authoritative model-led runtime policy (process-level; restart to change).
+# - authoritative: normal resident product path (JSON/SSE share one lifecycle)
+# - off / legacy: explicit process-level rollback to pre-model-led interpretation
+# Deprecated compatibility values (not used by normal product traffic):
+# - shadow_or_offline_replay / shadow / offline → treated as off for residents
+# - isolated_canary → header-gated non-production only; removal target Phase 5
 _MODEL_LED_ORCHESTRATOR_MODE_RAW = _env(
     "MODEL_LED_ORCHESTRATOR_MODE",
-    "off",
+    "authoritative",
 ).strip().lower()
 _MODEL_LED_MODE_ALIASES = {
     "offline": "shadow_or_offline_replay",
@@ -339,15 +344,22 @@ MODEL_LED_ORCHESTRATOR_MODE_VALID = MODEL_LED_ORCHESTRATOR_MODE in {
     "authoritative",
 }
 if not MODEL_LED_ORCHESTRATOR_MODE_VALID:
-    # Fail closed to the legacy path in development. Production launch validation
-    # rejects the invalid raw value rather than serving with an ambiguous policy.
+    # Fail closed: never invent an ambiguous policy. Development falls back to
+    # off (rollback). Production launch validation rejects the invalid value.
     MODEL_LED_ORCHESTRATOR_MODE = "off"
+# Retained for offline tooling compatibility; not used by the authoritative path.
 MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS = max(
     0.25,
     min(3.0, _float("MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS", 1.5)),
 )
 MODEL_LED_CANARY_HEADER_NAME = "X-On-The-Porch-Canary"
 MODEL_LED_CANARY_HEADER_VALUE = "model-led-phase2a"
+# Hard model-call policy for authoritative turns (enforced by ModelCallLedger).
+MODEL_LED_MAX_PLANNER_CALLS = 1
+MODEL_LED_MAX_SYNTHESIS_CALLS = 1
+MODEL_LED_MAX_TOTAL_MODEL_CALLS = 2
+MODEL_LED_REPAIR_CALLS_ALLOWED = 0
+MODEL_LED_TURN_DEADLINE_SECONDS = 15.0
 
 # ============================================================================
 # Embeddings / vector stores

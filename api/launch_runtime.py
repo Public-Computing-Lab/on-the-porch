@@ -146,8 +146,8 @@ def validate_launch_runtime(
         "authoritative",
     }:
         errors.append(
-            "MODEL_LED_ORCHESTRATOR_MODE must be off/legacy, "
-            "shadow_or_offline_replay, isolated_canary, or authoritative"
+            "MODEL_LED_ORCHESTRATOR_MODE must be authoritative or off/legacy "
+            "(deprecated compat: shadow_or_offline_replay, isolated_canary)"
         )
     elif model_led_mode == "authoritative" and not (
         source.get("GEMINI_API_KEY") or ""
@@ -155,12 +155,24 @@ def validate_launch_runtime(
         errors.append(
             "MODEL_LED_ORCHESTRATOR_MODE=authoritative needs a configured planner provider"
         )
+    if model_led_mode == "authoritative":
+        if _truthy(source.get("DYNAMIC_SQL_ENABLED"), "false"):
+            errors.append("DYNAMIC_SQL_ENABLED must be false under authoritative mode")
+        if _truthy(source.get("CHAT_VECTOR_WRITES_ENABLED"), "false"):
+            errors.append(
+                "CHAT_VECTOR_WRITES_ENABLED must be false under authoritative mode"
+            )
 
-    civic_hybrid_mode = (source.get("CIVIC_311_HYBRID_MODE") or "auto").strip().lower()
+    civic_hybrid_mode = (source.get("CIVIC_311_HYBRID_MODE") or "disabled").strip().lower()
     if civic_hybrid_mode not in {"disabled", "auto", "required"}:
         errors.append("CIVIC_311_HYBRID_MODE must be disabled, auto, or required")
     if civic_hybrid_mode == "required" and not (source.get("GEMINI_API_KEY") or "").strip():
         errors.append("CIVIC_311_HYBRID_MODE=required needs a configured model provider")
+    if model_led_mode == "authoritative" and civic_hybrid_mode == "required":
+        errors.append(
+            "CIVIC_311_HYBRID_MODE=required is incompatible with authoritative mode "
+            "(legacy 311 hybrid is rollback-only)"
+        )
 
     if (source.get("OTP_TURN_IDEMPOTENCY_FAULTS") or "").strip() == "1":
         errors.append(

@@ -21,17 +21,20 @@ GEMINI_REQUEST_TIMEOUT=25
 GEMINI_STREAM_TIMEOUT=30
 GEMINI_MAX_ATTEMPTS=2
 
-# Phase 2 modes: off/legacy (process-level rollback), isolated_canary, authoritative.
-# Authoritative requires the configured planner provider. Changing modes requires restart.
-MODEL_LED_ORCHESTRATOR_MODE=off
-MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS=1.5
-# Structured 311 model policy: disabled, auto, or required.
-# auto enables planner/synthesis only when GEMINI_API_KEY is configured.
-CIVIC_311_HYBRID_MODE=auto
-# Optional overrides. Omit them to follow CIVIC_311_HYBRID_MODE.
-# CIVIC_311_PLANNER_ENABLED=true
-# CIVIC_311_SYNTHESIS_ENABLED=true
+# Runtime mode (process-level; restart required to change):
+#   authoritative — normal product path (JSON/SSE share one lifecycle)
+#   off / legacy  — explicit rollback only; do not run concurrently with authoritative
+# Deprecated (compat only): shadow_or_offline_replay, isolated_canary
+MODEL_LED_ORCHESTRATOR_MODE=authoritative
+# Planner/synthesis use the frozen google-genai provider (see authoritative_runtime_freeze).
+# Authoritative turns: planner ≤1, synthesis ≤1, repair = 0, total ≤2, deadline 15s.
+# MODEL_LED_ORCHESTRATOR_SHADOW_TIMEOUT_SECONDS is obsolete for resident traffic.
+# Legacy structured-311 hybrid controls apply only when MODE=off (rollback).
+# Prefer disabled under authoritative; repair is always impossible on resident paths.
+CIVIC_311_HYBRID_MODE=disabled
 CIVIC_311_PROVIDER_COOLDOWN_SECONDS=60
+# Authoritative conversation routes install a 15s GlobalDeadline; this 30s budget
+# must not override them on model-led turns.
 REQUEST_BUDGET_SECONDS=30
 CHROMA_MAX_ATTEMPTS=2
 DYNAMIC_SQL_ENABLED=false
@@ -39,6 +42,8 @@ CHAT_VECTOR_WRITES_ENABLED=false
 ADMIN_KNOWLEDGE_AUTO_INGEST_ENABLED=false
 SQL_QUERY_TIMEOUT_SECONDS=8
 SQL_RESULT_LIMIT=500
+# Redis is unsupported. CACHE_BACKEND=redis refuses to start.
+# Public vector writes and dynamic SQL must remain disabled.
 
 # ============================================================================
 # API and session configuration

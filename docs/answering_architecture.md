@@ -15,31 +15,37 @@ communicate; deterministic capabilities establish facts.
 The modern endpoints are `POST /conversations/<thread_id>/messages` and its `/stream`
 variant in `api/api_v2.py`. Both enforce identity, ownership, rate limits, CSRF, message
 validation, and turn idempotency before generation. Emergency interception precedes
-history-dependent processing. Normal requests load MySQL thread state and recent history,
-resolve trusted UI context, classify relationship and dimensions, attempt deterministic
-event handling, run the rule-first semantic dialogue controller, then call the selected
-domain capability or existing agent pipeline. The final answer, sources, state,
-cache metadata, and idempotency completion are committed in one MySQL transaction. JSON
-and SSE serialize that persisted result; completed retries replay it.
+history-dependent processing. Under `MODEL_LED_ORCHESTRATOR_MODE=authoritative`, JSON and
+SSE share one transport-neutral lifecycle in `api/conversation_turn.py` /
+`_execute_authoritative_resident_turn`: emergency result → model-led invocation → state
+proposal → answer validation → persistence-ready result → diagnostics, under one 15-second
+`GlobalDeadline`. Transport handlers only parse, authenticate, frame HTTP/SSE, and
+serialize. The final answer, sources, state, cache metadata, and idempotency completion are
+committed in one MySQL transaction. Completed retries replay that result with zero new model
+calls.
+
+Process-level rollback (`off` / `legacy`) retains the pre-model-led phrase routers and RAG
+stack; it must not run concurrently with authoritative product traffic.
 
 ## 3. Current responsibility map
 
 | Responsibility | Current implementation |
 | --- | --- |
-| Transport, auth, ownership, persistence | `api/api_v2.py`, `api/security.py` |
+| Transport, auth, ownership, framing | `api/api_v2.py`, `api/security.py` |
+| Shared JSON/SSE turn lifecycle | `api/conversation_turn.py`, `_execute_authoritative_resident_turn` |
 | Turn idempotency | `api/turn_idempotency.py`, migration 011 |
 | Rate limiting and shared cache | `api/rate_limit.py`, `api/mysql_cache.py` |
-| Request deadline and metrics | `on_the_porch/request_budget.py`, `api/request_metrics.py` |
-| Relationship, dimensions, state | `conversation_relationship.py`, `conversation_dimensions.py`, `conversation_state.py`, `conversation_transitions.py` |
-| Semantic turn strategy | `semantic_dialogue_controller.py`; domain hints in `civic_311.py`, `event_query_context.py`, and `api/api_v2.py` |
+| Request deadline and metrics | `answering_kernel.GlobalDeadline`, `request_budget.py`, `api/request_metrics.py` |
+| Authoritative turn service | `model_led_turn_service.py` |
+| Planner / provider / compiler | `semantic_planner.py`, `gemini_semantic_planner_provider.py` (`google-genai`), `sanitized_orchestrator_protocol.py`, `semantic_plan_compiler.py` |
+| Domain capabilities | `event_query_context.py`, `civic_311.py`, `civic_crime.py`, `civic_documents.py`, `civic_entities.py` |
+| Evidence + grounded synthesis | `civic_evidence.py`, `grounded_synthesis.py`, legacy `EvidenceBundle` adapter |
+| Conversation state | `conversation_state.py` (one authoritative schema) |
 | Emergency policy | `emergency_routing.py` |
-| Event capability | `event_query_context.py`, `event_relevance.py`, `event_context.py` |
-| Structured civic facts | `sql_chat/prepared_sql.py`; compatibility code in `sql_chat/app4.py` |
-| Plan and execution | `execution_plan.py`, `plan_builder.py`, `plan_executor.py`, `unified_chatbot.py` |
-| RAG and vector retrieval | `rag stuff/retrieval.py`, `rag stuff/vectordb_io.py` |
-| Answering and validation | `answer_synthesizer.py`, `answer_validator.py`, `answer_voice.py`, `resident_response.py`, plus compatibility logic in `unified_chatbot.py` |
-| Freshness and coverage | `source_freshness.py`, `civic_source_status` |
-| Runtime safety | `api/launch_runtime.py`, `api/gunicorn.conf.py` |
+| Freshness and coverage | `source_freshness.py` |
+| Runtime safety / config | `api/launch_runtime.py`, `api/gunicorn.conf.py`, `config.py` |
+| Rollback-only (MODE=off) | `semantic_dialogue_controller.py`, `intent_router.py`, `unified_chatbot.py`, phrase event/311 planners |
+| Offline evaluation archive | `archive/offline_evaluation/` |
 
 ## 4. Problems with the original architecture
 
@@ -360,16 +366,12 @@ Event and 311 turns do not silently return to legacy semantic authority in autho
 Emergency interception and completed idempotent replay occur before the planner. JSON and SSE
 share the same model-led execution and finalization helpers.
 
-Not-yet-migrated civic domains (for example public-safety/crime and generic document RAG) receive
-exactly one transitional handoff at the API boundary after the model-led planner returns
-`NOT_YET_MIGRATED`. The same request-scoped 15-second `GlobalDeadline` covers that legacy
-handoff, validation, persistence, and response finalization; the legacy 30-second request budget
-must not override it. Rollback to legacy interpretation requires an explicit process-level mode
-change and restart (`off` / `legacy`).
-
-The isolated canary mode (`MODEL_LED_ORCHESTRATOR_MODE=isolated_canary` plus the configured
-`X-On-The-Porch-Canary` header) remains available for non-production opt-in testing and rejects
-not-yet-migrated domains with HTTP 409 instead of handing off.
+Phase 4 removed the API-boundary `NOT_YET_MIGRATED` legacy handoff from authoritative traffic.
+Unsupported domain combinations clarify inside the turn service. The same request-scoped
+15-second `GlobalDeadline` covers planner, tools, optional synthesis, validation, persistence,
+and response finalization; the legacy 30-second request budget must not override it. Rollback to
+legacy interpretation requires an explicit process-level mode change and restart (`off` /
+`legacy`). Deprecated canary/shadow mode names remain recognized for compatibility only.
 
 The authoritative runtime freeze that matches the running planner/compiler configuration is
 `evaluation/model_led_turn_service/authoritative_runtime_freeze.json` (prompt v20 and later).
@@ -379,13 +381,45 @@ prompt generalization.
 
 Phase 3 migrates crime/public safety, documents (policy, meetings, news, community),
 civic entity profiles, and optional grounded synthesis into the same model-led turn
-service. Remaining transitional handoff is limited to domains still outside the migrated
-set (notably pure LOCATION-only requests that are not event-detail rewrites). Rollback to
-legacy interpretation still requires an explicit process-level mode change and restart
-(`off` / `legacy`).
+service.
 
-Phase 4 remains future work (broader product surfaces beyond the civic evidence layer).
-Production hardening and final release testing are tracked in
+## 25a. Phase 4 runtime consolidation
+
+Phase 4 removes competing semantic authority from the authoritative resident path and
+converges JSON/SSE onto one execution/finalization function.
+
+**Lifecycle (authoritative):** authentication / ownership / validation → emergency
+interception → idempotency or completed replay → trusted server-owned state → one semantic
+planner call → guarded semantic validation → deterministic capability compilation → bounded
+deterministic evidence tools → optional one grounded synthesis call → claim and citation
+validation → server-derived state transition → atomic persistence → JSON or SSE response.
+
+**Hard model-call limits:** planner ≤ 1, synthesis ≤ 1, total ≤ 2, repair = 0, recursive
+loops = 0. Active planner/synthesis use the maintained `google-genai` SDK. Legacy
+`google.generativeai` remains only in offline/ingest/rollback modules
+(`unified_chatbot.py`, RAG ingest scripts, `sql_chat/app4.py`).
+
+**Active modules:** `api/conversation_turn.py`, `model_led_turn_service.py`, planner/compiler
+stack, civic domain adapters, `civic_evidence` / `grounded_synthesis`, `conversation_state`,
+`emergency_routing`, `GlobalDeadline`.
+
+**Removed from authoritative resident traffic:** API-boundary `NOT_YET_MIGRATED` legacy
+handoff; secondary phrase routers for events/311/crime/documents; repair LLM wiring on
+resident 311 helpers; `orchestrator_shadow` (moved to `archive/offline_evaluation/`).
+LOCATION resolves inside the turn service. Unsupported domain sets clarify; they do not
+silently fall back to legacy semantics.
+
+**Rollback:** `MODEL_LED_ORCHESTRATOR_MODE=off` (alias `legacy`) is process-level only,
+requires restart, and must not run concurrently with authoritative product traffic.
+`isolated_canary` and `shadow_or_offline_replay` are deprecated compatibility values.
+
+**Configuration (authoritative):** planner/synthesis models and timeouts from the
+authoritative freeze; 15s turn deadline; Redis unsupported; dynamic SQL disabled; public
+vector writes disabled; `CIVIC_311_HYBRID_MODE` rollback-only (prefer `disabled`).
+
+**Phase 5 boundaries:** source ingestion and index population; remaining UI/accessibility
+polish; load tests; final release holdout; removal of deprecated canary/shadow mode names
+and further rollback-stack deletion after caller proof. Tracked in
 `docs/final_hardening_backlog.md`.
 
 ## 26. Semantic debt and deprecation map
