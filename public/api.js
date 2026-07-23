@@ -270,6 +270,7 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
   let buffer = '';
   let finalEvent = null;
   let errorEvent = null;
+  let sawFinal = false;
 
   const handleEvent = (rawEvent) => {
     const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data:'));
@@ -283,12 +284,18 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
       return;
     }
     if (evt.type === 'delta') {
+      if (sawFinal) return;
       if (onDelta) onDelta(evt.text || '');
     } else if (evt.type === 'correction') {
+      if (sawFinal) return;
       if (onCorrection) onCorrection(evt.text || '');
     } else if (evt.type === 'final') {
+      // Process exactly one final event per stream.
+      if (sawFinal) return;
+      sawFinal = true;
       finalEvent = evt;
     } else if (evt.type === 'error') {
+      if (sawFinal) return;
       errorEvent = evt;
     }
   };
@@ -309,10 +316,14 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
       handleEvent(buffer);
     }
   } catch (error) {
+    // If the authoritative final already arrived, do not fall back to JSON.
+    if (finalEvent) {
+      return { success: true, status: 200, data: finalEvent, error: null };
+    }
     return { success: false, status: null, data: null, error: error.message || 'Stream interrupted.' };
   }
 
-  if (errorEvent) {
+  if (errorEvent && !finalEvent) {
     return { success: false, status: 200, data: errorEvent, error: errorEvent.error || 'Generation failed.' };
   }
   if (finalEvent) {

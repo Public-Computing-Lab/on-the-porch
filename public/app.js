@@ -9,12 +9,16 @@ const state = {
   activeThreadId: null,
   messages: [],
   messageVersion: 0,
+  /** Thread id that `state.messages` currently belongs to */
+  messagesThreadId: null,
   isSendingMessage: false,
   isLoadingEvents: false,
   currentFlagLogId: null,
   threadModalMode: null,
   threadModalThreadId: null,
   authReturnToApp: false,
+  /** @type {Map<string, object>} active/completed turns keyed by client_turn_id */
+  turnsByClientId: new Map(),
 };
 
 const eventContextStore = window.UiEntityContext
@@ -415,6 +419,8 @@ function resetAppState({ clearGuestSession = false } = {}) {
   state.activeThreadId = null;
   state.messages = [];
   state.messageVersion = 0;
+  state.messagesThreadId = null;
+  state.turnsByClientId = new Map();
   state.currentFlagLogId = null;
   state.threadModalMode = null;
   state.threadModalThreadId = null;
@@ -756,6 +762,9 @@ function createEmptyStateElement() {
 function createMessageElement(message) {
   const wrapper = document.createElement('div');
   wrapper.className = `message ${message.role}`;
+  if (message.id) wrapper.dataset.messageId = String(message.id);
+  if (message.client_turn_id) wrapper.dataset.clientTurnId = String(message.client_turn_id);
+  if (message.status) wrapper.dataset.status = String(message.status);
 
   const avatar = document.createElement('div');
   avatar.className = 'message-avatar';
@@ -1198,6 +1207,7 @@ async function loadThreads(selectThreadId = null) {
   if (!state.threads.length) {
     state.activeThreadId = null;
     state.messages = [];
+    state.messagesThreadId = null;
     renderThreads();
     updateThreadHeader();
     renderMessages();
@@ -1235,7 +1245,19 @@ async function loadMessages(threadId) {
   }
 
   state.activeThreadId = threadId;
-  state.messages = normalizeMessages(result.data.messages || []);
+  const remoteMessages = result.data.messages || [];
+  if (
+    window.ChatMessageLifecycle
+    && state.messagesThreadId === threadId
+    && state.messages.length
+  ) {
+    state.messages = normalizeMessages(
+      window.ChatMessageLifecycle.mergeHydratedMessages(state.messages, remoteMessages),
+    );
+  } else {
+    state.messages = normalizeMessages(remoteMessages);
+  }
+  state.messagesThreadId = threadId;
   const thread = result.data.thread;
   if (thread) {
     const index = state.threads.findIndex((entry) => entry.id === thread.id);
@@ -1261,6 +1283,7 @@ async function ensureActiveThread() {
   state.threads.unshift(result.data.thread);
   state.activeThreadId = result.data.thread.id;
   state.messages = [];
+  state.messagesThreadId = null;
   eventContextStore.clear();
   renderThreads();
   updateThreadHeader();
@@ -1281,6 +1304,7 @@ async function createThread() {
   state.threads.unshift(result.data.thread);
   state.activeThreadId = result.data.thread.id;
   state.messages = [];
+  state.messagesThreadId = null;
   renderThreads();
   updateThreadHeader();
   renderMessages();
@@ -1365,6 +1389,7 @@ async function submitDeleteThread() {
   state.threads = state.threads.filter((entry) => entry.id !== thread.id);
   state.activeThreadId = null;
   state.messages = [];
+  state.messagesThreadId = null;
   state.messageVersion += 1;
   renderThreads();
   updateThreadHeader();
@@ -1372,6 +1397,7 @@ async function submitDeleteThread() {
   if (!state.threads.length) {
     state.activeThreadId = null;
     state.messages = [];
+    state.messagesThreadId = null;
     renderThreads();
     updateThreadHeader();
     renderMessages();
@@ -1425,6 +1451,7 @@ async function sendChatMessage(event) {
   if (state.isSendingMessage) return;
   const message = elements.chatInput.value.trim();
   if (!message) return;
+  const lifecycle = window.ChatMessageLifecycle;
   const clientTurnId = createClientTurnId();
   const outboundPayload = Object.freeze({
     ...eventContextStore.createOutboundPayload(message),
@@ -1439,13 +1466,29 @@ async function sendChatMessage(event) {
   const threadId = state.activeThreadId;
   const requestVersion = ++state.messageVersion;
   const optimisticMessageId = `pending-user-${Date.now()}-${requestVersion}`;
+  const assistantLocalId = `pending-assistant-${Date.now()}-${requestVersion}`;
   const optimisticMessage = {
     id: optimisticMessageId,
     role: 'user',
     content: message,
     created_at: new Date().toISOString(),
     sources: [],
+    client_turn_id: clientTurnId,
+    status: lifecycle?.STATUS?.PENDING || 'pending',
   };
+
+  const turn = lifecycle
+    ? lifecycle.createTurn({
+      clientTurnId,
+      threadId,
+      requestVersion,
+      userLocalId: optimisticMessageId,
+      assistantLocalId,
+    })
+    : null;
+  if (turn) {
+    state.turnsByClientId.set(clientTurnId, turn);
+  }
 
   setError(elements.chatError, '');
   elements.chatInput.value = '';
@@ -1454,96 +1497,74 @@ async function sendChatMessage(event) {
     ...state.messages,
     optimisticMessage,
   ];
+  state.messagesThreadId = threadId;
   renderMessages();
   setChatLoading(true);
+  // Neutral loading only — never render a substantive local/instant answer that
+  // will later be replaced by the authoritative server response.
+  renderTypingIndicator();
 
-  const instant = window.InstantReplies?.isInstant(message);
-  const assistantPendingId = `pending-assistant-${Date.now()}-${requestVersion}`;
+  const isStale = () => (
+    requestVersion !== state.messageVersion || threadId !== state.activeThreadId
+  );
 
-  if (instant) {
-    const localReply = window.InstantReplies.reply(message);
-    state.messages = [
-      ...state.messages,
-      {
-        id: assistantPendingId,
-        role: 'assistant',
-        content: localReply,
-        created_at: new Date().toISOString(),
-        sources: [],
-      },
-    ];
+  const attachAssistantSources = (assistantMessage, fallbackSources) => ({
+    ...assistantMessage,
+    sources: normalizeSources(
+      (assistantMessage && assistantMessage.sources && assistantMessage.sources.length)
+        ? assistantMessage.sources
+        : fallbackSources,
+    ),
+    client_turn_id: clientTurnId,
+    status: lifecycle?.STATUS?.FINAL || 'final',
+  });
+
+  const finalizeFromServer = (userMessage, assistantMessage, fallbackSources) => {
+    const preparedAssistant = attachAssistantSources(assistantMessage, fallbackSources);
+    if (lifecycle && turn) {
+      const applied = lifecycle.applyFinal(
+        turn,
+        preparedAssistant,
+        userMessage,
+        requestVersion,
+        state.activeThreadId,
+      );
+      if (!applied.accepted) {
+        return applied.duplicate === true;
+      }
+      state.messages = normalizeMessages(
+        lifecycle.buildFinalStateMessages(state.messages, {
+          userLocalId: optimisticMessageId,
+          assistantLocalId,
+          userMessage: {
+            ...userMessage,
+            client_turn_id: clientTurnId,
+            status: lifecycle.STATUS.FINAL,
+          },
+          assistantMessage: applied.assistantMessage,
+        }),
+      );
+    } else {
+      state.messages = normalizeMessages([
+        ...state.messages.filter((entry) => (
+          entry.id !== optimisticMessageId && entry.id !== assistantLocalId
+        )),
+        { ...userMessage, client_turn_id: clientTurnId },
+        preparedAssistant,
+      ]);
+    }
+    renderThreads();
+    updateThreadHeader();
     renderMessages();
-  } else {
-    renderTypingIndicator();
-  }
+    return true;
+  };
 
   try {
-    if (instant) {
-      const result = await sendJsonWithTurnRetry(threadId, outboundPayload);
-      removeTypingIndicator();
-
-      if (!result.success) {
-        if (await handleAuthFailure(result)) return;
-        if (result.status === 429) {
-          showToast(result.error, 'warning');
-        }
-        if (result.status === 409 && result.data && result.data.code === 'profile_incomplete') {
-          restoreFailedChatComposer(message, outboundPayload);
-          showView('profile');
-          return;
-        }
-        state.messages = state.messages.filter(
-          (entry) => entry.id !== optimisticMessageId && entry.id !== assistantPendingId,
-        );
-        renderMessages();
-        restoreFailedChatComposer(message, outboundPayload);
-        setError(elements.chatError, result.error);
-        return;
-      }
-
-      const threadIndex = state.threads.findIndex((entry) => entry.id === result.data.thread.id);
-      if (threadIndex >= 0) {
-        state.threads[threadIndex] = result.data.thread;
-      }
-
-      if (requestVersion !== state.messageVersion || threadId !== state.activeThreadId) {
-        renderThreads();
-        updateThreadHeader();
-        return;
-      }
-
-      state.messages = normalizeMessages([
-        ...state.messages.filter(
-          (entry) => entry.id !== optimisticMessageId && entry.id !== assistantPendingId,
-        ),
-        result.data.user_message,
-        {
-          ...result.data.assistant_message,
-          sources: normalizeSources(
-            (result.data.assistant_message && result.data.assistant_message.sources && result.data.assistant_message.sources.length)
-              ? result.data.assistant_message.sources
-              : result.data.sources,
-          ),
-        },
-      ]);
-
-      renderThreads();
-      updateThreadHeader();
-      renderMessages();
-      return;
-    }
-
     if (ApiClient.config.streamingEnabled) {
-      const assistantPendingIdStream = `pending-assistant-${Date.now()}-${requestVersion}`;
-      let assistantContent = '';
       let streamTextEl = null;
       let rafPending = false;
+      let assistantContent = '';
 
-      const isStale = () => requestVersion !== state.messageVersion || threadId !== state.activeThreadId;
-
-      // Update only the streaming bubble's text node, batched to one paint per
-      // animation frame. This avoids rebuilding the whole message list on every
-      // token (which caused the line-by-line flicker).
       const flush = () => {
         rafPending = false;
         if (!streamTextEl) return;
@@ -1556,19 +1577,20 @@ async function sendChatMessage(event) {
         window.requestAnimationFrame(flush);
       };
 
-      // Keep the "Thinking…" indicator visible until the first token arrives,
-      // then swap it for a real bubble we mutate in place.
       const ensureAssistantBubble = () => {
         if (streamTextEl) return;
         removeTypingIndicator();
         const element = createMessageElement({
-          id: assistantPendingIdStream,
+          id: assistantLocalId,
           role: 'assistant',
           content: '',
           created_at: new Date().toISOString(),
           sources: [],
+          client_turn_id: clientTurnId,
+          status: lifecycle?.STATUS?.STREAMING || 'streaming',
         });
         element.dataset.streaming = 'true';
+        element.dataset.clientTurnId = clientTurnId;
         elements.chatMessages.appendChild(element);
         streamTextEl = element.querySelector('.message-text');
         elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
@@ -1577,14 +1599,26 @@ async function sendChatMessage(event) {
       const streamResult = await ApiClient.sendMessageStream(threadId, outboundPayload, {
         onDelta: (text) => {
           if (isStale() || !text) return;
+          if (lifecycle && turn) {
+            const applied = lifecycle.applyDelta(turn, text, requestVersion, state.activeThreadId);
+            if (!applied.accepted) return;
+            assistantContent = turn.content;
+          } else {
+            assistantContent += text;
+          }
           ensureAssistantBubble();
-          assistantContent += text;
           scheduleFlush();
         },
         onCorrection: (text) => {
           if (isStale()) return;
+          if (lifecycle && turn) {
+            const applied = lifecycle.applyCorrection(turn, text, requestVersion, state.activeThreadId);
+            if (!applied.accepted) return;
+            assistantContent = turn.content;
+          } else {
+            assistantContent = text;
+          }
           ensureAssistantBubble();
-          assistantContent = text;
           scheduleFlush();
         },
       });
@@ -1599,11 +1633,9 @@ async function sendChatMessage(event) {
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
         }
-        // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
-        // Retry once via the JSON endpoint with the same client_turn_id so a
-        // committed SSE turn is replayed instead of creating a duplicate.
-        // turn_in_progress is also retried with the same ID (bounded).
-        // idempotency_key_reused must not auto-retry with a changed payload.
+        // JSON fallback only after a genuine stream failure (never after a completed final).
+        // Retries keep the same client_turn_id so a committed SSE turn is replayed
+        // instead of creating a duplicate answer.
         if (!conversationConflict && !keyReuseConflict) {
           let retryResult = null;
           if (turnInProgress) {
@@ -1620,28 +1652,18 @@ async function sendChatMessage(event) {
               state.threads[threadIndex] = retryResult.data.thread;
             }
             if (!isStale()) {
-              state.messages = normalizeMessages([
-                ...state.messages.filter((item) => item.id !== optimisticMessageId),
+              finalizeFromServer(
                 retryResult.data.user_message,
-                {
-                  ...retryResult.data.assistant_message,
-                  sources: normalizeSources(
-                    (retryResult.data.assistant_message && retryResult.data.assistant_message.sources
-                      && retryResult.data.assistant_message.sources.length)
-                      ? retryResult.data.assistant_message.sources
-                      : retryResult.data.sources,
-                  ),
-                },
-              ]);
+                retryResult.data.assistant_message,
+                retryResult.data.sources,
+              );
             }
-            renderThreads();
-            updateThreadHeader();
-            renderMessages();
             return;
           }
         }
-        // The streaming bubble lives only in the DOM; re-rendering from state
-        // (which never held it) removes it cleanly.
+        if (lifecycle && turn) {
+          lifecycle.applyFailed(turn, requestVersion, state.activeThreadId);
+        }
         state.messages = state.messages.filter((item) => item.id !== optimisticMessageId);
         renderMessages();
         restoreFailedChatComposer(message, outboundPayload);
@@ -1659,24 +1681,7 @@ async function sendChatMessage(event) {
         updateThreadHeader();
         return;
       }
-      // Replace the optimistic user bubble + transient streaming bubble with the
-      // authoritative server messages in one final render.
-      const assistantMessage = {
-        ...data.assistant_message,
-        sources: normalizeSources(
-          (data.assistant_message && data.assistant_message.sources && data.assistant_message.sources.length)
-            ? data.assistant_message.sources
-            : data.sources,
-        ),
-      };
-      state.messages = normalizeMessages([
-        ...state.messages.filter((item) => item.id !== optimisticMessageId),
-        data.user_message,
-        assistantMessage,
-      ]);
-      renderThreads();
-      updateThreadHeader();
-      renderMessages();
+      finalizeFromServer(data.user_message, data.assistant_message, data.sources);
       return;
     }
 
@@ -1693,6 +1698,9 @@ async function sendChatMessage(event) {
         showView('profile');
         return;
       }
+      if (lifecycle && turn) {
+        lifecycle.applyFailed(turn, requestVersion, state.activeThreadId);
+      }
       state.messages = state.messages.filter((entry) => entry.id !== optimisticMessageId);
       renderMessages();
       restoreFailedChatComposer(message, outboundPayload);
@@ -1705,28 +1713,13 @@ async function sendChatMessage(event) {
       state.threads[threadIndex] = result.data.thread;
     }
 
-    if (requestVersion !== state.messageVersion || threadId !== state.activeThreadId) {
+    if (isStale()) {
       renderThreads();
       updateThreadHeader();
       return;
     }
 
-    state.messages = normalizeMessages([
-      ...state.messages.filter((entry) => entry.id !== optimisticMessageId),
-      result.data.user_message,
-      {
-        ...result.data.assistant_message,
-        sources: normalizeSources(
-          (result.data.assistant_message && result.data.assistant_message.sources && result.data.assistant_message.sources.length)
-            ? result.data.assistant_message.sources
-            : result.data.sources,
-        ),
-      },
-    ]);
-
-    renderThreads();
-    updateThreadHeader();
-    renderMessages();
+    finalizeFromServer(result.data.user_message, result.data.assistant_message, result.data.sources);
   } finally {
     removeTypingIndicator();
     setChatLoading(false);
