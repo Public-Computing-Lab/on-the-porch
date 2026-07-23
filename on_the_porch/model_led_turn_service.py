@@ -1126,19 +1126,21 @@ class ModelLedTurnService:
         if resolver_count:
             counts["resolve_location"] = resolver_count
         raw_answer = synthesis.answer or civic.answer
-        answer = strip_internal_retrieval_language(raw_answer)
-        sources = tuple(civic.sources)
-        # If jargon stripping replaced a synthesized dump, prefer the deterministic
-        # relevant-document answer when passages were admitted.
-        if (
-            answer != raw_answer
-            and civic.civic_tool_result.records
-            and "bounded source passage" in str(raw_answer).casefold()
-        ):
+        # No-evidence document turns must keep deterministic resident copy; synthesis
+        # often invents generic refusals that lose inventory/budget specificity.
+        if not civic.civic_tool_result.records:
             answer = strip_internal_retrieval_language(civic.answer)
-            sources = tuple(civic.sources)
-        elif answer != raw_answer and not civic.civic_tool_result.records:
             sources = ()
+        else:
+            answer = strip_internal_retrieval_language(raw_answer)
+            sources = tuple(civic.sources)
+            # If jargon stripping replaced a synthesized dump, prefer the deterministic
+            # relevant-document answer when passages were admitted.
+            if (
+                answer != raw_answer
+                and "bounded source passage" in str(raw_answer).casefold()
+            ):
+                answer = strip_internal_retrieval_language(civic.answer)
         return TurnResult(
             status=TurnServiceStatus.DEGRADED if degraded else TurnServiceStatus.COMPLETED,
             answer=answer,

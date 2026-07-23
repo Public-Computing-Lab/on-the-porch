@@ -13,6 +13,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "api"), str(ROOT / "on_the_porch")]
 from answering_kernel import GlobalDeadline  # noqa: E402
 from civic_documents import DocumentPlan, execute_document_plan  # noqa: E402
 from document_relevance import (  # noqa: E402
+    SOURCE_SCOPE_UNAVAILABLE,
     extract_document_constraints,
     filter_relevant_passages,
     format_no_evidence_answer,
@@ -235,6 +236,16 @@ def test_no_exact_query_routing_in_module():
     assert "tell me about the mayors budget for 2027" not in src
 
 
+def test_inventory_ask_constraints_and_copy():
+    constraints = extract_document_constraints("what budget documents do you currently have?")
+    assert constraints.inventory_ask is True
+    assert "budget" in constraints.topics
+    assert "housing_policy" not in constraints.topics
+    answer = format_no_evidence_answer(constraints, SOURCE_SCOPE_UNAVAILABLE)
+    assert "mayoral operating-budget" in answer.casefold()
+    assert "enough relevant source material" not in answer.casefold()
+
+
 def main() -> int:
     tests = [
         test_constraints_extract_mayoral_budget_year,
@@ -249,6 +260,7 @@ def main() -> int:
         test_meeting_budget_question_can_use_transcript,
         test_strip_internal_language,
         test_no_exact_query_routing_in_module,
+        test_inventory_ask_constraints_and_copy,
     ]
     for fn in tests:
         fn()
