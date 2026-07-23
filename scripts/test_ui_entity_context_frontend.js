@@ -121,12 +121,11 @@ function testFrontendSseAbortReplayReconcilesOneBubble() {
   const source = fs.readFileSync(path.join(ROOT, 'public', 'app.js'), 'utf8');
   // Lost-final path retries JSON with the same outboundPayload/client_turn_id.
   assert.match(source, /committed SSE turn is replayed/);
-  assert.match(
-    source,
-    /state\.messages = normalizeMessages\(\[\s*\.\.\.state\.messages\.filter\(\(item\) => item\.id !== optimisticMessageId\),\s*retryResult\.data\.user_message/,
-  );
+  assert.match(source, /finalizeFromServer\(/);
   assert.match(source, /retryResult\.data\.assistant_message/);
+  assert.match(source, /ChatMessageLifecycle/);
   assert.equal(source.includes('client_turn_id: crypto.randomUUID()'), false);
+  assert.equal(source.includes('InstantReplies.reply'), false);
 }
 
 const tests = [
