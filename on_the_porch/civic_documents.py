@@ -203,6 +203,23 @@ def execute_document_plan(
             provenance = normalize_provenance(item_meta.get("provenance_class") or item_meta.get("provenance"))
             if not is_resident_eligible(provenance):
                 continue
+            source_blob = " ".join(
+                str(item_meta.get(key) or "")
+                for key in ("source", "path", "title", "document_id")
+            ).casefold()
+            if any(
+                marker in source_blob
+                for marker in (
+                    "analysis",
+                    "digest",
+                    "reporting_note",
+                    "template",
+                    "fixtures/",
+                    "zoning_reference_overview",
+                )
+            ):
+                # Defense in depth against stale fixture vectors lacking provenance metadata.
+                continue
             if allowed_sources:
                 if source_id and source_id not in allowed_sources:
                     continue
