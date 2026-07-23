@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from answering_kernel import EvidenceBundle, EvidenceStatus, GlobalDeadline
 from civic_evidence import (
@@ -15,9 +15,16 @@ from civic_evidence import (
     CivicToolResult,
     ToolResultStatus,
 )
+from source_provenance import (
+    CORPUS_TO_SOURCE_IDS,
+    is_resident_eligible,
+    normalize_provenance,
+    resident_label_for,
+)
 
 
 RetrieveFn = Callable[..., Mapping[str, Any]]
+EnabledSourceLookup = Callable[[], Set[str]]
 MAX_PASSAGE_CHARS = 900
 MAX_RESULTS = 8
 
@@ -25,14 +32,14 @@ _CORPUS_META = {
     "POLICY": {
         "doc_type": "policy",
         "source_type": CivicSourceType.PLANNING_POLICY,
-        "label": "Official policy documents",
-        "authority": "City of Boston / official policy corpus",
+        "label": "Policy and planning references",
+        "authority": "Curated policy references (verify official City/BPDA/ISD publications for binding rules)",
     },
     "TRANSCRIPT": {
         "doc_type": "transcript",
         "source_type": CivicSourceType.MEETING_DISCUSSION,
         "label": "Meeting transcripts",
-        "authority": "Community / public meeting transcripts",
+        "authority": "Community / public meeting discussion",
     },
     "NEWS": {
         "doc_type": "news",
@@ -123,24 +130,66 @@ def build_compiled_document_plan(*, arguments: Mapping[str, Any]) -> DocumentPla
     )
 
 
+def _enabled_source_ids_from_factory(connection_factory: Optional[Callable[[], Any]] = None) -> Set[str]:
+    """Load enabled, indexing-eligible, resident-eligible source IDs from MySQL."""
+    if connection_factory is None:
+        return set()
+    conn = None
+    try:
+        conn = connection_factory()
+        return _enabled_ids_from_conn(conn)
+    except Exception:
+        return set()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _enabled_ids_from_conn(conn: Any) -> Set[str]:
+    from source_registry import list_sources
+
+    enabled: Set[str] = set()
+    for row in list_sources(conn, enabled_only=True):
+        if not row.get("indexing_eligible"):
+            continue
+        provenance = row.get("provenance_class")
+        if not is_resident_eligible(str(provenance) if provenance else "OFFICIAL_SECONDARY"):
+            continue
+        enabled.add(str(row["source_id"]))
+    return enabled
+
+
 def execute_document_plan(
     message: str,
     *,
     plan: DocumentPlan,
     deadline: GlobalDeadline,
     retrieve: Optional[RetrieveFn] = None,
+    enabled_sources: Optional[EnabledSourceLookup] = None,
+    connection_factory: Optional[Callable[[], Any]] = None,
 ) -> DocumentResult:
     del message
     if deadline.expired(reserve_for_persistence=True):
         return _empty_result(plan, unavailable=True)
     retriever = retrieve or _default_retrieve
+    if enabled_sources is not None:
+        allowed_sources = enabled_sources()
+    else:
+        allowed_sources = _enabled_source_ids_from_factory(connection_factory)
     passages: List[Dict[str, Any]] = []
     seen = set()
     per_corpus = max(1, plan.limit // max(1, len(plan.corpora)))
     for corpus in plan.corpora:
         meta = _CORPUS_META[corpus]
+        corpus_source_ids = set(CORPUS_TO_SOURCE_IDS.get(corpus, ()))
+        if allowed_sources is not None and corpus_source_ids and allowed_sources.isdisjoint(corpus_source_ids):
+            # Entire corpus family disabled / ineligible.
+            continue
         try:
-            raw = retriever(plan.query, k=per_corpus + 2, doc_type=meta["doc_type"])
+            raw = retriever(plan.query, k=per_corpus + 4, doc_type=meta["doc_type"])
         except Exception:
             continue
         chunks = list(raw.get("chunks") or [])
@@ -149,13 +198,23 @@ def execute_document_plan(
             text = " ".join(str(chunk or "").split())
             if len(text) < 40:
                 continue
+            item_meta = metadata[index] if index < len(metadata) and isinstance(metadata[index], Mapping) else {}
+            source_id = str(item_meta.get("source_id") or "")
+            provenance = normalize_provenance(item_meta.get("provenance_class") or item_meta.get("provenance"))
+            if not is_resident_eligible(provenance):
+                continue
+            if allowed_sources:
+                if source_id and source_id not in allowed_sources:
+                    continue
+                if not source_id and corpus_source_ids and allowed_sources.isdisjoint(corpus_source_ids):
+                    continue
             fingerprint = re.sub(r"[^a-z0-9]+", "", text[:180].casefold())
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
-            item_meta = metadata[index] if index < len(metadata) and isinstance(metadata[index], Mapping) else {}
-            source_name = str(
-                item_meta.get("source")
+            publisher = str(
+                item_meta.get("publisher")
+                or item_meta.get("source")
                 or item_meta.get("title")
                 or meta["label"]
             )[:160]
@@ -165,18 +224,22 @@ def execute_document_plan(
             ):
                 path = None
             passage_id = "doc." + hashlib.sha256(
-                f"{corpus}:{source_name}:{fingerprint}".encode("utf-8")
+                f"{corpus}:{publisher}:{fingerprint}".encode("utf-8")
             ).hexdigest()[:12]
             passages.append({
                 "passage_id": passage_id,
                 "corpus": corpus,
+                "source_id": source_id or None,
                 "source_type": meta["source_type"].value,
-                "source_name": source_name,
-                "authority": meta["authority"],
+                "provenance_class": provenance,
+                "provenance_label": resident_label_for(provenance, meta["source_type"].value),
+                "source_name": publisher,
+                "publisher": publisher,
+                "authority": str(item_meta.get("authority") or meta["authority"]),
                 "date": item_meta.get("date") or item_meta.get("published_at"),
                 "path": path,
                 "passage": text[:MAX_PASSAGE_CHARS],
-                "limitation": _corpus_limitation(corpus),
+                "limitation": _corpus_limitation(corpus, provenance),
             })
             if len(passages) >= plan.limit:
                 break
@@ -192,7 +255,6 @@ def execute_document_plan(
     for index, passage in enumerate(passages):
         source_id = f"doc_source_{index + 1}"
         citation = str(passage.get("path") or f"source:{passage['passage_id']}")
-        # Citation refs must match approved pattern; prefer stable local refs when URL missing.
         if not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9_.:/?=&%#-]{0,511}$", citation):
             citation = f"source:{passage['passage_id']}"
         source = CivicSourceRecord(
@@ -221,6 +283,9 @@ def execute_document_plan(
             "path": passage.get("path"),
             "type": "rag",
             "source_type": source.source_type.value,
+            "provenance_class": passage["provenance_class"],
+            "provenance_label": passage["provenance_label"],
+            "publisher": passage.get("publisher"),
             "date": source.publication_or_data_date,
             "doc_type": passage["corpus"].lower(),
         })
@@ -264,7 +329,6 @@ def execute_document_plan(
 
 
 def _default_retrieve(query: str, *, k: int, doc_type: str) -> Mapping[str, Any]:
-    # Import lazily so unit tests can inject a stub without loading vector deps.
     from retrieval import retrieve  # type: ignore
 
     if doc_type == "news":
@@ -273,31 +337,37 @@ def _default_retrieve(query: str, *, k: int, doc_type: str) -> Mapping[str, Any]
 
             return retrieve_rss(query, k=k)
         except Exception:
-            return retrieve(query, k=k, doc_type="calendar_event")
+            return retrieve(query, k=k, doc_type="news")
     if doc_type == "community":
-        return retrieve(query, k=k, doc_type="transcript", tags=["community"])
+        return retrieve(query, k=k, doc_type="community")
     return retrieve(query, k=k, doc_type=doc_type)
 
 
-def _corpus_limitation(corpus: str) -> str:
-    return {
+def _corpus_limitation(corpus: str, provenance: str) -> str:
+    base = {
         "POLICY": "Policy excerpts are general information, not legal advice.",
         "TRANSCRIPT": "Meeting statements are discussion, not automatically official decisions.",
         "NEWS": "Journalism reports claims and should not be treated as official measurements.",
         "COMMUNITY": "Community documents reflect local concerns, not official incidence rates.",
     }.get(corpus, "Source type distinctions must be preserved.")
+    if provenance == "OFFICIAL_SECONDARY":
+        return base + " This is a curated secondary reference, not primary City/BPDA/ISD legal text."
+    if provenance == "COMMUNITY_PUBLISHED":
+        return base + " Community-published material is not official city policy."
+    return base
 
 
 def _deterministic_summary(plan: DocumentPlan, passages: Sequence[Mapping[str, Any]]) -> str:
     lines = [
         f"I found {len(passages)} bounded source passage(s) related to “{plan.query}”.",
-        "Source types are kept distinct below:",
+        "Source types and provenance are kept distinct below:",
     ]
     for index, passage in enumerate(passages[:6], start=1):
         date = f" ({passage['date']})" if passage.get("date") else ""
         excerpt = str(passage["passage"])[:220]
+        label = passage.get("provenance_label") or passage["source_type"]
         lines.append(
-            f"{index}. [{passage['source_type']}] {passage['source_name']}{date}: {excerpt}"
+            f"{index}. [{label}] {passage['source_name']}{date}: {excerpt}"
         )
         if passage.get("limitation"):
             lines.append(f"   Note: {passage['limitation']}")

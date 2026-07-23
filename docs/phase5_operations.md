@@ -86,3 +86,31 @@ Phase 4 merge commit reference: `152dcc75`. Phase 5 merge commit: `4c9c6092`.
 - Operator audit stores action metadata only.
 - Connector HTTP fetches are allowlisted to official Boston hosts.
 - Public clients cannot trigger unrestricted server-side URL fetches.
+
+## Provenance and resident eligibility (public beta)
+
+Resident retrieval excludes `DEMO_FIXTURE`, `TEST_ONLY`, and `INTERNAL_ANALYSIS`.
+Local policy/zoning staging files are `OFFICIAL_SECONDARY` curated references — never
+presented as primary City/BPDA/ISD legal text. Fixture digests live under
+`data/phase5_corpus/fixtures/` and are not ingested for residents.
+
+`source_registry.enabled` and provenance class gate document retrieval. Disabling a
+source stops new evidence selection without requiring manual vector edits.
+
+## Model SDK policy
+
+Resident-facing Gemini calls use the maintained `google-genai` SDK (planner provider and
+plain-text synthesis helper). Legacy `google.generativeai` remains only in offline/RAG
+tooling pending migration.
+
+## Guest rate limits and audit mode
+
+- Guest chat: `RATE_LIMIT_GUEST_CHAT_PER_SESSION` (default 180/hour)
+- Authenticated chat: `RATE_LIMIT_CHAT_PER_SESSION` (default 120/hour)
+- Audit mode: `AUDIT_RATE_LIMIT_MODE=true` (non-production only) plus
+  `X-On-The-Porch-Audit-Token` matching `AUDIT_RATE_LIMIT_SECRET`
+
+## Backup / restore operator dependency
+
+Application DB users must remain least-privilege. Full isolated restore requires a separate
+DBA role. Run `scripts/staging/backup_restore_drill.sh` after exporting `OTP_DBA_*`.

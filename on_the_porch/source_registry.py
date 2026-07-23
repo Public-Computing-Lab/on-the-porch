@@ -23,6 +23,7 @@ class SourceFamilySpec:
     title: str
     authority: str
     source_type: str
+    provenance_class: str
     publisher: str
     official_url: Optional[str]
     geography: str
@@ -37,6 +38,7 @@ class SourceFamilySpec:
     citation_policy: str
     limitations: str
     connector_id: str
+    min_useful_documents: Optional[int] = None
 
 
 def load_seed_inventory(path: Optional[Path] = None) -> List[SourceFamilySpec]:
@@ -51,6 +53,7 @@ def load_seed_inventory(path: Optional[Path] = None) -> List[SourceFamilySpec]:
                 title=str(row["title"]),
                 authority=str(row["authority"]),
                 source_type=str(row["source_type"]),
+                provenance_class=str(row.get("provenance_class") or "OFFICIAL_SECONDARY"),
                 publisher=str(row.get("publisher") or row["authority"]),
                 official_url=row.get("official_url"),
                 geography=str(row.get("geography") or "Dorchester"),
@@ -65,6 +68,11 @@ def load_seed_inventory(path: Optional[Path] = None) -> List[SourceFamilySpec]:
                 citation_policy=str(row.get("citation_policy") or ""),
                 limitations=str(row.get("limitations") or ""),
                 connector_id=str(row.get("connector_id") or "none"),
+                min_useful_documents=(
+                    int(row["min_useful_documents"])
+                    if row.get("min_useful_documents") is not None
+                    else None
+                ),
             )
         )
     return items
@@ -82,17 +90,42 @@ def ensure_registry_seeded(conn, *, seed_path: Optional[Path] = None) -> int:
                 (spec.source_id,),
             )
             if cursor.fetchone():
+                # Keep operator enablement; refresh provenance metadata for existing rows.
+                cursor.execute(
+                    """
+                    UPDATE source_registry
+                    SET provenance_class = %s,
+                        min_useful_documents = %s,
+                        authority = %s,
+                        publisher = %s,
+                        citation_policy = %s,
+                        limitations = %s,
+                        indexing_eligible = %s
+                    WHERE source_id = %s
+                    """,
+                    (
+                        spec.provenance_class,
+                        spec.min_useful_documents,
+                        spec.authority,
+                        spec.publisher,
+                        spec.citation_policy,
+                        spec.limitations,
+                        1 if spec.indexing_eligible else 0,
+                        spec.source_id,
+                    ),
+                )
                 continue
             cursor.execute(
                 """
                 INSERT INTO source_registry (
-                    source_id, family, title, authority, source_type, publisher,
-                    official_url, geography, update_frequency, ingestion_method,
+                    source_id, family, title, authority, source_type, provenance_class,
+                    publisher, official_url, geography, update_frequency, ingestion_method,
                     content_format, freshness_policy, retention_policy,
                     dedupe_key_template, parsing_strategy, indexing_eligible,
-                    citation_policy, limitations, connector_id, enabled, status
+                    citation_policy, limitations, connector_id, enabled, status,
+                    min_useful_documents
                 ) VALUES (
-                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,'registered'
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1,'registered',%s
                 )
                 """,
                 (
@@ -101,6 +134,7 @@ def ensure_registry_seeded(conn, *, seed_path: Optional[Path] = None) -> int:
                     spec.title,
                     spec.authority,
                     spec.source_type,
+                    spec.provenance_class,
                     spec.publisher,
                     spec.official_url,
                     spec.geography,
@@ -115,6 +149,7 @@ def ensure_registry_seeded(conn, *, seed_path: Optional[Path] = None) -> int:
                     spec.citation_policy,
                     spec.limitations,
                     spec.connector_id,
+                    spec.min_useful_documents,
                 ),
             )
             inserted += 1
@@ -145,13 +180,13 @@ def list_sources(
     try:
         cursor.execute(
             f"""
-            SELECT source_id, family, title, authority, source_type, publisher,
+            SELECT source_id, family, title, authority, source_type, provenance_class, publisher,
                    official_url, geography, update_frequency, ingestion_method,
                    content_format, freshness_policy, retention_policy,
                    dedupe_key_template, parsing_strategy, indexing_eligible,
                    citation_policy, limitations, connector_id, enabled, status,
                    last_successful_ingest_at, last_attempt_at, last_error,
-                   index_version, chunk_count, created_at, updated_at
+                   index_version, chunk_count, min_useful_documents, created_at, updated_at
             FROM source_registry
             {where}
             ORDER BY family, title
@@ -171,6 +206,8 @@ def list_sources(
                     row[key] = value.isoformat()
             row["indexing_eligible"] = bool(row.get("indexing_eligible"))
             row["enabled"] = bool(row.get("enabled"))
+            if "provenance_class" not in row or row.get("provenance_class") is None:
+                row["provenance_class"] = "OFFICIAL_SECONDARY"
         return rows
     finally:
         cursor.close()
@@ -212,22 +249,50 @@ def mark_ingest_result(
     error: Optional[str] = None,
     index_version: Optional[str] = None,
     chunk_count: Optional[int] = None,
+    document_count: Optional[int] = None,
 ) -> None:
-    cursor = conn.cursor()
+    from source_provenance import classify_ingest_health
+
+    cursor = conn.cursor(dictionary=True)
     try:
+        cursor.execute(
+            """
+            SELECT enabled, indexing_eligible, min_useful_documents, connector_id
+            FROM source_registry WHERE source_id = %s
+            """,
+            (source_id,),
+        )
+        row = cursor.fetchone() or {}
+        enabled = bool(row.get("enabled", True))
+        indexing_eligible = bool(row.get("indexing_eligible", False))
+        configured = str(row.get("connector_id") or "") not in {"", "none"} or indexing_eligible
+        # City announcements without an active connector stay NOT_CONFIGURED.
+        if source_id == "boston.city_announcements" and not indexing_eligible:
+            configured = False
+        docs = int(document_count if document_count is not None else (chunk_count or 0))
+        chunks = int(chunk_count or 0)
         if success:
+            status = classify_ingest_health(
+                source_id=source_id,
+                success=True,
+                document_count=docs,
+                chunk_count=chunks,
+                enabled=enabled,
+                indexing_eligible=indexing_eligible,
+                configured=configured,
+            )
             cursor.execute(
                 """
                 UPDATE source_registry
                 SET last_successful_ingest_at = UTC_TIMESTAMP(),
                     last_attempt_at = UTC_TIMESTAMP(),
                     last_error = NULL,
-                    status = 'healthy',
+                    status = %s,
                     index_version = COALESCE(%s, index_version),
                     chunk_count = COALESCE(%s, chunk_count)
                 WHERE source_id = %s
                 """,
-                (index_version, chunk_count, source_id),
+                (status, index_version, chunk_count, source_id),
             )
         else:
             cursor.execute(

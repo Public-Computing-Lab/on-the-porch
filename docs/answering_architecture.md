@@ -417,8 +417,10 @@ requires restart, and must not run concurrently with authoritative product traff
 authoritative freeze; 15s turn deadline; Redis unsupported; dynamic SQL disabled; public
 vector writes disabled; `CIVIC_311_HYBRID_MODE` rollback-only (prefer `disabled`).
 
-**Phase 5 boundaries:** source ingestion and index population; remaining UI/accessibility
-polish; load tests; final release holdout; removal of deprecated canary/shadow mode names
+**Phase 5 / public-beta boundaries:** source ingestion and index population with provenance
+gating (resident retrieval excludes DEMO_FIXTURE / TEST_ONLY / INTERNAL_ANALYSIS); operator
+enable/disable; guest rate limits and optional non-production audit mode; remaining rare
+semantic polish deferred to `docs/final_hardening_backlog.md`.
 and further rollback-stack deletion after caller proof. Tracked in
 `docs/final_hardening_backlog.md`. Operator workflows and the source registry are
 documented in `docs/phase5_operations.md`.

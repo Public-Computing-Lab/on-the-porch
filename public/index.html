@@ -142,7 +142,8 @@
   </div>
 
   <div class="app-container" id="app-view">
-    <aside class="sidebar">
+    <div class="sidebar-backdrop" id="sidebar-backdrop" hidden></div>
+    <aside class="sidebar" id="app-sidebar">
       <div class="sidebar-shell">
         <div class="sidebar-top">
           <div class="sidebar-brand">
@@ -208,18 +209,21 @@
 
     <main class="chat-container">
       <header class="chat-header">
-        <div class="thread-heading">
-          <div class="thread-heading-label">Current conversation</div>
-          <h2 id="active-thread-title">New conversation</h2>
-        </div>
-        <div class="header-right">
-          <button class="btn-secondary small" id="rename-thread-button" type="button">Rename</button>
-          <button class="btn-secondary small danger" id="delete-thread-button" type="button">Delete</button>
-          <button class="btn-icon btn-theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-label="Switch to light mode" title="Switch to light mode">
-            <span class="theme-toggle-icon" aria-hidden="true">☀</span>
-            <span class="sr-only">Toggle theme</span>
+          <button class="btn-icon btn-nav-toggle" id="sidebar-toggle" type="button" aria-label="Open conversations" title="Open conversations" aria-expanded="false" aria-controls="app-sidebar">
+            <span aria-hidden="true">☰</span>
           </button>
-          <button class="btn-secondary small header-login-button" id="login-button" type="button">Log In</button>
+          <div class="thread-heading">
+            <div class="thread-heading-label">Current conversation</div>
+            <h2 id="active-thread-title">New conversation</h2>
+          </div>
+          <div class="header-right">
+            <button class="btn-secondary small" id="rename-thread-button" type="button">Rename</button>
+            <button class="btn-secondary small danger" id="delete-thread-button" type="button">Delete</button>
+            <button class="btn-icon btn-theme-toggle" id="theme-toggle" data-theme-toggle type="button" aria-label="Switch to light mode" title="Switch to light mode">
+              <span class="theme-toggle-icon" aria-hidden="true">☀</span>
+              <span class="sr-only">Toggle theme</span>
+            </button>
+            <button class="btn-secondary small header-login-button" id="login-button" type="button" hidden>Sign in</button>
           <button class="btn-icon btn-panel-toggle" id="events-panel-toggle" type="button" aria-label="Collapse events panel" title="Collapse events panel">
             <span class="panel-toggle-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

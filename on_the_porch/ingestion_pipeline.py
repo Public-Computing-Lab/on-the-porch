@@ -19,8 +19,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from document_catalog import catalog_stats, upsert_document, verify_index_parity
+from source_provenance import (
+    ProvenanceClass,
+    classify_local_path,
+    is_resident_eligible,
+)
 from source_registry import (
     ensure_registry_seeded,
+    get_source,
     list_sources,
     mark_ingest_result,
     record_operator_action,
@@ -33,10 +39,9 @@ DEFAULT_CORPUS_DIRS = (
     ROOT / "data" / "phase5_corpus" / "meetings",
     ROOT / "data" / "phase5_corpus" / "news",
     ROOT / "data" / "phase5_corpus" / "community",
-    ROOT / "public" / "Policies",
 )
 
-INDEX_VERSION = "phase5-chunk-v1"
+INDEX_VERSION = "phase5-chunk-v2"
 MAX_FILE_BYTES = 2_000_000
 MAX_PASSAGE_CHARS = 1800
 ALLOWED_SUFFIXES = {".txt", ".md", ".html", ".htm", ".pdf", ".csv", ".json"}
@@ -205,38 +210,69 @@ def ingest_local_directory(
 ) -> IngestionResult:
     """Ingest allowlisted local files into MySQL catalog (and optionally Chroma)."""
     run_id = _run_id(source_id)
+    source_row = get_source(conn, source_id) or {}
+    if source_row and not source_row.get("enabled", True):
+        result = IngestionResult(
+            source_id=source_id,
+            status="skipped_disabled",
+            run_id=run_id,
+            details={"reason": "source disabled"},
+        )
+        _record_run(conn, result=result, job_name="local_directory", operator_user_id=operator_user_id)
+        return result
     seen = 0
     upserted = 0
+    skipped_non_resident = 0
     chunks_total = 0
     files: List[Path] = []
     for directory in directories:
         if not directory.exists():
             continue
+        if "fixtures" in directory.parts:
+            continue
         for path in sorted(directory.rglob("*")):
-            if path.is_file() and path.suffix.lower() in ALLOWED_SUFFIXES:
-                files.append(path)
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_SUFFIXES:
+                continue
+            if "fixtures" in path.parts:
+                continue
+            files.append(path)
     try:
         vector_docs = []
+        vector_ids: List[str] = []
         for path in files:
             seen += 1
             body, fmt = _read_file(path)
             if not body.strip():
                 continue
+            provenance = classify_local_path(str(path), source_id=source_id)
+            if not is_resident_eligible(provenance.value):
+                skipped_non_resident += 1
+                continue
             passages = _chunk_text(body)
             if not passages:
                 continue
             title = path.stem.replace("_", " ").replace("-", " ").strip() or path.name
+            publisher_name = publisher or str(source_row.get("publisher") or "On the Porch curated corpus")
+            authority = str(source_row.get("authority") or publisher_name)
             doc_id, chunk_count = upsert_document(
                 conn,
                 source_id=source_id,
                 title=title,
                 doc_type=doc_type,
                 body_text=body,
-                publisher=publisher,
-                official_url=None,
+                publisher=publisher_name,
+                official_url=source_row.get("official_url"),
                 geography="Dorchester",
                 index_version=INDEX_VERSION,
-                metadata={"path": str(path), "format": fmt},
+                limitations=str(source_row.get("limitations") or ""),
+                provenance_class=provenance.value,
+                metadata={
+                    "path": str(path),
+                    "format": fmt,
+                    "provenance_class": provenance.value,
+                    "authority": authority,
+                    "publisher": publisher_name,
+                },
                 chunks=[
                     {"text": passage, "section_path": f"passage-{index + 1}"}
                     for index, passage in enumerate(passages)
@@ -248,6 +284,8 @@ def ingest_local_directory(
                 from langchain_core.documents import Document  # type: ignore
 
                 for index, passage in enumerate(passages):
+                    chunk_vector_id = f"{doc_id}:{index}"
+                    vector_ids.append(chunk_vector_id)
                     vector_docs.append(
                         Document(
                             page_content=passage,
@@ -258,11 +296,24 @@ def ingest_local_directory(
                                 "document_id": doc_id,
                                 "chunk_ordinal": index,
                                 "index_version": INDEX_VERSION,
+                                "provenance_class": provenance.value,
+                                "publisher": publisher_name,
+                                "authority": authority,
                             },
                         )
                     )
         if write_vectors and vector_docs:
-            _upsert_chroma_documents(vector_docs)
+            # Stable IDs must be unique within the batch (identical file hashes collapse).
+            deduped_docs = []
+            deduped_ids = []
+            seen_ids = set()
+            for doc, vid in zip(vector_docs, vector_ids):
+                if vid in seen_ids:
+                    continue
+                seen_ids.add(vid)
+                deduped_docs.append(doc)
+                deduped_ids.append(vid)
+            _upsert_chroma_documents(deduped_docs, ids=deduped_ids)
         result = IngestionResult(
             source_id=source_id,
             status="success",
@@ -271,7 +322,10 @@ def ingest_local_directory(
             documents_upserted=upserted,
             chunks_upserted=chunks_total,
             index_version=INDEX_VERSION,
-            details={"directories": [str(p) for p in directories if p.exists()]},
+            details={
+                "directories": [str(p) for p in directories if p.exists()],
+                "skipped_non_resident": skipped_non_resident,
+            },
         )
         mark_ingest_result(
             conn,
@@ -279,6 +333,7 @@ def ingest_local_directory(
             success=True,
             index_version=INDEX_VERSION,
             chunk_count=chunks_total,
+            document_count=upserted,
         )
     except Exception as exc:  # noqa: BLE001
         result = IngestionResult(
@@ -305,8 +360,12 @@ def ingest_local_directory(
     return result
 
 
-def _upsert_chroma_documents(documents: Sequence[Any]) -> None:
-    """Best-effort Chroma upsert using existing retrieval helpers."""
+def _upsert_chroma_documents(
+    documents: Sequence[Any],
+    *,
+    ids: Optional[Sequence[str]] = None,
+) -> None:
+    """Best-effort Chroma upsert using stable IDs to avoid duplicate vectors."""
     import sys
 
     rag_dir = ROOT / "on_the_porch" / "rag stuff"
@@ -322,9 +381,50 @@ def _upsert_chroma_documents(documents: Sequence[Any]) -> None:
         persist_directory=str(vectordb_dir),
         embedding_function=embeddings,
     )
-    store.add_documents(list(documents))
+    stable_ids = list(ids) if ids is not None else None
+    if stable_ids and len(stable_ids) == len(documents):
+        try:
+            store.delete(ids=list(stable_ids))
+        except Exception:
+            pass
+        store.add_documents(list(documents), ids=list(stable_ids))
+    else:
+        store.add_documents(list(documents))
     if hasattr(store, "persist"):
         store.persist()
+
+
+def quarantine_non_resident_documents(conn) -> Dict[str, int]:
+    """Mark DEMO/TEST/INTERNAL analysis documents inactive in MySQL catalog."""
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE civic_documents
+            SET status = 'quarantined'
+            WHERE provenance_class IN ('DEMO_FIXTURE', 'TEST_ONLY', 'INTERNAL_ANALYSIS')
+               OR LOWER(title) LIKE '%analysis%'
+               OR LOWER(title) LIKE '%digest%'
+               OR LOWER(title) LIKE '%reporting note%'
+            """
+        )
+        docs = cursor.rowcount
+        cursor.execute(
+            """
+            UPDATE civic_document_chunks c
+            JOIN civic_documents d ON d.document_id = c.document_id
+            SET c.status = 'quarantined'
+            WHERE d.status = 'quarantined'
+            """
+        )
+        chunks = cursor.rowcount
+        conn.commit()
+        return {"documents_quarantined": int(docs), "chunks_quarantined": int(chunks)}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
 
 
 def sync_structured_source_freshness(conn, source_id: str) -> IngestionResult:
@@ -524,7 +624,7 @@ def bootstrap_phase5(
         mapping = {
             "boston.policy_corpus": (
                 "policy",
-                [ROOT / "data" / "phase5_corpus" / "policy", ROOT / "public" / "Policies"],
+                [ROOT / "data" / "phase5_corpus" / "policy"],
             ),
             "boston.zoning_references": (
                 "policy",
@@ -539,7 +639,7 @@ def bootstrap_phase5(
                 [ROOT / "data" / "phase5_corpus" / "news"],
             ),
             "dorchester.community_documents": (
-                "transcript",
+                "community",
                 [ROOT / "data" / "phase5_corpus" / "community"],
             ),
         }
@@ -553,6 +653,16 @@ def bootstrap_phase5(
                     write_vectors=write_vectors,
                 ).to_dict()
             )
+        # Announcements remain registered but not ingested until connector exists.
+        mark_ingest_result(
+            conn,
+            "boston.city_announcements",
+            success=True,
+            document_count=0,
+            chunk_count=0,
+        )
+        results.append({"source_id": "boston.city_announcements", "status": "NOT_CONFIGURED"})
+        results.append({"quarantine": quarantine_non_resident_documents(conn)})
     parity = verify_index_parity(conn)
     return {
         "seeded_rows": seeded,

@@ -517,6 +517,7 @@ class ModelLedTurnService:
                     tool=tool,
                     context=context,
                     deadline=deadline,
+                    ledger=ledger,
                     started=started,
                     planner_calls=ledger.total_calls,
                     provider_model=provider_model,
@@ -1004,6 +1005,7 @@ class ModelLedTurnService:
         tool: RegisteredToolRequest,
         context: Mapping[str, Any],
         deadline: GlobalDeadline,
+        ledger: ModelCallLedger,
         started: float,
         planner_calls: int,
         provider_model: Optional[str],
@@ -1072,21 +1074,39 @@ class ModelLedTurnService:
             request.message,
             plan=document_plan,
             deadline=deadline,
+            connection_factory=self.connection_factory,
         )
         use_synthesis = (
             len(civic.civic_tool_result.records) >= 2
             and callable(self.synthesis_generate)
         )
+        synthesis_generate = None
+        if use_synthesis:
+            def synthesis_generate(prompt: str, timeout_seconds: float) -> str:
+                reservation = ledger.reserve(ModelCallRole.SYNTHESIS)
+                bounded = min(float(timeout_seconds), reservation.available_seconds)
+                return self.synthesis_generate(prompt, bounded)
 
-        synthesis = synthesize_grounded_answer(
-            resident_goal=request.message,
-            trusted_state=context,
-            tool_results=(civic.civic_tool_result,),
-            fallback_answer=civic.answer,
-            generate=self.synthesis_generate if use_synthesis else None,
-            deadline=deadline,
-            evidence_bundle=civic.evidence,
-        )
+        try:
+            synthesis = synthesize_grounded_answer(
+                resident_goal=request.message,
+                trusted_state=context,
+                tool_results=(civic.civic_tool_result,),
+                fallback_answer=civic.answer,
+                generate=synthesis_generate if use_synthesis else None,
+                deadline=deadline,
+                evidence_bundle=civic.evidence,
+            )
+        except ModelCallLedgerError:
+            synthesis = synthesize_grounded_answer(
+                resident_goal=request.message,
+                trusted_state=context,
+                tool_results=(civic.civic_tool_result,),
+                fallback_answer=civic.answer,
+                generate=None,
+                deadline=deadline,
+                evidence_bundle=civic.evidence,
+            )
         degraded = civic.evidence.evidence_status in {
             EvidenceStatus.DEPENDENCY_UNAVAILABLE,
             EvidenceStatus.INSUFFICIENT_EVIDENCE,
