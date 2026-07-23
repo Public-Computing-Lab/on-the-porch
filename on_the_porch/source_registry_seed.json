@@ -112,7 +112,7 @@
       "parsing_strategy": "html_pdf_text_chunk_v1",
       "indexing_eligible": true,
       "citation_policy": "cite title, publisher, publication date, approved URL; state that this is an On the Porch curated/secondary staging copy, not an official City/BPDA/ISD publication",
-      "limitations": "Local curated copies only; digests/analysis are excluded from resident retrieval; answers must not claim City/BPDA/ISD legal authority from staging copies. Index may lag official publication; verify binding law elsewhere when needed.",
+      "limitations": "Local curated copies only; digests/analysis are excluded from resident retrieval; answers must not claim City/BPDA/ISD legal authority from staging copies. Index may lag official publication; verify binding law elsewhere when needed. Authoritative City of Boston mayoral operating budgets (including FY2027) are not currently ingested—do not invent budget figures.",
       "connector_id": "local_directory",
       "provenance_class": "OFFICIAL_SECONDARY",
       "min_useful_documents": 1
