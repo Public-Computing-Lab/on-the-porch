@@ -72,7 +72,9 @@ def test_corpus_seed_files_exist():
     assert list((ROOT / "data" / "phase5_corpus" / "policy").glob("*"))
     assert list((ROOT / "data" / "phase5_corpus" / "zoning").glob("*"))
     assert list((ROOT / "data" / "phase5_corpus" / "meetings").glob("*"))
-    assert list((ROOT / "data" / "phase5_corpus" / "news").glob("*"))
+    news_dir = ROOT / "data" / "phase5_corpus" / "news"
+    assert news_dir.exists()
+    # Local news may be intentionally empty/INCOMPLETE until RSS is configured.
     assert list((ROOT / "data" / "phase5_corpus" / "community").glob("*"))
 
 

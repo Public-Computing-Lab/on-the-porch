@@ -535,19 +535,36 @@ def _compile_task(
             trusted_context=trusted_context,
         )
         if retained is None:
-            raise SemanticCompilationError(
-                "A time period is required before evidence can be gathered."
+            # Broad crime/public-safety overviews default to the latest complete month
+            # instead of clarifying for a period the resident did not request.
+            if (
+                task.domain is SemanticDomain.CRIME
+                and task.operation is not SemanticOperation.STATUS
+            ):
+                task = SemanticTask(
+                    task.domain,
+                    task.operation,
+                    task.subject,
+                    task.geography,
+                    SemanticTime(SemanticTimeKind.NONE, None),
+                    task.source_scope,
+                    task.goal_clarity,
+                )
+            else:
+                raise SemanticCompilationError(
+                    "A time period is required before evidence can be gathered."
+                )
+        else:
+            # Trusted period retained; treat as NONE for downstream named-period mapping.
+            task = SemanticTask(
+                task.domain,
+                task.operation,
+                task.subject,
+                task.geography,
+                SemanticTime(SemanticTimeKind.NONE, None),
+                task.source_scope,
+                task.goal_clarity,
             )
-        # Trusted period retained; treat as NONE for downstream named-period mapping.
-        task = SemanticTask(
-            task.domain,
-            task.operation,
-            task.subject,
-            task.geography,
-            SemanticTime(SemanticTimeKind.NONE, None),
-            task.source_scope,
-            task.goal_clarity,
-        )
     if task.geography.mode is GeographyMode.EXPLICIT \
             and not _explicit_matches_default(task, trusted_context):
         return ([

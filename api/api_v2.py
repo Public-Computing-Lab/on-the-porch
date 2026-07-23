@@ -1688,6 +1688,20 @@ def _check_qdrant_health() -> str:
 
 
 
+def _effective_chat_rate_limit(*, is_guest: bool) -> int:
+    """Public-beta chat ceilings; audit mode only when explicitly configured."""
+    if (
+        Config.AUDIT_RATE_LIMIT_MODE
+        and not Config.PRODUCTION_MODE
+        and Config.AUDIT_RATE_LIMIT_SECRET
+        and request.headers.get("X-On-The-Porch-Audit-Token") == Config.AUDIT_RATE_LIMIT_SECRET
+    ):
+        return int(Config.AUDIT_RATE_LIMIT_CHAT_PER_SESSION)
+    if is_guest:
+        return int(Config.RATE_LIMIT_GUEST_CHAT_PER_SESSION)
+    return int(Config.RATE_LIMIT_CHAT_PER_SESSION)
+
+
 def _rate_limit_or_none(bucket: str, identifier: str, limit: int, window_seconds: int):
     if not Config.RATE_LIMIT_ENABLED:
         return None
@@ -1705,7 +1719,7 @@ def _rate_limit_or_none(bucket: str, identifier: str, limit: int, window_seconds
         return None
     response = jsonify(
         {
-            "error": "Too many requests. Please try again later.",
+            "error": "You have reached the conversation rate limit. Please wait a bit and try again.",
             "code": "rate_limited",
             "retry_after": retry_after,
         }
@@ -1713,7 +1727,6 @@ def _rate_limit_or_none(bucket: str, identifier: str, limit: int, window_seconds
     response.status_code = 429
     response.headers["Retry-After"] = str(retry_after)
     return response
-
 
 
 def _require_api_key_or_user():
@@ -3797,44 +3810,70 @@ def _next_dialogue_context_for_turn(
     )
 
 
+def _google_genai_plain_text(
+    prompt: str,
+    timeout_seconds: float,
+    *,
+    json_response: bool = False,
+) -> str:
+    """Resident-facing Gemini text via the maintained google-genai SDK only."""
+    from google import genai
+    from google.genai import types
+
+    timeout = max(0.25, float(timeout_seconds))
+    model_name = os.getenv(
+        "GEMINI_FAST_MODEL",
+        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
+    )
+    # Gemini rejects manually configured deadlines below 10s; still bound the future.
+    timeout_ms = max(10_000, int(timeout * 1000))
+    client = genai.Client(
+        api_key=Config.GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=timeout_ms),
+    )
+    config_kwargs: Dict[str, Any] = {"temperature": 0}
+    if json_response:
+        config_kwargs["response_mime_type"] = "application/json"
+    try:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            raise RuntimeError("structured model provider returned an empty response")
+        return text
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
 def _bounded_civic_311_model_call(
     prompt: str,
     timeout_seconds: float,
     *,
     json_response: bool,
 ) -> str:
-    """Use the existing Gemini client once, bounded by the caller's deadline."""
+    """One bounded google-genai call for 311/document synthesis (not the planner)."""
     global _CIVIC_PROVIDER_DISABLED_UNTIL
     timeout = max(0.25, float(timeout_seconds))
     with _CIVIC_PROVIDER_LOCK:
         if time.monotonic() < _CIVIC_PROVIDER_DISABLED_UNTIL:
             raise RuntimeError("structured model provider is temporarily unavailable")
-    client = _get_llm_client()
-    model_name = os.getenv(
-        "GEMINI_FAST_MODEL",
-        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-    )
-    model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
-    generation_config: Dict[str, Any] = {"temperature": 0}
-    if json_response:
-        generation_config["response_mime_type"] = "application/json"
-
-    def invoke() -> Any:
-        return model.generate_content(
-            prompt,
-            generation_config=generation_config,
-            request_options={"timeout": timeout},
-        )
 
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="civic311model")
-    future = executor.submit(invoke)
+    future = executor.submit(
+        _google_genai_plain_text,
+        prompt,
+        timeout,
+        json_response=json_response,
+    )
     try:
-        response = future.result(timeout=timeout)
-        text = str(getattr(response, "text", "") or "").strip()
-        if not text:
-            raise RuntimeError("structured model provider returned an empty response")
-        return text
+        return future.result(timeout=timeout)
     except FutureTimeoutError as exc:
         future.cancel()
         with _CIVIC_PROVIDER_LOCK:
@@ -4381,36 +4420,21 @@ def _model_led_message_diagnostics(
 
 def _relationship_llm_classifier(prompt: str, timeout_seconds: float) -> str:
     """One bounded structured classifier call used only when explicitly enabled."""
-    client = _get_llm_client()
-    model_name = os.getenv(
-        "GEMINI_FAST_MODEL",
-        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-    )
-    model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
-    response = model.generate_content(
+    return _google_genai_plain_text(
         prompt,
-        generation_config={"temperature": 0, "response_mime_type": "application/json"},
-        request_options={"timeout": max(0.25, float(timeout_seconds))},
+        timeout_seconds,
+        json_response=True,
     )
-    return str(getattr(response, "text", "") or "")
 
 
 def _dimensions_llm_classifier(prompt: str, timeout_seconds: float) -> str:
     """Optional bounded classifier; its calls do not affect answer model metrics."""
-    client = _get_llm_client()
-    model_name = os.getenv(
-        "GEMINI_FAST_MODEL",
-        os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-    )
-    model = client.GenerativeModel(model_name)
-    response = model.generate_content(
+    return _google_genai_plain_text(
         prompt,
-        generation_config={"temperature": 0, "response_mime_type": "application/json"},
-        request_options={"timeout": max(0.25, float(timeout_seconds))},
+        timeout_seconds,
+        json_response=True,
     )
-    return str(getattr(response, "text", "") or "")
-
 
 def _classify_relationship_shadow(
     message: str,
@@ -5186,7 +5210,7 @@ def post_conversation_message(thread_id: str):
     limited = _rate_limit_or_none(
         "chat",
         g.session_id or g.current_user_row["id"],
-        Config.RATE_LIMIT_CHAT_PER_SESSION,
+        _effective_chat_rate_limit(is_guest=bool(g.get("is_guest"))),
         Config.RATE_LIMIT_CHAT_WINDOW_SECONDS,
     )
     if limited:
@@ -5595,7 +5619,7 @@ def post_conversation_message_stream(thread_id: str):
     limited = _rate_limit_or_none(
         "chat",
         g.session_id or g.current_user_row["id"],
-        Config.RATE_LIMIT_CHAT_PER_SESSION,
+        _effective_chat_rate_limit(is_guest=bool(g.get("is_guest"))),
         Config.RATE_LIMIT_CHAT_WINDOW_SECONDS,
     )
     if limited:
@@ -7145,8 +7169,10 @@ def community_notes_chat():
     if not messages:
         return _json_error("messages required", 400, "missing_messages")
     try:
-        client = _get_llm_client()
-        model = client.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
+        history = "\n".join([
+            f"{'Community member' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+            for m in messages
+        ])
         system = (
             "You are helping a Dorchester community member report a local issue or share "
             "neighborhood information for a community chatbot.\n\n"
@@ -7163,22 +7189,11 @@ def community_notes_chat():
             "Do not ask more than 5 questions. Keep questions short and friendly. "
             "Never mention AI, databases, or that you are compiling a note."
         )
-        history = "\n".join([
-            f"{'Community member' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-            for m in messages
-        ])
-        resp = model.generate_content(
+        text = _google_genai_plain_text(
             system + "\n\nConversation:\n" + history + "\n\nAssistant:",
-            generation_config={"temperature": 0.4}
-        )
-        try:
-            text = (resp.text or "").strip()
-        except (ValueError, AttributeError):
-            # gemini-2.5-pro returns thinking parts alongside the text part;
-            # resp.text raises ValueError when multiple parts exist.
-            parts = resp.candidates[0].content.parts
-            text_parts = [p.text for p in parts if getattr(p, "text", None)]
-            text = (text_parts[-1] if text_parts else "").strip()
+            20.0,
+            json_response=False,
+        ).strip()
         is_ready = text.startswith("READY:")
         compiled = text[6:].strip() if is_ready else None
         return jsonify({"reply": text if not is_ready else None, "compiled": compiled, "ready": is_ready})

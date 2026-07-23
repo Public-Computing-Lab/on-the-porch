@@ -1,61 +1,57 @@
 # Final hardening backlog
 
-Single backlog for nonblocking polish after Phase 5. Do not scatter TODO files.
+Nonblocking work after public-beta readiness. Do not scatter TODO files.
 
 ## Semantic quality
 - Rare paraphrases that still ask for an unnecessary time period after a broad safety overview.
-- Occasional planner clarifications on broad “safety concerns” wording; clearer crime-category asks succeed.
 - Occasional entity-profile asks that clarify instead of resolving a seeded profile.
 - Cross-domain asks that clarify “which domain first” instead of combining evidence.
+- News follow-ups when local-news coverage is intentionally INCOMPLETE.
 
-- Expand local news RSS bootstrap so neighborhood-news asks return passages instead of empty-index disclosures when corpus rows exist but retrieval misses.
-- Reject / sanitize any residual protocol-shaped synthesis text at the API response boundary (defense in depth beyond grounded_synthesis validation).
-
-- Stronger meeting-transcript metadata (speaker, meeting date) when ingestion provides it.
-- Broader allowlisted official announcement pages beyond the initial Boston.gov hosts.
-- Stronger stale/invalid source exclusion during incremental refresh.
+## Source quality
+- Ingest allowlisted Dorchester journalism RSS so news can leave INCOMPLETE.
+- Ingest boston.city_announcements through the allowlisted HTTP connector.
+- Expand verified civic entity profiles.
+- Stronger meeting-transcript speaker/date metadata when available.
 
 ## Ranking / retrieval
-- Document passage ranking across POLICY / TRANSCRIPT / NEWS / COMMUNITY when several corpora return hits.
-- Crime offense-group display names for uncommon BPD labels when `offense_code_group` is sparse.
+- Passage ranking across POLICY / TRANSCRIPT / NEWS / COMMUNITY.
+- Crime offense-group display names when `offense_code_group` is sparse.
 
 ## UI polish
 - Final citation chip visual design and source-type legend.
-- Long multi-source answers: collapsible source groups.
-- Event sidebar spacing with source chips present.
-- Final brand / visual redesign (explicitly deferred).
+- Collapsible multi-source groups.
+- Final brand / visual redesign (deferred).
 
 ## Accessibility
 - Additional screen-reader polish for streaming deltas.
-- Ensure limitation text remains visible when many citation chips wrap.
+- Limitation text visibility when many citation chips wrap.
 
 ## Mobile
-- Further events-panel compaction on very small phones.
 - Conversation list gesture polish.
+- Composer/keyboard avoidance tuning on iOS Safari.
 
-## Performance
-- Shared connection reuse for crime freshness + aggregate queries.
-- Avoid loading retrieval stack for pure entity-profile turns beyond the current short-circuit.
-
-## Load
+## Performance / load
 - Multi-worker soak and latency percentiles under production-like concurrent guests.
+- Shared connection reuse for crime freshness + aggregate queries.
 
 ## Security / privacy
 - Final review of operator audit retention windows.
 - Optional redaction policy for admin interaction viewers.
 
 ## Operations
-- Remote staging host provisioning (FQDN, TLS, staging DB) still operator-blocked.
-- Automate DreamHost/process-supervisor restart verification on a real staging host.
-- Migrate remaining offline ingest scripts from `google.generativeai` to `google-genai`.
+- Remote staging host provisioning (FQDN, TLS, staging DB).
+- Automate process-supervisor restart verification on a real staging host.
+- Complete DBA restore drill after operator grants are available.
+- Migrate remaining offline ingest/RAG scripts from `google.generativeai` to `google-genai`.
 
 ## Release evaluation
-- Full semantic holdout / external audit after UI and staging host are complete.
+- Full semantic holdout / external audit after staging host is complete.
 - Design QA for the end-of-product visual pass.
 
 ## Deployment
-- Public production deploy checklist (not authorized in Phase 5).
+- Public production deploy checklist (not authorized until explicitly approved).
 - Production secret management path confirmation.
 
 ## Documentation
-- Keep a single architecture doc (`docs/answering_architecture.md`) and operations pack (`docs/phase5_operations.md`); avoid overlapping manuals.
+- Keep architecture + provenance + operations docs consolidated; avoid overlapping manuals.

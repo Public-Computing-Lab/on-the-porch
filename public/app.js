@@ -40,6 +40,8 @@ const elements = {
   guestContinueButton: document.getElementById('guest-continue-button'),
   authBackToChat: document.getElementById('auth-back-to-chat'),
   loginButton: document.getElementById('login-button'),
+  sidebarToggle: document.getElementById('sidebar-toggle'),
+  sidebarBackdrop: document.getElementById('sidebar-backdrop'),
   profileLogout: document.getElementById('profile-logout'),
   accountUsername: document.getElementById('account-username'),
   accountEmail: document.getElementById('account-email'),
@@ -368,6 +370,34 @@ function showView(name) {
   updateAuthChrome();
 }
 
+
+function setSidebarOpen(open) {
+  document.body.dataset.sidebarOpen = open ? 'true' : 'false';
+  if (elements.sidebarToggle) {
+    elements.sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    elements.sidebarToggle.setAttribute('aria-label', open ? 'Close conversations' : 'Open conversations');
+  }
+  if (elements.sidebarBackdrop) {
+    elements.sidebarBackdrop.hidden = !open;
+  }
+}
+
+function bindSidebarToggle() {
+  if (elements.sidebarToggle) {
+    elements.sidebarToggle.addEventListener('click', () => {
+      const open = document.body.dataset.sidebarOpen === 'true';
+      setSidebarOpen(!open);
+    });
+  }
+  if (elements.sidebarBackdrop) {
+    elements.sidebarBackdrop.addEventListener('click', () => setSidebarOpen(false));
+  }
+  // Chat-first on narrow screens.
+  if (window.matchMedia('(max-width: 1120px)').matches) {
+    setSidebarOpen(false);
+  }
+}
+
 function updateAuthChrome() {
   if (elements.loginButton) {
     elements.loginButton.hidden = !state.isGuest || elements.appView.hidden;
@@ -520,7 +550,7 @@ function formatSource(rawSource) {
 
   const label = (source.source || source.label || source.name || '').trim();
   let path = source.path || source.link || source.url || null;
-  const sourceType = (source.source_type || source.sourceType || '').trim();
+  const sourceType = (source.provenance_label || source.source_type || source.sourceType || '').trim();
   const sourceDate = (source.date || source.publication_or_data_date || '').trim();
   const authority = (source.authority || source.publisher || '').trim();
 

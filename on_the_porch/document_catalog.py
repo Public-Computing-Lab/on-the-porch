@@ -33,6 +33,7 @@ def upsert_document(
     publication_date: Optional[date] = None,
     index_version: Optional[str] = None,
     limitations: Optional[str] = None,
+    provenance_class: Optional[str] = None,
     metadata: Optional[Mapping[str, Any]] = None,
     chunks: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Tuple[str, int]:
@@ -42,15 +43,16 @@ def upsert_document(
     chunk_rows = list(chunks or [])
     if not chunk_rows and body_text.strip():
         chunk_rows = [{"text": body_text.strip(), "section_path": None, "page_number": None}]
+    provenance = str(provenance_class or "OFFICIAL_SECONDARY")[:64]
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
             INSERT INTO civic_documents (
                 document_id, source_id, title, publisher, official_url, geography,
-                publication_date, doc_type, content_sha256, chunk_count, index_version,
-                status, limitations, metadata_json
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s,%s)
+                publication_date, doc_type, provenance_class, content_sha256, chunk_count,
+                index_version, status, limitations, metadata_json
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s,%s)
             ON DUPLICATE KEY UPDATE
                 title = VALUES(title),
                 publisher = VALUES(publisher),
@@ -58,6 +60,7 @@ def upsert_document(
                 geography = VALUES(geography),
                 publication_date = VALUES(publication_date),
                 doc_type = VALUES(doc_type),
+                provenance_class = VALUES(provenance_class),
                 chunk_count = VALUES(chunk_count),
                 index_version = VALUES(index_version),
                 status = 'active',
@@ -74,6 +77,7 @@ def upsert_document(
                 geography,
                 publication_date,
                 doc_type[:64],
+                provenance,
                 content_sha,
                 len(chunk_rows),
                 index_version,

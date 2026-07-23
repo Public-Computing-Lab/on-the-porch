@@ -21,7 +21,9 @@
       "indexing_eligible": false,
       "citation_policy": "cite Analyze Boston crime incident reports with data_through_date",
       "limitations": "Structured counts only; not live 911 dispatch.",
-      "connector_id": "boston_data_sync"
+      "connector_id": "boston_data_sync",
+      "provenance_class": "OFFICIAL_PRIMARY",
+      "min_useful_documents": null
     },
     {
       "source_id": "boston.service_requests_311",
@@ -42,7 +44,9 @@
       "indexing_eligible": false,
       "citation_policy": "cite Boston 311 service-request data with coverage period",
       "limitations": "Closed does not mean resolved; open/closed are request statuses.",
-      "connector_id": "boston_data_sync"
+      "connector_id": "boston_data_sync",
+      "provenance_class": "OFFICIAL_PRIMARY",
+      "min_useful_documents": null
     },
     {
       "source_id": "boston.shootings",
@@ -63,7 +67,9 @@
       "indexing_eligible": false,
       "citation_policy": "cite official shootings dataset",
       "limitations": "Public-safety caution required; not a substitute for emergency services.",
-      "connector_id": "boston_data_sync"
+      "connector_id": "boston_data_sync",
+      "provenance_class": "OFFICIAL_PRIMARY",
+      "min_useful_documents": null
     },
     {
       "source_id": "dorchester.weekly_events",
@@ -84,15 +90,17 @@
       "indexing_eligible": false,
       "citation_policy": "cite event title, date, organizer when available",
       "limitations": "Listings may omit last-minute cancellations.",
-      "connector_id": "tribe_events"
+      "connector_id": "tribe_events",
+      "provenance_class": "COMMUNITY_PUBLISHED",
+      "min_useful_documents": null
     },
     {
       "source_id": "boston.policy_corpus",
       "family": "policy",
       "title": "Boston / Dorchester Policy Documents",
-      "authority": "City of Boston / BPDA / ISD",
+      "authority": "On the Porch curated policy references (not a substitute for official City/BPDA/ISD publications)",
       "source_type": "PLANNING_POLICY",
-      "publisher": "City of Boston",
+      "publisher": "On the Porch curated corpus",
       "official_url": "https://www.boston.gov/",
       "geography": "Boston / Dorchester",
       "update_frequency": "as_published",
@@ -103,17 +111,19 @@
       "dedupe_key_template": "doc:{content_sha256}",
       "parsing_strategy": "html_pdf_text_chunk_v1",
       "indexing_eligible": true,
-      "citation_policy": "cite title, publisher, publication date, approved URL",
-      "limitations": "Index may lag official publication; verify binding law elsewhere when needed.",
-      "connector_id": "local_directory"
+      "citation_policy": "cite title, publisher, publication date, approved URL; state that this is an On the Porch curated/secondary staging copy, not an official City/BPDA/ISD publication",
+      "limitations": "Local curated copies only; digests/analysis are excluded from resident retrieval; answers must not claim City/BPDA/ISD legal authority from staging copies. Index may lag official publication; verify binding law elsewhere when needed.",
+      "connector_id": "local_directory",
+      "provenance_class": "OFFICIAL_SECONDARY",
+      "min_useful_documents": 1
     },
     {
       "source_id": "boston.zoning_references",
       "family": "zoning",
       "title": "Zoning Guidance and Official References",
-      "authority": "BPDA / ISD",
+      "authority": "On the Porch curated zoning references (not a substitute for official BPDA/ISD parcel determination)",
       "source_type": "PLANNING_POLICY",
-      "publisher": "Boston Planning / ISD",
+      "publisher": "On the Porch curated corpus",
       "official_url": "https://www.boston.gov/departments/inspectional-services",
       "geography": "Boston / Dorchester",
       "update_frequency": "as_published",
@@ -124,9 +134,11 @@
       "dedupe_key_template": "doc:{content_sha256}",
       "parsing_strategy": "html_pdf_text_chunk_v1",
       "indexing_eligible": true,
-      "citation_policy": "cite zoning title and official URL; maps are referential not survey-grade",
-      "limitations": "Not a substitute for parcel-level legal determination.",
-      "connector_id": "local_directory"
+      "citation_policy": "cite zoning title and official URL; state curated/secondary provenance; maps are referential not survey-grade",
+      "limitations": "Local curated copies only; not an official parcel-level legal determination and not a substitute for BPDA/ISD authority. Answers must not claim official zoning determination from staging copies.",
+      "connector_id": "local_directory",
+      "provenance_class": "OFFICIAL_SECONDARY",
+      "min_useful_documents": 1
     },
     {
       "source_id": "dorchester.meeting_transcripts",
@@ -147,7 +159,9 @@
       "indexing_eligible": true,
       "citation_policy": "cite meeting title, date, and discussion status (not binding law)",
       "limitations": "Discussion is not adopted policy unless separately enacted.",
-      "connector_id": "local_directory"
+      "connector_id": "local_directory",
+      "provenance_class": "COMMUNITY_PUBLISHED",
+      "min_useful_documents": 1
     },
     {
       "source_id": "dorchester.local_news",
@@ -167,8 +181,10 @@
       "parsing_strategy": "rss_html_v1",
       "indexing_eligible": true,
       "citation_policy": "cite outlet, title, publication date, URL",
-      "limitations": "Journalism is reporting, not official city policy.",
-      "connector_id": "rss"
+      "limitations": "Journalism is reporting, not official city policy. Coverage incomplete until RSS feeds are populated.",
+      "connector_id": "rss",
+      "provenance_class": "JOURNALISM",
+      "min_useful_documents": 3
     },
     {
       "source_id": "dorchester.community_documents",
@@ -189,7 +205,9 @@
       "indexing_eligible": true,
       "citation_policy": "cite organization name and document title; mark as community material",
       "limitations": "Community materials are not binding city policy.",
-      "connector_id": "local_directory"
+      "connector_id": "local_directory",
+      "provenance_class": "COMMUNITY_PUBLISHED",
+      "min_useful_documents": 2
     },
     {
       "source_id": "otp.civic_entity_profiles",
@@ -210,7 +228,9 @@
       "indexing_eligible": false,
       "citation_policy": "cite official organization URL from profile",
       "limitations": "Profiles are curated summaries, not exhaustive directories.",
-      "connector_id": "entity_profiles"
+      "connector_id": "entity_profiles",
+      "provenance_class": "CURATED_ENTITY_PROFILE",
+      "min_useful_documents": null
     },
     {
       "source_id": "boston.city_announcements",
@@ -228,10 +248,12 @@
       "retention_policy": "retain indexed versions",
       "dedupe_key_template": "doc:{content_sha256}",
       "parsing_strategy": "html_pdf_text_chunk_v1",
-      "indexing_eligible": true,
+      "indexing_eligible": false,
       "citation_policy": "cite boston.gov page title and URL",
-      "limitations": "Only operator-registered URLs may be fetched.",
-      "connector_id": "allowlisted_http"
+      "limitations": "Only operator-registered URLs may be fetched. Announcements are not yet ingested pending connector configuration.",
+      "connector_id": "allowlisted_http",
+      "provenance_class": "OFFICIAL_PRIMARY",
+      "min_useful_documents": 1
     }
   ]
 }

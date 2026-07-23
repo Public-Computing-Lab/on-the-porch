@@ -340,29 +340,40 @@ def _prior_equal_period(period: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _sql_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("'", "''")
+def _validated_iso_date(value: Any, *, field_name: str) -> str:
+    text = str(value or "").strip()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"invalid crime {field_name}") from exc
 
 
-def _offense_clause(offense_category_id: Optional[str]) -> str:
-    if not offense_category_id:
-        return "1=1"
-    token = _sql_escape(offense_category_id.replace("_", " "))
-    return (
-        "(LOWER(COALESCE(`offense_code_group`, '')) LIKE "
-        f"'%{token}%' OR LOWER(COALESCE(`offense_description`, '')) LIKE '%{token}%')"
-    )
-
-
-def _date_clause(period: Mapping[str, Any]) -> str:
+def _period_params(period: Mapping[str, Any]) -> Tuple[str, List[Any]]:
     start = period.get("start_date")
     end = period.get("end_date_exclusive")
     if isinstance(start, str) and isinstance(end, str):
         return (
-            f"`occurred_on_date` >= '{_sql_escape(start)}' "
-            f"AND `occurred_on_date` < '{_sql_escape(end)}'"
+            "`occurred_on_date` >= %s AND `occurred_on_date` < %s",
+            [
+                _validated_iso_date(start, field_name="start_date"),
+                _validated_iso_date(end, field_name="end_date_exclusive"),
+            ],
         )
-    return "`occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL 31 DAY)"
+    return ("`occurred_on_date` >= DATE_SUB(CURDATE(), INTERVAL 31 DAY)", [])
+
+
+def _offense_params(offense_category_id: Optional[str]) -> Tuple[str, List[Any]]:
+    if not offense_category_id:
+        return ("1=1", [])
+    raw = str(offense_category_id).strip().casefold()
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", raw):
+        raise ValueError("invalid crime offense category")
+    token = f"%{raw.replace('_', ' ')}%"
+    return (
+        "(LOWER(COALESCE(`offense_code_group`, '')) LIKE %s "
+        "OR LOWER(COALESCE(`offense_description`, '')) LIKE %s)",
+        [token, token],
+    )
 
 
 def _count_incidents(
@@ -370,12 +381,13 @@ def _count_incidents(
     period: Mapping[str, Any],
     offense_category_id: Optional[str],
 ) -> int:
+    date_sql, date_params = _period_params(period)
+    offense_sql, offense_params = _offense_params(offense_category_id)
     sql = (
         "SELECT COUNT(*) AS cnt FROM `crime_incident_reports` "
-        f"WHERE {_DORCHESTER_CRIME} AND {_date_clause(period)} "
-        f"AND {_offense_clause(offense_category_id)}"
+        f"WHERE {_DORCHESTER_CRIME} AND {date_sql} AND {offense_sql}"
     )
-    rows = _fetch_all(connection, sql)
+    rows = _fetch_all(connection, sql, date_params + offense_params)
     if not rows:
         return 0
     return int(rows[0].get("cnt") or 0)
@@ -386,15 +398,16 @@ def _group_incidents(
     period: Mapping[str, Any],
     limit: int,
 ) -> List[Dict[str, Any]]:
+    date_sql, date_params = _period_params(period)
+    bounded_limit = max(1, min(int(limit), MAX_GROUPS))
     sql = (
         "SELECT COALESCE(NULLIF(TRIM(`offense_code_group`), ''), 'Unknown') AS offense_group, "
         "COUNT(*) AS cnt "
         "FROM `crime_incident_reports` "
-        f"WHERE {_DORCHESTER_CRIME} AND {_date_clause(period)} "
-        "GROUP BY 1 ORDER BY cnt DESC "
-        f"LIMIT {max(1, min(limit, MAX_GROUPS))}"
+        f"WHERE {_DORCHESTER_CRIME} AND {date_sql} "
+        "GROUP BY 1 ORDER BY cnt DESC LIMIT %s"
     )
-    rows = _fetch_all(connection, sql)
+    rows = _fetch_all(connection, sql, date_params + [bounded_limit])
     return [
         {
             "offense_group": str(row.get("offense_group") or "Unknown"),
@@ -404,10 +417,14 @@ def _group_incidents(
     ]
 
 
-def _fetch_all(connection: Any, sql: str) -> List[Dict[str, Any]]:
+def _fetch_all(
+    connection: Any,
+    sql: str,
+    params: Optional[Sequence[Any]] = None,
+) -> List[Dict[str, Any]]:
     cursor = connection.cursor(dictionary=True)
     try:
-        cursor.execute(sql)
+        cursor.execute(sql, tuple(params or ()))
         rows = cursor.fetchall() or []
         return [dict(row) for row in rows]
     finally:
