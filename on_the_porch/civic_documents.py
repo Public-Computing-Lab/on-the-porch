@@ -179,7 +179,7 @@ def execute_document_plan(
     enabled_sources: Optional[EnabledSourceLookup] = None,
     connection_factory: Optional[Callable[[], Any]] = None,
 ) -> DocumentResult:
-    del message
+    resident_message = str(message or "").strip() or plan.query
     if deadline.expired(reserve_for_persistence=True):
         return _empty_result(plan, unavailable=True)
     retriever = retrieve or _default_retrieve
@@ -271,7 +271,9 @@ def execute_document_plan(
         if len(passages) >= plan.limit:
             break
 
-    constraints = extract_document_constraints(plan.query)
+    # Prefer the resident utterance for topic/inventory constraints; planner query
+    # rewrites can drop inventory phrasing and year/mayor cues.
+    constraints = extract_document_constraints(resident_message)
     relevant_passages, rejection = filter_relevant_passages(passages, constraints)
     answerable, answerable_reason = validate_answerable_bundle(relevant_passages, constraints)
     if not relevant_passages or not answerable:
