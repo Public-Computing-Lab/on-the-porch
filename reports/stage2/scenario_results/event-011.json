@@ -1,0 +1,134 @@
+{
+  "scenario_id": "event-011",
+  "title": "Return to earlier event topic",
+  "domain": "events",
+  "conversation_category": "topic_return",
+  "turns": [
+    {
+      "scenario_id": "event-011",
+      "turn_index": 0,
+      "user_message": "Tell me about the cleanup event Saturday.",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like you're asking about cleanup events happening on a Saturday. While I don't see any events specifically labeled as \"cleanup\" in the results, I can tell you about other events happening on Saturdays in Dorchester.\n\nThere are several recurring **Urgent Care Walk-in Hours** at the **Codman Square Health Center** every Saturday from 9:00 AM to 3:00 PM.\n\nLooking at specific Saturdays, here are a few things happening:\n\n*   On **Saturday, April 18th**, there's a community workshop called \"Give Them Their Flowers: A Community Workshop Honoring the 133 Women of Cedar Grove\" at the Codman Square Branch of the Boston Public Library, starting at 1:00 PM.\n*   On **Saturday, June 6th**, you can enjoy **Dorchfest**, a free music festival with over 50 bands and performers across the Ashmont-Adams neighborhood. Also on June 6th, the Friends of the Adams Street Library are holding a **community book sale** from 10:00 AM to 4:00 PM.\n*   On **Saturday, May 16th**, there's an **Ashmont Hill Yard Sale** happening at over 40 locations from 9:00 AM to 2:00 PM. On the same day, the **Little Miss & Young Miss Dorchester 2026 contest** will take place at 2:00 PM at Saint John Paul II School. You can also explore the Mattahunt Woods Urban Wild during a **guided community tour** from 10:00 AM to 12:00 PM, and there's a **Zero Waste Day drop-off** for household hazardous waste from 8:30 AM to 12:00 PM.\n*   On **Saturday, May 9th**, ReVision Urban Farm is holding its **Annual Seedling Sale** from 10:00 AM to 3:00 PM.\n*   On **Saturday, May 2nd**, the Friends of the Lower Mills Library are hosting a **spring book sale** from 10:00 AM to 4:00 PM. Boston Latin Academy is also having its first-ever **PorchFest** from 3:00 PM to 6:00 PM on the school campus.\n\nThere are also events related to religious observances like \"Holy Saturday Easter Vigil\" and \"The Liturgy for Holy Saturday\" on April 4th.",
+      "sources": [
+        {
+          "path": "",
+          "source": "Rep-16_26Web.Pdf",
+          "type": "event",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 4518.54,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-011",
+      "turn_index": 1,
+      "user_message": "How do I report illegal dumping?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Tell me about the cleanup event Saturday."
+        },
+        {
+          "role": "assistant",
+          "content": "It looks like you're asking about cleanup events happening on a Saturday. While I don't see any events specifically labeled as \"cleanup\" in the results, I can tell you about other events happening on Saturdays in Dorchester.\n\nThere are several recurring **Urgent Care Walk-in Hours** at the **Codman Square Health Center** every Saturday from 9:00 AM to 3:00 PM.\n\nLooking at specific Saturdays, here are a few things happening:\n\n*   On **Saturday, April 18th**, there's a community workshop called \"Give Them Their Flowers: A Community Workshop Honoring the 133 Women of Cedar Grove\" at the Codman Square Branch of the Boston Public Library, starting at 1:00 PM.\n*   On **Saturday, June 6th**, you can enjoy **Dorchfest**, a free music festival with over 50 bands and performers across the Ashmont-Adams neighborhood. Also on June 6th, the Friends of the Adams Street Library are holding a **community book sale** from 10:00 AM to 4:00 PM.\n*   On **Saturday, May 16th**, there's an **Ashmont Hill Yard Sale** happening at over 40 locations from 9:00 AM to 2:00 PM. On the same day, the **Little Miss & Young Miss Dorchester 2026 contest** will take place at 2:00 PM at Saint John Paul II School. You can also explore the Mattahunt Woods Urban Wild during a **guided community tour** from 10:00 AM to 12:00 PM, and there's a **Zero Waste Day drop-off** for household hazardous waste from 8:30 AM to 12:00 PM.\n*   On **Saturday, May 9th**, ReVision Urban Farm is holding its **Annual Seedling Sale** from 10:00 AM to 3:00 PM.\n*   On **Saturday, May 2nd**, the Friends of the Lower Mills Library are hosting a **spring book sale** from 10:00 AM to 4:00 PM. Boston Latin Academy is also having its first-ever **PorchFest** from 3:00 PM to 6:00 PM on the school campus.\n\nThere are also events related to religious observances like \"Holy Saturday Easter Vigil\" and \"The Liturgy for Holy Saturday\" on April 4th."
+        }
+      ],
+      "assistant_answer": "311 is Boston's **non-emergency** line for city services \u2014 call **911** for emergencies.\n\n**Good things to report via 311 in Dorchester:**\n- **Streets & sidewalks:** potholes, broken sidewalks, missed street cleaning, abandoned vehicles\n- **Trash & sanitation:** missed pickup, illegal dumping, rodents, bulky item pickup\n- **Parking:** enforcement issues, signage, resident permit zones\n- **Property:** graffiti, vacant lots, housing code concerns\n- **Trees & parks:** fallen branches, pruning, park maintenance\n- **Street lights:** outages, damaged poles\n- **Animals:** lost/found pets, wildlife concerns\n\nBased on our last answer, those monthly totals mix parking, trash, potholes, trees, animals, and similar non-emergency city issues \u2014 all valid 311 topics depending on what you're seeing.\n\nYou can call **311**, use the **BOS:311** app, or report online at boston.gov/311.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "advisory",
+      "mode": "advisory",
+      "latency_ms": 42.488,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-011",
+      "turn_index": 2,
+      "user_message": "Back to the event, where is it?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Tell me about the cleanup event Saturday."
+        },
+        {
+          "role": "assistant",
+          "content": "It looks like you're asking about cleanup events happening on a Saturday. While I don't see any events specifically labeled as \"cleanup\" in the results, I can tell you about other events happening on Saturdays in Dorchester.\n\nThere are several recurring **Urgent Care Walk-in Hours** at the **Codman Square Health Center** every Saturday from 9:00 AM to 3:00 PM.\n\nLooking at specific Saturdays, here are a few things happening:\n\n*   On **Saturday, April 18th**, there's a community workshop called \"Give Them Their Flowers: A Community Workshop Honoring the 133 Women of Cedar Grove\" at the Codman Square Branch of the Boston Public Library, starting at 1:00 PM.\n*   On **Saturday, June 6th**, you can enjoy **Dorchfest**, a free music festival with over 50 bands and performers across the Ashmont-Adams neighborhood. Also on June 6th, the Friends of the Adams Street Library are holding a **community book sale** from 10:00 AM to 4:00 PM.\n*   On **Saturday, May 16th**, there's an **Ashmont Hill Yard Sale** happening at over 40 locations from 9:00 AM to 2:00 PM. On the same day, the **Little Miss & Young Miss Dorchester 2026 contest** will take place at 2:00 PM at Saint John Paul II School. You can also explore the Mattahunt Woods Urban Wild during a **guided community tour** from 10:00 AM to 12:00 PM, and there's a **Zero Waste Day drop-off** for household hazardous waste from 8:30 AM to 12:00 PM.\n*   On **Saturday, May 9th**, ReVision Urban Farm is holding its **Annual Seedling Sale** from 10:00 AM to 3:00 PM.\n*   On **Saturday, May 2nd**, the Friends of the Lower Mills Library are hosting a **spring book sale** from 10:00 AM to 4:00 PM. Boston Latin Academy is also having its first-ever **PorchFest** from 3:00 PM to 6:00 PM on the school campus.\n\nThere are also events related to religious observances like \"Holy Saturday Easter Vigil\" and \"The Liturgy for Holy Saturday\" on April 4th."
+        },
+        {
+          "role": "user",
+          "content": "How do I report illegal dumping?"
+        },
+        {
+          "role": "assistant",
+          "content": "311 is Boston's **non-emergency** line for city services \u2014 call **911** for emergencies.\n\n**Good things to report via 311 in Dorchester:**\n- **Streets & sidewalks:** potholes, broken sidewalks, missed street cleaning, abandoned vehicles\n- **Trash & sanitation:** missed pickup, illegal dumping, rodents, bulky item pickup\n- **Parking:** enforcement issues, signage, resident permit zones\n- **Property:** graffiti, vacant lots, housing code concerns\n- **Trees & parks:** fallen branches, pruning, park maintenance\n- **Street lights:** outages, damaged poles\n- **Animals:** lost/found pets, wildlife concerns\n\nBased on our last answer, those monthly totals mix parking, trash, potholes, trees, animals, and similar non-emergency city issues \u2014 all valid 311 topics depending on what you're seeing.\n\nYou can call **311**, use the **BOS:311** app, or report online at boston.gov/311."
+        }
+      ],
+      "assistant_answer": "I did not find exact information about Back to the event, where is it.",
+      "sources": [
+        {
+          "table": "weekly_events",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 2002.517,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

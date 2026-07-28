@@ -1,0 +1,43 @@
+{
+  "scenario_id": "uncertain-005",
+  "title": "Genuinely ambiguous place",
+  "domain": "uncertainty",
+  "conversation_category": "clarification",
+  "turns": [
+    {
+      "scenario_id": "uncertain-005",
+      "turn_index": 0,
+      "user_message": "What is happening near me tonight?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like there are **13 events** happening in and around Dorchester that have been reported. All of these events are marked as closed, meaning they've already occurred.\n\nFor example, there was a \"Virtual Baby Cafe\" on July 29th from 2:00 PM to 4:00 PM, hosted by Codman Square Health Center. Also on July 30th, you could have attended the \"Climate Justice Alliance Party at Oasis on Ballou Farm\" from 6:00 PM to 7:30 PM, which featured music, dancing, and a seedling giveaway. For middle schoolers, there was a \"Recharge! Middle School Therapy Group\" that ran on Thursdays until July 30th at the Codman Square Health Center in Randolph.\n\nThe Boston Ballet also had several \"Open Studio Day\" events scheduled throughout late July and early August in various locations, including Dorchester, Newton, and Brookline, for families with young children. And on August 2nd, there was an \"Open Streets Boston\" event in Jamaica Plain, which closed streets to cars for a few hours.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1869.595,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

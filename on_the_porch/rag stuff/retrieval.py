@@ -7,6 +7,12 @@ from pathlib import Path
 
 import chromadb
 import google.generativeai as genai  # type: ignore
+from turn_observability import (
+    increment as increment_observability,
+    record_retrieval as record_observability_retrieval,
+    record_retry as record_observability_retry,
+    stage as observability_stage,
+)
 
 try:
     from langchain_chroma import Chroma
@@ -75,7 +81,12 @@ class GeminiEmbeddings:
         self.model = model or GEMINI_EMBED_MODEL
 
     def _embed(self, text: str):
-        res = genai.embed_content(model=self.model, content=text)
+        increment_observability("embedding_call_count")
+        with observability_stage(
+            "embedding",
+            attributes={"provider": "gemini", "model": self.model},
+        ):
+            res = genai.embed_content(model=self.model, content=text)
         return res["embedding"]
 
     def embed_documents(self, texts):
@@ -107,12 +118,17 @@ class LocalBGEEmbeddings:
     def embed_documents(self, texts):
         if not texts:
             return []
-        model = self._load_model()
-        vectors = model.encode(
-            list(texts),
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        increment_observability("embedding_call_count")
+        with observability_stage(
+            "embedding",
+            attributes={"provider": "local", "model": self.model_name},
+        ):
+            model = self._load_model()
+            vectors = model.encode(
+                list(texts),
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
         return vectors.tolist()
 
     def embed_query(self, text):
@@ -277,7 +293,8 @@ def _merge_vector_and_bm25(
     source=None,
 ) -> dict:
     """Reciprocal-rank fusion of dense vector hits and BM25 keyword hits."""
-    index = _load_bm25_index()
+    with observability_stage("bm25_retrieval"):
+        index = _load_bm25_index()
     if index is None:
         return vector_result
 
@@ -300,15 +317,17 @@ def _merge_vector_and_bm25(
         id_to_chunk[doc_id] = chunk
         id_to_meta[doc_id] = meta or {}
 
-    bm25_rows = index.search(
-        query, k=k * 2, doc_type=doc_type, tags=tags, source=source,
-    )
+    with observability_stage("bm25_retrieval"):
+        bm25_rows = index.search(
+            query, k=k * 2, doc_type=doc_type, tags=tags, source=source,
+        )
     bm25_ids = [row[1] for row in bm25_rows]
     for _, doc_id, chunk, meta in bm25_rows:
         id_to_chunk.setdefault(doc_id, chunk)
         id_to_meta.setdefault(doc_id, meta)
 
-    fused_ids = reciprocal_rank_fusion([vector_ids, bm25_ids], limit=k * 3)
+    with observability_stage("reranking_fusion"):
+        fused_ids = reciprocal_rank_fusion([vector_ids, bm25_ids], limit=k * 3)
     chunks: list[str] = []
     metadata: list[dict] = []
     for doc_id in fused_ids:
@@ -616,7 +635,8 @@ def retrieve(
         try:
             with _vectordb_lock:
                 db = vectordb if vectordb is not None else load_vectordb()
-                result = _do_semantic_search(db)
+                with observability_stage("vector_retrieval"):
+                    result = _do_semantic_search(db)
             if BM25_HYBRID_ENABLED:
                 result = _merge_vector_and_bm25(
                     query,
@@ -626,9 +646,11 @@ def retrieve(
                     tags=tags,
                     source=source,
                 )
+            record_observability_retrieval(len(result.get("chunks") or []))
             return result
         except Exception as exc:
             if _is_transient_chroma_error(exc) and attempt < _CHROMA_MAX_ATTEMPTS:
+                record_observability_retry("vector_store")
                 print(
                     f"  ⏳ Vector store transient error "
                     f"(attempt {attempt}/{_CHROMA_MAX_ATTEMPTS}): {exc}; retrying"
@@ -638,7 +660,16 @@ def retrieve(
                 continue
             print(f"  ⚠️ Semantic retrieval failed, falling back to keyword search: {exc}")
             try:
-                return _keyword_retrieve(query, k=k, doc_type=doc_type, tags=tags, source=source)
+                with observability_stage("bm25_retrieval"):
+                    fallback = _keyword_retrieve(
+                        query,
+                        k=k,
+                        doc_type=doc_type,
+                        tags=tags,
+                        source=source,
+                    )
+                record_observability_retrieval(len(fallback.get("chunks") or []))
+                return fallback
             except Exception as kw_exc:
                 print(f"  ⚠️ Keyword retrieval failed: {kw_exc}")
                 return {"chunks": [], "metadata": [], "scores": None, "query": query}

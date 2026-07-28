@@ -1,0 +1,43 @@
+{
+  "scenario_id": "cross-001",
+  "title": "Weekly neighborhood brief",
+  "domain": "cross_domain",
+  "conversation_category": "broad_synthesis",
+  "turns": [
+    {
+      "scenario_id": "cross-001",
+      "turn_index": 0,
+      "user_message": "What are the biggest things happening in Dorchester this week?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Looks like we've got a few interesting things happening in and around Dorchester this week.\n\nOn Thursday, July 30th, you can head over to the Oasis on Ballou Farm for a Climate Justice Alliance Party from 6:00 PM to 7:30 PM. It sounds like a fun way to celebrate summer with music, dancing, and even a seedling and tree giveaway. They'll be providing food and drinks, and everyone is welcome! Also on Thursday, there's a \"Recharge! Middle School Therapy Group\" happening at the Codman Square Health Center in Randolph from 10:00 AM to 11:00 AM, which is designed to be a supportive space for middle schoolers.\n\nLooking ahead to the weekend, Saturday, August 1st, the Boston Ballet is holding an Open Studio Day. While the details mention Brighton for this specific date, the overall program is for families with children ages 16 months to 6 years and encourages them to try a free class and explore the studios. You can find more information at bostonballet.org/dorchester-enroll.\n\nThen on Sunday, August 2nd, there's the \"Open Streets Boston\" event happening in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic from 9:00 AM to 4:00 PM.\n\nIt's great to see these community events popping up!",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1945.269,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,587 @@
+{
+  "input": {
+    "lines": 135,
+    "malformed": 0,
+    "ignored": 0
+  },
+  "turn_count": 135,
+  "success_count": 135,
+  "failure_count": 0,
+  "success_rate": 1.0,
+  "failure_rate": 0.0,
+  "timeout_count": 0,
+  "timeout_rate": 0.0,
+  "latency": {
+    "count": 135,
+    "p50_ms": 1776.64,
+    "p90_ms": 2875.556,
+    "p95_ms": 3434.659,
+    "p99_ms": 4340.859,
+    "max_ms": 10975.202
+  },
+  "by_route": {
+    "311_stats": {
+      "turn_count": 18,
+      "success_rate": 1.0,
+      "count": 18,
+      "p50_ms": 1704.284,
+      "p90_ms": 2853.138,
+      "p95_ms": 2969.233,
+      "p99_ms": 3240.194,
+      "max_ms": 3307.934
+    },
+    "advisory": {
+      "turn_count": 1,
+      "success_rate": 1.0,
+      "count": 1,
+      "p50_ms": 39.073,
+      "p90_ms": 39.073,
+      "p95_ms": 39.073,
+      "p99_ms": 39.073,
+      "max_ms": 39.073
+    },
+    "chitchat": {
+      "turn_count": 4,
+      "success_rate": 1.0,
+      "count": 4,
+      "p50_ms": 22.473,
+      "p90_ms": 23.893,
+      "p95_ms": 23.931,
+      "p99_ms": 23.961,
+      "max_ms": 23.969
+    },
+    "crime_general": {
+      "turn_count": 2,
+      "success_rate": 1.0,
+      "count": 2,
+      "p50_ms": 1436.784,
+      "p90_ms": 1721.684,
+      "p95_ms": 1757.296,
+      "p99_ms": 1785.786,
+      "max_ms": 1792.909
+    },
+    "crime_stats": {
+      "turn_count": 2,
+      "success_rate": 1.0,
+      "count": 2,
+      "p50_ms": 942.043,
+      "p90_ms": 1166.069,
+      "p95_ms": 1194.072,
+      "p99_ms": 1216.474,
+      "max_ms": 1222.075
+    },
+    "events": {
+      "turn_count": 27,
+      "success_rate": 1.0,
+      "count": 27,
+      "p50_ms": 1998.632,
+      "p90_ms": 3512.121,
+      "p95_ms": 3602.668,
+      "p99_ms": 4279.572,
+      "max_ms": 4513.713
+    },
+    "history": {
+      "turn_count": 14,
+      "success_rate": 1.0,
+      "count": 14,
+      "p50_ms": 1263.407,
+      "p90_ms": 1768.794,
+      "p95_ms": 2188.191,
+      "p99_ms": 2762.913,
+      "max_ms": 2906.594
+    },
+    "llm_classified": {
+      "turn_count": 37,
+      "success_rate": 1.0,
+      "count": 37,
+      "p50_ms": 2217.242,
+      "p90_ms": 3219.541,
+      "p95_ms": 3809.106,
+      "p99_ms": 8466.044,
+      "max_ms": 10975.202
+    },
+    "news_rss": {
+      "turn_count": 6,
+      "success_rate": 1.0,
+      "count": 6,
+      "p50_ms": 1798.476,
+      "p90_ms": 2154.827,
+      "p95_ms": 2244.674,
+      "p99_ms": 2316.551,
+      "max_ms": 2334.52
+    },
+    "news_source": {
+      "turn_count": 3,
+      "success_rate": 1.0,
+      "count": 3,
+      "p50_ms": 1571.892,
+      "p90_ms": 1610.033,
+      "p95_ms": 1614.8,
+      "p99_ms": 1618.614,
+      "max_ms": 1619.568
+    },
+    "opinion": {
+      "turn_count": 4,
+      "success_rate": 1.0,
+      "count": 4,
+      "p50_ms": 1149.401,
+      "p90_ms": 1236.46,
+      "p95_ms": 1252.272,
+      "p99_ms": 1264.922,
+      "max_ms": 1268.085
+    },
+    "policy": {
+      "turn_count": 7,
+      "success_rate": 1.0,
+      "count": 7,
+      "p50_ms": 1905.93,
+      "p90_ms": 2205.947,
+      "p95_ms": 2232.842,
+      "p99_ms": 2254.358,
+      "max_ms": 2259.737
+    },
+    "rag": {
+      "turn_count": 7,
+      "success_rate": 1.0,
+      "count": 7,
+      "p50_ms": 80.702,
+      "p90_ms": 107.377,
+      "p95_ms": 110.126,
+      "p99_ms": 112.325,
+      "max_ms": 112.875
+    },
+    "transcript": {
+      "turn_count": 3,
+      "success_rate": 1.0,
+      "count": 3,
+      "p50_ms": 1423.095,
+      "p90_ms": 1425.837,
+      "p95_ms": 1426.18,
+      "p99_ms": 1426.454,
+      "max_ms": 1426.523
+    }
+  },
+  "by_mode": {
+    "advisory": {
+      "turn_count": 1,
+      "success_rate": 1.0,
+      "count": 1,
+      "p50_ms": 39.073,
+      "p90_ms": 39.073,
+      "p95_ms": 39.073,
+      "p99_ms": 39.073,
+      "max_ms": 39.073
+    },
+    "chitchat": {
+      "turn_count": 4,
+      "success_rate": 1.0,
+      "count": 4,
+      "p50_ms": 22.473,
+      "p90_ms": 23.893,
+      "p95_ms": 23.931,
+      "p99_ms": 23.961,
+      "max_ms": 23.969
+    },
+    "history": {
+      "turn_count": 14,
+      "success_rate": 1.0,
+      "count": 14,
+      "p50_ms": 1263.407,
+      "p90_ms": 1768.794,
+      "p95_ms": 2188.191,
+      "p99_ms": 2762.913,
+      "max_ms": 2906.594
+    },
+    "rag": {
+      "turn_count": 63,
+      "success_rate": 1.0,
+      "count": 63,
+      "p50_ms": 1835.642,
+      "p90_ms": 2609.583,
+      "p95_ms": 2951.339,
+      "p99_ms": 6501.81,
+      "max_ms": 10975.202
+    },
+    "sql": {
+      "turn_count": 53,
+      "success_rate": 1.0,
+      "count": 53,
+      "p50_ms": 1998.632,
+      "p90_ms": 3263.484,
+      "p95_ms": 3592.164,
+      "p99_ms": 4249.348,
+      "max_ms": 4513.713
+    }
+  },
+  "by_model": {
+    "models/gemini-2.5-flash-lite": {
+      "count": 211,
+      "p50_ms": 915.659,
+      "p90_ms": 1754.112,
+      "p95_ms": 2050.569,
+      "p99_ms": 2831.472,
+      "max_ms": 3566.46
+    }
+  },
+  "model_calls_per_turn": {
+    "mean": 1.563,
+    "distribution": {
+      "count": 135,
+      "p50_ms": 1.0,
+      "p90_ms": 3.0,
+      "p95_ms": 3.0,
+      "p99_ms": 4.0,
+      "max_ms": 4.0
+    }
+  },
+  "retries_per_turn": {
+    "mean": 0.096,
+    "distribution": {
+      "count": 135,
+      "p50_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 1.0,
+      "p99_ms": 1.0,
+      "max_ms": 1.0
+    }
+  },
+  "stage_durations": {
+    "answer_synthesis": {
+      "count": 90,
+      "p50_ms": 1313.376,
+      "p90_ms": 1907.385,
+      "p95_ms": 2099.597,
+      "p99_ms": 3068.669,
+      "max_ms": 3567.197
+    },
+    "answer_validation": {
+      "count": 90,
+      "p50_ms": 0.076,
+      "p90_ms": 0.126,
+      "p95_ms": 0.147,
+      "p99_ms": 0.447,
+      "max_ms": 0.943
+    },
+    "authentication": {
+      "count": 135,
+      "p50_ms": 4.179,
+      "p90_ms": 5.223,
+      "p95_ms": 6.048,
+      "p99_ms": 7.036,
+      "max_ms": 7.608
+    },
+    "bm25_retrieval": {
+      "count": 209,
+      "p50_ms": 0.097,
+      "p90_ms": 0.246,
+      "p95_ms": 0.272,
+      "p99_ms": 0.335,
+      "max_ms": 0.729
+    },
+    "embedding": {
+      "count": 88,
+      "p50_ms": 22.861,
+      "p90_ms": 34.25,
+      "p95_ms": 35.263,
+      "p99_ms": 1122.569,
+      "max_ms": 8376.702
+    },
+    "follow_up_gate": {
+      "count": 50,
+      "p50_ms": 0.655,
+      "p90_ms": 1.515,
+      "p95_ms": 1.999,
+      "p99_ms": 740.089,
+      "max_ms": 835.085
+    },
+    "history_answer": {
+      "count": 14,
+      "p50_ms": 1217.064,
+      "p90_ms": 1722.451,
+      "p95_ms": 2142.712,
+      "p99_ms": 2718.967,
+      "max_ms": 2863.031
+    },
+    "history_loading": {
+      "count": 135,
+      "p50_ms": 0.803,
+      "p90_ms": 1.217,
+      "p95_ms": 1.444,
+      "p99_ms": 2.174,
+      "max_ms": 2.329
+    },
+    "interaction_logging": {
+      "count": 135,
+      "p50_ms": 7.184,
+      "p90_ms": 9.832,
+      "p95_ms": 10.636,
+      "p99_ms": 11.435,
+      "max_ms": 14.85
+    },
+    "message_persistence": {
+      "count": 270,
+      "p50_ms": 2.652,
+      "p90_ms": 9.613,
+      "p95_ms": 10.312,
+      "p99_ms": 11.971,
+      "max_ms": 14.644
+    },
+    "ownership_verification": {
+      "count": 270,
+      "p50_ms": 1.151,
+      "p90_ms": 2.739,
+      "p95_ms": 3.026,
+      "p99_ms": 3.492,
+      "max_ms": 4.608
+    },
+    "plan_execution": {
+      "count": 90,
+      "p50_ms": 24.747,
+      "p90_ms": 38.534,
+      "p95_ms": 40.207,
+      "p99_ms": 68.882,
+      "max_ms": 147.418
+    },
+    "planning": {
+      "count": 109,
+      "p50_ms": 0.08,
+      "p90_ms": 0.443,
+      "p95_ms": 427.791,
+      "p99_ms": 1425.536,
+      "max_ms": 2363.93
+    },
+    "rag_synthesis": {
+      "count": 56,
+      "p50_ms": 1360.999,
+      "p90_ms": 1800.908,
+      "p95_ms": 2040.493,
+      "p99_ms": 2180.759,
+      "max_ms": 2261.416
+    },
+    "routing": {
+      "count": 109,
+      "p50_ms": 0.181,
+      "p90_ms": 827.666,
+      "p95_ms": 933.63,
+      "p99_ms": 1406.287,
+      "max_ms": 1730.109
+    },
+    "sql_execution": {
+      "count": 66,
+      "p50_ms": 4.426,
+      "p90_ms": 38.767,
+      "p95_ms": 50.659,
+      "p99_ms": 278.584,
+      "max_ms": 569.194
+    },
+    "sql_generation": {
+      "count": 19,
+      "p50_ms": 833.312,
+      "p90_ms": 1027.887,
+      "p95_ms": 1065.061,
+      "p99_ms": 1202.075,
+      "max_ms": 1236.329
+    },
+    "sql_repair": {
+      "count": 13,
+      "p50_ms": 730.298,
+      "p90_ms": 1127.817,
+      "p95_ms": 1240.677,
+      "p99_ms": 1373.315,
+      "max_ms": 1406.474
+    },
+    "sql_synthesis": {
+      "count": 34,
+      "p50_ms": 1114.339,
+      "p90_ms": 2027.127,
+      "p95_ms": 2625.346,
+      "p99_ms": 3382.015,
+      "max_ms": 3566.887
+    },
+    "table_selection": {
+      "count": 19,
+      "p50_ms": 511.351,
+      "p90_ms": 573.196,
+      "p95_ms": 669.959,
+      "p99_ms": 1008.385,
+      "max_ms": 1092.992
+    },
+    "thread_state_loading": {
+      "count": 135,
+      "p50_ms": 0.015,
+      "p90_ms": 0.047,
+      "p95_ms": 0.069,
+      "p99_ms": 0.108,
+      "max_ms": 0.226
+    },
+    "thread_state_persistence": {
+      "count": 135,
+      "p50_ms": 1.918,
+      "p90_ms": 3.439,
+      "p95_ms": 3.755,
+      "p99_ms": 4.871,
+      "max_ms": 5.177
+    },
+    "turn_execution": {
+      "count": 135,
+      "p50_ms": 1747.125,
+      "p90_ms": 2831.735,
+      "p95_ms": 3399.862,
+      "p99_ms": 4301.271,
+      "max_ms": 10947.357
+    },
+    "vector_retrieval": {
+      "count": 209,
+      "p50_ms": 0.482,
+      "p90_ms": 0.94,
+      "p95_ms": 1.057,
+      "p99_ms": 1.172,
+      "max_ms": 4.657
+    }
+  },
+  "failure_categories": {},
+  "sse_disconnect_count": 0,
+  "sse_fallback_count": 0,
+  "slowest_turns": [
+    {
+      "trace_id": "8344efa0cd0748b4b674f087d10b48a6",
+      "scenario_id": "greet-003:0",
+      "route": "llm_classified",
+      "mode": "rag",
+      "duration_ms": 10975.202
+    },
+    {
+      "trace_id": "98ab540c80b143478df6826fc45a410f",
+      "scenario_id": "event-011:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 4513.713
+    },
+    {
+      "trace_id": "4572500c9bfa4b8cba67da5775adf46e",
+      "scenario_id": "policy-008:0",
+      "route": "llm_classified",
+      "mode": "sql",
+      "duration_ms": 4005.318
+    },
+    {
+      "trace_id": "2b460b3847de487cad9b6f199cdfd059",
+      "scenario_id": "uncertain-002:1",
+      "route": "llm_classified",
+      "mode": "rag",
+      "duration_ms": 3760.053
+    },
+    {
+      "trace_id": "5c8b546bf9df4007b28e6d0d504c1bf5",
+      "scenario_id": "cross-006:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 3613.172
+    },
+    {
+      "trace_id": "ff7f913a95ca42f888a5f494ec659099",
+      "scenario_id": "uncertain-006:1",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 3578.158
+    },
+    {
+      "trace_id": "33a342aa1dcb406293559c67482c670b",
+      "scenario_id": "event-012:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 3468.096
+    },
+    {
+      "trace_id": "d150b0585622436e8c8eb1813ba468a1",
+      "scenario_id": "cross-004:0",
+      "route": "llm_classified",
+      "mode": "rag",
+      "duration_ms": 3420.329
+    },
+    {
+      "trace_id": "4f47789601404150a120362199e5dd09",
+      "scenario_id": "311-011:0",
+      "route": "311_stats",
+      "mode": "sql",
+      "duration_ms": 3307.934
+    },
+    {
+      "trace_id": "dab6360e396b4bee805d7ea7edeb8269",
+      "scenario_id": "entity-008:0",
+      "route": "llm_classified",
+      "mode": "sql",
+      "duration_ms": 3085.683
+    },
+    {
+      "trace_id": "d18f7b4bb9864d3497b7dfc806014b9f",
+      "scenario_id": "event-001:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 3051.07
+    },
+    {
+      "trace_id": "0c9fbea7f6fa459cb6a838057e61b0e6",
+      "scenario_id": "entity-007:0",
+      "route": "llm_classified",
+      "mode": "rag",
+      "duration_ms": 2975.409
+    },
+    {
+      "trace_id": "0dbb27ae3818455fafd1c32872191107",
+      "scenario_id": "safety-006:0",
+      "route": "311_stats",
+      "mode": "sql",
+      "duration_ms": 2909.462
+    },
+    {
+      "trace_id": "7a50d335f487490184b6061cc54cd210",
+      "scenario_id": "event-002:1",
+      "route": "history",
+      "mode": "history",
+      "duration_ms": 2906.594
+    },
+    {
+      "trace_id": "dc6173bb41c64d2a99f1ee2db6852eb3",
+      "scenario_id": "311-002:0",
+      "route": "311_stats",
+      "mode": "sql",
+      "duration_ms": 2828.999
+    },
+    {
+      "trace_id": "462c0fba0c9444aea60eadb8a4884706",
+      "scenario_id": "event-003:1",
+      "route": "llm_classified",
+      "mode": "sql",
+      "duration_ms": 2805.067
+    },
+    {
+      "trace_id": "7b2e00403bb04d75bc5e2582d080cf31",
+      "scenario_id": "community-010:0",
+      "route": "311_stats",
+      "mode": "sql",
+      "duration_ms": 2796.898
+    },
+    {
+      "trace_id": "539dffbb6b4d4725b18e0cd841c67082",
+      "scenario_id": "event-008:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 2792.019
+    },
+    {
+      "trace_id": "9e3685bdd75840e793dd9d4bf198949c",
+      "scenario_id": "community-009:0",
+      "route": "events",
+      "mode": "sql",
+      "duration_ms": 2776.063
+    },
+    {
+      "trace_id": "336b2f16da3f4b909f198721e4b172e0",
+      "scenario_id": "community-005:0",
+      "route": "311_stats",
+      "mode": "sql",
+      "duration_ms": 2758.705
+    }
+  ]
+}

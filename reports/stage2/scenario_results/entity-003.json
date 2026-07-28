@@ -1,0 +1,64 @@
+{
+  "scenario_id": "entity-003",
+  "title": "Neighborhood services contact",
+  "domain": "entities_organizations",
+  "conversation_category": "standalone",
+  "turns": [
+    {
+      "scenario_id": "entity-003",
+      "turn_index": 0,
+      "user_message": "Who is the city neighborhood contact for Dorchester?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! It's great you're looking to connect with city resources in Dorchester.\n\nWhile there isn't one single \"city neighborhood contact\" for the entire neighborhood, the **Codman Square Neighborhood Development Corporation (CSNDC)** is a key community organization that serves residents around Codman Square with housing, economic development, and community programs. They're a fantastic resource for local priorities and services.\n\nFor instance, the Codman Square Neighborhood Council has been actively involved in local initiatives, like advocating for businesses and even highlighting events like the Dorchester Winter Market, as reported by the *Dorchester Reporter*. The CSNDC also works with groups like UMass Boston students to study important local issues, such as business displacement in Codman Square, which helps them advocate for the businesses in the area.\n\nSometimes, neighborhood meetings also bring residents together to discuss important topics with city staff. Notes from a Codman Square neighborhood meeting show discussions about housing affordability, pedestrian safety on Washington Street, and the responsiveness of city services for things like street lighting and trash collection. In those discussions, residents were asking city staff for clearer timelines on open service requests.\n\nRetrieved 5 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/umass-boston-students-present-findings-from-study-of-business-displacement-in-codman-square/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2718.791,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

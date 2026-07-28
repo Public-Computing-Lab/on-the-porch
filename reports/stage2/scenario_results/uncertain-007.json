@@ -1,0 +1,43 @@
+{
+  "scenario_id": "uncertain-007",
+  "title": "No evidence does not mean never",
+  "domain": "uncertainty",
+  "conversation_category": "no_evidence",
+  "turns": [
+    {
+      "scenario_id": "uncertain-007",
+      "turn_index": 0,
+      "user_message": "Has there ever been a safety complaint about this block?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Based on the information we have, there have been **0** safety complaints filed for this block in Dorchester.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 2569.242,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

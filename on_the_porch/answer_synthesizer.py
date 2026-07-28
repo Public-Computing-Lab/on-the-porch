@@ -15,6 +15,7 @@ from answer_voice import (
     UNAVAILABLE_DATA_INTENTS,
 )
 from execution_plan import FactBundle, FactPart
+from turn_observability import stage as observability_stage
 
 from sql_chat import prepared_sql
 
@@ -126,9 +127,10 @@ def synthesize_answer(
     model = os.getenv("GEMINI_SUMMARY_MODEL", app4.GEMINI_SUMMARY_MODEL)
     temp = 0.2 if kind == "crime" else 0.35
     try:
-        return app4._call_gemini_with_logging(
-            model, full_prompt, temperature=temp,
-        ).strip()
+        with observability_stage("rag_synthesis" if has_rag else "sql_synthesis"):
+            return app4._call_gemini_with_logging(
+                model, full_prompt, temperature=temp,
+            ).strip()
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer synthesis failed: {exc}")
         return _fallback_answer(bundle)
@@ -186,12 +188,13 @@ def synthesize_and_validate(
     if not answer.strip():
         answer = _fallback_answer(bundle)
     try:
-        return validate_answer(
-            answer,
-            bundle,
-            conversation_history=conversation_history,
-            question=question,
-        )
+        with observability_stage("answer_validation"):
+            return validate_answer(
+                answer,
+                bundle,
+                conversation_history=conversation_history,
+                question=question,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer validation failed: {exc}")
         return answer.strip() or _fallback_answer(bundle)

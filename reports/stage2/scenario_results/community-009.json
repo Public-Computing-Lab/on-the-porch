@@ -1,0 +1,88 @@
+{
+  "scenario_id": "community-009",
+  "title": "Correct meeting identity",
+  "domain": "meetings_news_community",
+  "conversation_category": "correction",
+  "turns": [
+    {
+      "scenario_id": "community-009",
+      "turn_index": 0,
+      "user_message": "What happened at the Codman Square meeting?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like there have been several events related to the Codman Square Health Center Urgent Care. These events are all scheduled for Saturdays, from 9:00 AM to 3:00 PM. The health center is located at 637 Washington St. in Dorchester. They are advertising that they are open on Saturdays for walk-in urgent care, emphasizing that your health needs don't stop on the weekend.",
+      "sources": [
+        {
+          "path": "",
+          "source": "Community calendar",
+          "type": "event",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 2781.405,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "community-009",
+      "turn_index": 1,
+      "user_message": "I meant the Fields Corner civic meeting.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What happened at the Codman Square meeting?"
+        },
+        {
+          "role": "assistant",
+          "content": "It looks like there have been several events related to the Codman Square Health Center Urgent Care. These events are all scheduled for Saturdays, from 9:00 AM to 3:00 PM. The health center is located at 637 Washington St. in Dorchester. They are advertising that they are open on Saturdays for walk-in urgent care, emphasizing that your health needs don't stop on the weekend."
+        }
+      ],
+      "assistant_answer": "I did not find exact information about I meant the Fields Corner civic meeting.",
+      "sources": [
+        {
+          "table": "weekly_events",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 2073.341,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

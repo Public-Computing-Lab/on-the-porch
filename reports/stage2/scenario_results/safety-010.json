@@ -1,0 +1,87 @@
+{
+  "scenario_id": "safety-010",
+  "title": "Correct the safety time window",
+  "domain": "crime_public_safety",
+  "conversation_category": "correction",
+  "turns": [
+    {
+      "scenario_id": "safety-010",
+      "turn_index": 0,
+      "user_message": "How many assaults were reported in Dorchester this week?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Happy to share what we've got on safety stats for Dorchester.\n\nLooking at the last 7 days, there were **564** assaults reported in our neighborhood. This number reflects all reported assaults during that period.",
+      "sources": [
+        {
+          "table": "mv_crime_monthly",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 666.623,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "safety-010",
+      "turn_index": 1,
+      "user_message": "I meant last month.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "How many assaults were reported in Dorchester this week?"
+        },
+        {
+          "role": "assistant",
+          "content": "Happy to share what we've got on safety stats for Dorchester.\n\nLooking at the last 7 days, there were **564** assaults reported in our neighborhood. This number reflects all reported assaults during that period."
+        }
+      ],
+      "assistant_answer": "For last month, June 2026, the most frequently reported criminal offenses in Dorchester, excluding non-criminal police service calls, were motor vehicle leaving the scene with property damage, with , and shoplifting, with . Following closely were simple assaults and vandalism, both with  each.\n\nOther offenses reported included aggravated assaults (18), larceny theft from motor vehicles (non-accessory) (17), harassment or criminal harassment (12), and threats to do bodily harm (11). These figures give us a snapshot of the types of incidents that were officially recorded by the BPD in our neighborhood during that period.",
+      "sources": [
+        {
+          "table": "mv_crime_monthly",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1228.903,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

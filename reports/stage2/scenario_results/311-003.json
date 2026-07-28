@@ -1,0 +1,122 @@
+{
+  "scenario_id": "311-003",
+  "title": "Change 311 geography",
+  "domain": "boston_311",
+  "conversation_category": "refinement",
+  "turns": [
+    {
+      "scenario_id": "311-003",
+      "turn_index": 0,
+      "user_message": "How many missed trash pickups were reported in Fields Corner this month?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! So, for this month, July 2026, we've seen **161** reports of missed trash pickups in Fields Corner. It looks like the main issue folks are reporting is indeed missed trash collection, and it's good to know that number so we can keep an eye on it. Hopefully, things get back on track for everyone soon.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 992.834,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "311-003",
+      "turn_index": 1,
+      "user_message": "What about Codman Square?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "How many missed trash pickups were reported in Fields Corner this month?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! So, for this month, July 2026, we've seen **161** reports of missed trash pickups in Fields Corner. It looks like the main issue folks are reporting is indeed missed trash collection, and it's good to know that number so we can keep an eye on it. Hopefully, things get back on track for everyone soon."
+        }
+      ],
+      "assistant_answer": "For Codman Square, the Codman Square Neighborhood Council is continuing its efforts for food justice, and the Codman Square Farmers Market is set to start on Saturday. The Codman Square Neighborhood Development Corporation (CSNDC) has reported significant progress on affordable housing projects, with Four Corners Plaza now complete and a ribbon-cutting event planned for this summer. CSNDC also recently received findings from a UMass Boston study on business displacement in the area, which will help them advocate for local businesses.\n\nIn terms of city services, notes from a Codman Square neighborhood meeting indicate that residents discussed housing affordability, pedestrian safety on Washington Street, and the responsiveness of city services for street lighting and trash collection. Attendees specifically asked for clearer timelines on open service requests.\n\nRetrieved 8 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/csndc-real-estate-update-spring-2026/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.codman.org/blog/codman-welcoming-new-patients-in-randolph/",
+          "source": "Codman Square Health Center",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1576.236,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

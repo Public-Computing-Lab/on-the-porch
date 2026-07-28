@@ -1,0 +1,188 @@
+{
+  "scenario_id": "entity-001",
+  "title": "Eversource across source types",
+  "domain": "entities_organizations",
+  "conversation_category": "source_refinement",
+  "turns": [
+    {
+      "scenario_id": "entity-001",
+      "turn_index": 0,
+      "user_message": "What is Eversource?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Glad you're asking about what's happening in our neighborhood.\n\nFrom what I can gather from our community sources, Eversource isn't directly mentioned in the provided information. The documents focus on local organizations like the Codman Square Neighborhood Development Corporation (CSNDC) and the Codman Square Neighborhood Council, discussing their work on issues such as business displacement, SNAP benefits, and community programs. They also touch on neighborhood meeting discussions about housing affordability, pedestrian safety, and city services like street lighting and trash collection.\n\nIf you're experiencing an issue with Eversource, like a power outage or a question about your bill, you might want to check their official website or give them a call directly. Sometimes, local community groups might have information or resources related to utility services, but it wasn't explicitly in these particular documents.\n\nRetrieved 5 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/umass-boston-students-present-findings-from-study-of-business-displacement-in-codman-square/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 102.242,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "entity-001",
+      "turn_index": 1,
+      "user_message": "Has it been discussed in Dorchester?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What is Eversource?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! Glad you're asking about what's happening in our neighborhood.\n\nFrom what I can gather from our community sources, Eversource isn't directly mentioned in the provided information. The documents focus on local organizations like the Codman Square Neighborhood Development Corporation (CSNDC) and the Codman Square Neighborhood Council, discussing their work on issues such as business displacement, SNAP benefits, and community programs. They also touch on neighborhood meeting discussions about housing affordability, pedestrian safety, and city services like street lighting and trash collection.\n\nIf you're experiencing an issue with Eversource, like a power outage or a question about your bill, you might want to check their official website or give them a call directly. Sometimes, local community groups might have information or resources related to utility services, but it wasn't explicitly in these particular documents.\n\nRetrieved 5 source passages for context."
+        }
+      ],
+      "assistant_answer": "The provided information doesn't directly mention Eversource. Instead, it highlights discussions and activities within Dorchester, particularly around Codman Square. For instance, neighborhood meetings have touched upon topics like housing affordability near transit corridors, pedestrian safety on Washington Street, and the responsiveness of city services for street lighting and trash collection, as noted in the Codman Square neighborhood meeting discussions. The Codman Square Neighborhood Development Corporation (CSNDC) is also active in the area, focusing on housing, economic development, and community programs, as outlined in their public overview. If you're looking for information specific to Eversource, it would be best to check their official channels.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2638.745,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "entity-001",
+      "turn_index": 2,
+      "user_message": "What did residents say about it?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What is Eversource?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! Glad you're asking about what's happening in our neighborhood.\n\nFrom what I can gather from our community sources, Eversource isn't directly mentioned in the provided information. The documents focus on local organizations like the Codman Square Neighborhood Development Corporation (CSNDC) and the Codman Square Neighborhood Council, discussing their work on issues such as business displacement, SNAP benefits, and community programs. They also touch on neighborhood meeting discussions about housing affordability, pedestrian safety, and city services like street lighting and trash collection.\n\nIf you're experiencing an issue with Eversource, like a power outage or a question about your bill, you might want to check their official website or give them a call directly. Sometimes, local community groups might have information or resources related to utility services, but it wasn't explicitly in these particular documents.\n\nRetrieved 5 source passages for context."
+        },
+        {
+          "role": "user",
+          "content": "Has it been discussed in Dorchester?"
+        },
+        {
+          "role": "assistant",
+          "content": "The provided information doesn't directly mention Eversource. Instead, it highlights discussions and activities within Dorchester, particularly around Codman Square. For instance, neighborhood meetings have touched upon topics like housing affordability near transit corridors, pedestrian safety on Washington Street, and the responsiveness of city services for street lighting and trash collection, as noted in the Codman Square neighborhood meeting discussions. The Codman Square Neighborhood Development Corporation (CSNDC) is also active in the area, focusing on housing, economic development, and community programs, as outlined in their public overview. If you're looking for information specific to Eversource, it would be best to check their official channels.\n\nRetrieved 3 source passages for context."
+        }
+      ],
+      "assistant_answer": "The provided information doesn't contain specific resident opinions or statements about Eversource. The community discussions and documents available focus on local issues within Dorchester, particularly in the Codman Square area. For example, notes from a Codman Square neighborhood meeting mention attendees discussing housing affordability, pedestrian safety on Washington Street, and the responsiveness of city services for street lighting and trash collection. Speakers at that meeting asked city staff for clearer timelines on open service requests. The Codman Square Neighborhood Development Corporation (CSNDC) also provides an overview of their work in housing, economic development, and community programs, reflecting local priorities.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1102.685,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

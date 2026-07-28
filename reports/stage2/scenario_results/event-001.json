@@ -1,0 +1,215 @@
+{
+  "scenario_id": "event-001",
+  "title": "Week correction and continuation",
+  "domain": "events",
+  "conversation_category": "correction_and_continuation",
+  "turns": [
+    {
+      "scenario_id": "event-001",
+      "turn_index": 0,
+      "user_message": "What events are coming up this week?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Here's a look at what's happening in Dorchester this week!\n\nOn Thursday, July 30th, there are a few interesting events. The Codman Square Health Center is hosting the last \"Recharge! Middle School Therapy Group\" in Randolph from 10:00 AM to 11:00 AM, offering a supportive space for middle schoolers. Later that evening, from 6:00 PM to 7:30 PM, you can join the Climate Justice Alliance Party at Oasis on Ballou Farm for music, dancing, a seedling and tree giveaway, and more. The Boston Ballet is also holding an Open Studio Day on July 30th.\n\nLooking ahead to the weekend, on Saturday, August 1st, the Boston Ballet has another Open Studio Day. Then, on Sunday, August 2nd, Open Streets Boston kicks off in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic for the festivities.\n\nThere are a total of **9** events listed for this period. All of these events are marked as closed, meaning they have already occurred.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 3054.088,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-001",
+      "turn_index": 1,
+      "user_message": "Not this week, next week.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What events are coming up this week?"
+        },
+        {
+          "role": "assistant",
+          "content": "Here's a look at what's happening in Dorchester this week!\n\nOn Thursday, July 30th, there are a few interesting events. The Codman Square Health Center is hosting the last \"Recharge! Middle School Therapy Group\" in Randolph from 10:00 AM to 11:00 AM, offering a supportive space for middle schoolers. Later that evening, from 6:00 PM to 7:30 PM, you can join the Climate Justice Alliance Party at Oasis on Ballou Farm for music, dancing, a seedling and tree giveaway, and more. The Boston Ballet is also holding an Open Studio Day on July 30th.\n\nLooking ahead to the weekend, on Saturday, August 1st, the Boston Ballet has another Open Studio Day. Then, on Sunday, August 2nd, Open Streets Boston kicks off in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic for the festivities.\n\nThere are a total of **9** events listed for this period. All of these events are marked as closed, meaning they have already occurred."
+        }
+      ],
+      "assistant_answer": "Looking at next week, there are a couple of events on our radar.\n\nOn Monday, August 3rd, from 3:30 PM to 5:00 PM, the Codman Square Health Center is hosting the \"Summer Wellness Virtual Therapy Group\" for Randolph High School students in grades 9-12. This telehealth group is designed to help them build coping skills, strengthen confidence, and connect with peers.\n\nThere are a total of **1** event listed for next week. All of these events are marked as closed, meaning they have already occurred.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "history",
+      "mode": "history",
+      "latency_ms": 1032.93,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-001",
+      "turn_index": 2,
+      "user_message": "Are there any more?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What events are coming up this week?"
+        },
+        {
+          "role": "assistant",
+          "content": "Here's a look at what's happening in Dorchester this week!\n\nOn Thursday, July 30th, there are a few interesting events. The Codman Square Health Center is hosting the last \"Recharge! Middle School Therapy Group\" in Randolph from 10:00 AM to 11:00 AM, offering a supportive space for middle schoolers. Later that evening, from 6:00 PM to 7:30 PM, you can join the Climate Justice Alliance Party at Oasis on Ballou Farm for music, dancing, a seedling and tree giveaway, and more. The Boston Ballet is also holding an Open Studio Day on July 30th.\n\nLooking ahead to the weekend, on Saturday, August 1st, the Boston Ballet has another Open Studio Day. Then, on Sunday, August 2nd, Open Streets Boston kicks off in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic for the festivities.\n\nThere are a total of **9** events listed for this period. All of these events are marked as closed, meaning they have already occurred."
+        },
+        {
+          "role": "user",
+          "content": "Not this week, next week."
+        },
+        {
+          "role": "assistant",
+          "content": "Looking at next week, there are a couple of events on our radar.\n\nOn Monday, August 3rd, from 3:30 PM to 5:00 PM, the Codman Square Health Center is hosting the \"Summer Wellness Virtual Therapy Group\" for Randolph High School students in grades 9-12. This telehealth group is designed to help them build coping skills, strengthen confidence, and connect with peers.\n\nThere are a total of **1** event listed for next week. All of these events are marked as closed, meaning they have already occurred."
+        }
+      ],
+      "assistant_answer": "It looks like the information I have access to only covers events up to August 3rd. For example, the \"Summer Wellness Virtual Therapy Group \u2013 Randolph\" for high school students in grades 9-12, hosted by the Codman Square Health Center, was scheduled for Monday, August 3rd, from 3:30 PM to 5:00 PM.\n\nBased on the data I have, there are no further events listed beyond that date. If you're looking for events happening later, I would need to do a fresh lookup.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "history",
+      "mode": "history",
+      "latency_ms": 1224.052,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-001",
+      "turn_index": 3,
+      "user_message": "Tell me about the second one.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What events are coming up this week?"
+        },
+        {
+          "role": "assistant",
+          "content": "Here's a look at what's happening in Dorchester this week!\n\nOn Thursday, July 30th, there are a few interesting events. The Codman Square Health Center is hosting the last \"Recharge! Middle School Therapy Group\" in Randolph from 10:00 AM to 11:00 AM, offering a supportive space for middle schoolers. Later that evening, from 6:00 PM to 7:30 PM, you can join the Climate Justice Alliance Party at Oasis on Ballou Farm for music, dancing, a seedling and tree giveaway, and more. The Boston Ballet is also holding an Open Studio Day on July 30th.\n\nLooking ahead to the weekend, on Saturday, August 1st, the Boston Ballet has another Open Studio Day. Then, on Sunday, August 2nd, Open Streets Boston kicks off in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic for the festivities.\n\nThere are a total of **9** events listed for this period. All of these events are marked as closed, meaning they have already occurred."
+        },
+        {
+          "role": "user",
+          "content": "Not this week, next week."
+        },
+        {
+          "role": "assistant",
+          "content": "Looking at next week, there are a couple of events on our radar.\n\nOn Monday, August 3rd, from 3:30 PM to 5:00 PM, the Codman Square Health Center is hosting the \"Summer Wellness Virtual Therapy Group\" for Randolph High School students in grades 9-12. This telehealth group is designed to help them build coping skills, strengthen confidence, and connect with peers.\n\nThere are a total of **1** event listed for next week. All of these events are marked as closed, meaning they have already occurred."
+        },
+        {
+          "role": "user",
+          "content": "Are there any more?"
+        },
+        {
+          "role": "assistant",
+          "content": "It looks like the information I have access to only covers events up to August 3rd. For example, the \"Summer Wellness Virtual Therapy Group \u2013 Randolph\" for high school students in grades 9-12, hosted by the Codman Square Health Center, was scheduled for Monday, August 3rd, from 3:30 PM to 5:00 PM.\n\nBased on the data I have, there are no further events listed beyond that date. If you're looking for events happening later, I would need to do a fresh lookup."
+        }
+      ],
+      "assistant_answer": "It sounds like you're asking about the \"Summer Wellness Virtual Therapy Group\" that was mentioned. This group was hosted by the Codman Square Health Center for Randolph High School students in grades 9-12. It was a telehealth group designed to help them build coping skills, strengthen confidence, and connect with peers. The session was scheduled for Monday, August 3rd, from 3:30 PM to 5:00 PM.\n\nBased on the information I have, this was the only event listed for next week, and it has already passed.\n\nRetrieved 6 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/umass-boston-students-present-findings-from-study-of-business-displacement-in-codman-square/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1639.541,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

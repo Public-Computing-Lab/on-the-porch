@@ -1,0 +1,81 @@
+{
+  "scenario_id": "311-008",
+  "title": "Pronoun after a 311 result",
+  "domain": "boston_311",
+  "conversation_category": "reference_resolution",
+  "turns": [
+    {
+      "scenario_id": "311-008",
+      "turn_index": 0,
+      "user_message": "Are illegal dumping reports common near Four Corners?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! I can help you with that. Over the past 7 days, there have been **21** reports of illegal dumping near Four Corners. This type of report helps the city track and address areas where people are leaving trash or unwanted items, which can really make a difference in keeping our neighborhoods clean and safe.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1022.419,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "311-008",
+      "turn_index": 1,
+      "user_message": "How do I report that issue?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Are illegal dumping reports common near Four Corners?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! I can help you with that. Over the past 7 days, there have been **21** reports of illegal dumping near Four Corners. This type of report helps the city track and address areas where people are leaving trash or unwanted items, which can really make a difference in keeping our neighborhoods clean and safe."
+        }
+      ],
+      "assistant_answer": "To report illegal dumping, you can reach out to the city. This past week, we saw **21** reports of illegal dumping in the Four Corners area, so it's definitely something that folks are noticing and wanting to address.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "history",
+      "mode": "history",
+      "latency_ms": 726.823,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

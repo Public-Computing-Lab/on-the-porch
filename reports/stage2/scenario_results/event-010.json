@@ -1,0 +1,43 @@
+{
+  "scenario_id": "event-010",
+  "title": "Genuinely ambiguous event date",
+  "domain": "events",
+  "conversation_category": "clarification",
+  "turns": [
+    {
+      "scenario_id": "event-010",
+      "turn_index": 0,
+      "user_message": "What events are happening around then?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like there are **13 events** happening around this time, all of which are already scheduled and completed.\n\nHere are a few highlights:\n\nOn **Thursday, July 30th**, there are a few things going on. The Codman Square Health Center is hosting a \"Recharge! Middle School Therapy Group\" in Randolph from 10:00 AM to 11:00 AM, offering a supportive space for middle schoolers to connect and build skills. Later that evening, from 6:00 PM to 7:30 PM, the Climate Justice Alliance is having a party at Oasis on Ballou Farm with music, dancing, and a seedling giveaway. Also on the 30th, families with young children can attend a Boston Ballet Open Studio Day.\n\nLooking ahead to the weekend, on **Saturday, August 2nd**, you can head over to Jamaica Plain for Open Streets Boston, which runs from 10:30 AM to 3:00 PM, with streets closed to cars from 9:00 AM to 4:00 PM.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1600.925,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

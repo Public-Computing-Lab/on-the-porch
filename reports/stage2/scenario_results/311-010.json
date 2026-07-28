@@ -1,0 +1,87 @@
+{
+  "scenario_id": "311-010",
+  "title": "Switch from 311 to events",
+  "domain": "boston_311",
+  "conversation_category": "topic_switch",
+  "turns": [
+    {
+      "scenario_id": "311-010",
+      "turn_index": 0,
+      "user_message": "What are the top 311 complaints in Dorchester?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Happy to share what folks in Dorchester have been reporting through 311 lately. Over the past 7 days, there have been **452** total reports.\n\nWhen we look at the types of issues, \"Parking Enforcement\" is the most frequent, with **70** reports. This often includes things like cars blocking driveways or parking in no-parking zones. Following closely behind are \"Missed Waste Pick-up\" with **56** reports and \"Litter & Debris\" with **52** reports. It seems like keeping our streets clean and ensuring trash gets picked up are big concerns for many of us.\n\nWe're also seeing a good number of reports related to property and public space maintenance. For instance, there were **21** reports each for \"Improper Trash Storage\" and \"Illegal Dumping or Disposal,\" which really speaks to the importance of keeping our neighborhoods tidy. Additionally, \"Overgrown Weeds\" and \"Sign Repair\" each had **15** reports, and \"Needle Pickup\" had **13**. Issues like \"Street Light Outage\" and \"Sidewalk Repair\" also came in with **12** reports each, showing that keeping our infrastructure in good shape is on people's minds.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1759.144,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "311-010",
+      "turn_index": 1,
+      "user_message": "What events are happening this weekend?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What are the top 311 complaints in Dorchester?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! Happy to share what folks in Dorchester have been reporting through 311 lately. Over the past 7 days, there have been **452** total reports.\n\nWhen we look at the types of issues, \"Parking Enforcement\" is the most frequent, with **70** reports. This often includes things like cars blocking driveways or parking in no-parking zones. Following closely behind are \"Missed Waste Pick-up\" with **56** reports and \"Litter & Debris\" with **52** reports. It seems like keeping our streets clean and ensuring trash gets picked up are big concerns for many of us.\n\nWe're also seeing a good number of reports related to property and public space maintenance. For instance, there were **21** reports each for \"Improper Trash Storage\" and \"Illegal Dumping or Disposal,\" which really speaks to the importance of keeping our neighborhoods tidy. Additionally, \"Overgrown Weeds\" and \"Sign Repair\" each had **15** reports, and \"Needle Pickup\" had **13**. Issues like \"Street Light Outage\" and \"Sidewalk Repair\" also came in with **12** reports each, showing that keeping our infrastructure in good shape is on people's minds."
+        }
+      ],
+      "assistant_answer": "This weekend, there are a couple of interesting events happening. On **August 1st**, the Boston Ballet is hosting an Open Studio Day in Brighton, perfect for families with young children aged 16 months to 6 years to try a free class and explore their studios. Then, on **August 2nd**, you can head over to Jamaica Plain for the Open Streets Boston event, which runs from 10:30 a.m. to 3:00 p.m., closing off streets for a fun community experience.\n\nHere are upcoming events I found:\n\n- **Boston Ballet Open Studio Day** \u2014 AUGUST 1\n  AUGUST 1 Brighton. Families of children ages 16 months to 6 years* are invited to an Open Studio Day. Try a free class, meet our faculty, and explore our studios. Learn more and sign up today bostonballet.org/dorchester-enroll\n- **Open Streets Boston - Jamaica Plain** \u2014 Aug. 2, 10:30:00\n  The festivals, organized by outside consultant Shana Bryant of Manifested Entertainment, will continue in four sections of Boston starting on Aug. 2 in Jamaica Plain. All events take place from 10:30 a.m. to 3:00 p.m. Streets will be closed",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 917.753,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

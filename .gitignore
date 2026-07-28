@@ -27,6 +27,7 @@ secrets.json
 llm_query_log.csv
 *.log
 logs/
+turn_observability*.jsonl
 *.sqlite
 *.db
 **/chroma.sqlite3

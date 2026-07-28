@@ -1,0 +1,108 @@
+{
+  "scenario_id": "policy-007",
+  "title": "Resident feedback on development",
+  "domain": "policy_budget_zoning_development",
+  "conversation_category": "source_refinement",
+  "turns": [
+    {
+      "scenario_id": "policy-007",
+      "turn_index": 0,
+      "user_message": "What does the official filing say about the new housing project?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! I'm happy to help you understand what's being discussed about new housing projects in our community.\n\nFrom what I've gathered, there's been a lot of conversation around housing affordability, especially near transit corridors. While there aren't any official city filings or ordinances mentioned in the materials I reviewed, community groups like the Codman Square Neighborhood Development Corporation (Codman Square NDC) are actively involved in discussing local priorities. These discussions, like the one at the Codman Square neighborhood meeting, often touch on housing, but they're more about public discussion and community opinion rather than formal government decisions. The Codman Square NDC, for instance, is a local organization focused on housing, economic development, and community programs for residents in the Codman Square area.\n\nRetrieved 2 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2177.856,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "policy-007",
+      "turn_index": 1,
+      "user_message": "What did residents say about it?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What does the official filing say about the new housing project?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! I'm happy to help you understand what's being discussed about new housing projects in our community.\n\nFrom what I've gathered, there's been a lot of conversation around housing affordability, especially near transit corridors. While there aren't any official city filings or ordinances mentioned in the materials I reviewed, community groups like the Codman Square Neighborhood Development Corporation (Codman Square NDC) are actively involved in discussing local priorities. These discussions, like the one at the Codman Square neighborhood meeting, often touch on housing, but they're more about public discussion and community opinion rather than formal government decisions. The Codman Square NDC, for instance, is a local organization focused on housing, economic development, and community programs for residents in the Codman Square area.\n\nRetrieved 2 source passages for context."
+        }
+      ],
+      "assistant_answer": "At the Codman Square neighborhood meeting, residents brought up a few key concerns. They discussed housing affordability, particularly in areas close to transit, and also raised issues about pedestrian safety along Washington Street. On top of that, people voiced their opinions on how responsive city services are when it comes to things like street lighting and trash collection, with some speakers asking for clearer timelines on open service requests. These discussions, noted in the neighborhood meeting notes, were part of a public conversation and not a formal city decision.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1273.661,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

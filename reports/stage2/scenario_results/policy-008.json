@@ -1,0 +1,37 @@
+{
+  "scenario_id": "policy-008",
+  "title": "No official decision yet",
+  "domain": "policy_budget_zoning_development",
+  "conversation_category": "no_evidence",
+  "turns": [
+    {
+      "scenario_id": "policy-008",
+      "turn_index": 0,
+      "user_message": "Did the city approve the proposed building last night?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! I checked on that proposed building for you, but unfortunately, I couldn't find any specific information about whether the city approved it last night. The system I use for tracking these kinds of events wasn't able to pull up details for that particular query.\n\nI couldn't run a prepared query for the **event_by_name** part of your question.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 4007.879,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

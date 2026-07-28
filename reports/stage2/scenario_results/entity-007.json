@@ -1,0 +1,129 @@
+{
+  "scenario_id": "entity-007",
+  "title": "Correct organization identity",
+  "domain": "entities_organizations",
+  "conversation_category": "correction",
+  "turns": [
+    {
+      "scenario_id": "entity-007",
+      "turn_index": 0,
+      "user_message": "Tell me about the Dorchester community center.",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hello there! I'm happy to help you learn more about community resources here in Dorchester.\n\nWhen it comes to community centers, the Codman Square Neighborhood Development Corporation (CSNDC) is a key organization serving residents around Codman Square. They offer a range of programs focused on housing, economic development, and community initiatives. For example, CSNDC has been involved in projects like the Oasis on Ballou Farm, an agriculture project that provides fresh produce for the community. They also work to support local businesses, as seen in their collaboration with UMass Boston students who studied business displacement in the area.\n\nWhile the provided information doesn't detail a specific \"Dorchester Community Center\" with a singular name, organizations like CSNDC play a vital role in fostering community engagement and providing essential services right here in our neighborhood.\n\nRetrieved 6 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/growing-together-oasis-on-ballou-farm-expands/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2977.744,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "entity-007",
+      "turn_index": 1,
+      "user_message": "No, I mean the Kroc Center.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Tell me about the Dorchester community center."
+        },
+        {
+          "role": "assistant",
+          "content": "Hello there! I'm happy to help you learn more about community resources here in Dorchester.\n\nWhen it comes to community centers, the Codman Square Neighborhood Development Corporation (CSNDC) is a key organization serving residents around Codman Square. They offer a range of programs focused on housing, economic development, and community initiatives. For example, CSNDC has been involved in projects like the Oasis on Ballou Farm, an agriculture project that provides fresh produce for the community. They also work to support local businesses, as seen in their collaboration with UMass Boston students who studied business displacement in the area.\n\nWhile the provided information doesn't detail a specific \"Dorchester Community Center\" with a singular name, organizations like CSNDC play a vital role in fostering community engagement and providing essential services right here in our neighborhood.\n\nRetrieved 6 source passages for context."
+        }
+      ],
+      "assistant_answer": "Ah, the Kroc Center! Thanks for clarifying. You're likely thinking of the **Ray and Joan Kroc Corps Community Center**, which is a fantastic resource right here in Dorchester. It's part of the Salvation Army and offers a wide array of programs and facilities for all ages.\n\nThe Kroc Center provides everything from fitness classes and sports leagues to educational programs and arts and crafts. They have a swimming pool, a gymnasium, and even a performance space. It's a place where folks can connect, learn new skills, and stay active. While the provided information doesn't detail specific program counts or time periods for the Kroc Center, it's widely known in the community for its comprehensive offerings and its role in bringing people together.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2221.531,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

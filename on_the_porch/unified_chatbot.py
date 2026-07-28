@@ -28,6 +28,16 @@ import retrieval  # type: ignore  # noqa: E402
 import boston_gov  # type: ignore  # noqa: E402
 import intent_router  # noqa: E402
 from query_plan import build_query_plan  # noqa: E402
+from turn_observability import (  # noqa: E402
+    bind_trace,
+    get_current_trace,
+    model_call,
+    record_fields as record_observability_fields,
+    record_retry as record_observability_retry,
+    record_retrieval as record_observability_retrieval,
+    stage as observability_stage,
+    submit_with_trace,
+)
 
 # Gemini client is configured locally (sql_chat uses app4, not legacy app3).
 try:
@@ -220,19 +230,45 @@ def _generate_content(model, prompt, generation_config):
     for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
         increment_llm_call_counter()
         try:
-            if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+            model_name = str(
+                getattr(model, "model_name", None)
+                or getattr(model, "_model_name", None)
+                or GEMINI_MODEL
+            )
+            with model_call(
+                "chat_generation",
+                model_name,
+                attempt=attempt,
+                input_size=len(prompt or ""),
+            ) as call:
+                if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+                    try:
+                        response = model.generate_content(
+                            prompt,
+                            generation_config=generation_config,
+                            request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                        )
+                    except TypeError:
+                        _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
+                    else:
+                        try:
+                            call.set_output_size(len(response.text or ""))
+                        except Exception:
+                            pass
+                        return response
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                )
                 try:
-                    return model.generate_content(
-                        prompt,
-                        generation_config=generation_config,
-                        request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
-                    )
-                except TypeError:
-                    _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
-            return model.generate_content(prompt, generation_config=generation_config)
+                    call.set_output_size(len(response.text or ""))
+                except Exception:
+                    pass
+                return response
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                record_observability_retry("gemini_generation")
                 backoff = min(2 ** (attempt - 1), 8) * 0.5
                 print(
                     f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
@@ -458,14 +494,18 @@ def try_boston_gov_enrichment(
     if not _should_trigger_boston_gov_fallback(original_answer):
         return original_answer
     result: Dict[str, Any] = {"answer": original_answer}
+    turn_trace = get_current_trace()
 
     def _job() -> None:
-        try:
-            result["answer"] = _build_boston_gov_fallback_answer(
-                question, original_answer,
-            )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Boston.gov enrichment failed: {exc}")
+        with bind_trace(turn_trace):
+            try:
+                with observability_stage("boston_gov_enrichment"):
+                    result["answer"] = _build_boston_gov_fallback_answer(
+                        question,
+                        original_answer,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ⚠️ Boston.gov enrichment failed: {exc}")
 
     worker = threading.Thread(target=_job, daemon=True)
     worker.start()
@@ -1397,25 +1437,28 @@ def run_execution_pipeline(
     try:
         routing = routing_plan or _route_question(question)
         plan_started = time.perf_counter()
-        plan = build_execution_plan(question, routing)
+        with observability_stage("planning"):
+            plan = build_execution_plan(question, routing)
         plan_ms = int((time.perf_counter() - plan_started) * 1000)
         if plan is None:
             return None
 
-        facts = execute_plan(
-            plan,
-            question,
-            execute_sql=app4._execute_sql,
-            retrieve_rag=_retrieve_rag,
-        )
+        with observability_stage("plan_execution"):
+            facts = execute_plan(
+                plan,
+                question,
+                execute_sql=app4._execute_sql,
+                retrieve_rag=_retrieve_rag,
+            )
 
         synth_started = time.perf_counter()
-        answer = synthesize_and_validate(
-            question,
-            facts,
-            conversation_history=conversation_history,
-            display_question=question,
-        )
+        with observability_stage("answer_synthesis"):
+            answer = synthesize_and_validate(
+                question,
+                facts,
+                conversation_history=conversation_history,
+                display_question=question,
+            )
         synth_ms = int((time.perf_counter() - synth_started) * 1000)
 
         mode = plan.legacy_mode()
@@ -1974,7 +2017,8 @@ def _retrieve_rag(
 
     if _PARALLEL_RETRIEVAL and len(tasks) > 1:
         with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            results = list(executor.map(_safe_run, tasks))
+            futures = [submit_with_trace(executor, _safe_run, task) for task in tasks]
+            results = [future.result() for future in futures]
     else:
         results = [_safe_run(fn) for fn in tasks]
 
@@ -1993,7 +2037,13 @@ def _run_rag(
     apply_fallback: bool = True,
 ) -> Dict[str, Any]:
     combined_chunks, combined_meta = _retrieve_rag(question, plan)
-    answer = _compose_rag_answer(question, combined_chunks, combined_meta, conversation_history)
+    with observability_stage("rag_synthesis"):
+        answer = _compose_rag_answer(
+            question,
+            combined_chunks,
+            combined_meta,
+            conversation_history,
+        )
     if apply_fallback:
         answer = _apply_default_fallback_if_needed(question, answer)
     return {"answer": answer, "chunks": combined_chunks, "metadata": combined_meta}
@@ -2144,8 +2194,21 @@ def _run_hybrid_parts(
     # and RAG uses the shared (read-only) vector store, so this is safe.
     if _PARALLEL_RETRIEVAL:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            sql_future = executor.submit(_run_sql, question, conversation_history, False)
-            rag_future = executor.submit(_run_rag, question, plan, conversation_history, False)
+            sql_future = submit_with_trace(
+                executor,
+                _run_sql,
+                question,
+                conversation_history,
+                False,
+            )
+            rag_future = submit_with_trace(
+                executor,
+                _run_rag,
+                question,
+                plan,
+                conversation_history,
+                False,
+            )
             return sql_future.result(), rag_future.result()
     sql_part = _run_sql(question, conversation_history, apply_fallback=False)
     rag_part = _run_rag(question, plan, conversation_history, apply_fallback=False)
@@ -2191,11 +2254,12 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
     client = _get_llm_client()
     model = client.GenerativeModel(GEMINI_MODEL)
     try:
-        resp = _generate_content(
-            model,
-            full_prompt,
-            generation_config={"temperature": 0},
-        )
+        with observability_stage("hybrid_synthesis"):
+            resp = _generate_content(
+                model,
+                full_prompt,
+                generation_config={"temperature": 0},
+            )
         answer = (resp.text or "").strip()
     except Exception:
         answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
@@ -2222,7 +2286,12 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
     for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
         yielded = False
         try:
-            for piece in _stream_model_text_once(model_name, prompt, temperature):
+            for piece in _stream_model_text_once(
+                model_name,
+                prompt,
+                temperature,
+                attempt=attempt,
+            ):
                 yielded = True
                 yield piece
             if yielded:
@@ -2230,6 +2299,7 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                record_observability_retry("gemini_stream")
                 backoff = min(2 ** (attempt - 1), 8) * 0.5
                 print(
                     f"  ⚠️ Stream transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
@@ -2253,35 +2323,50 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
     raise RuntimeError("Gemini stream returned no content")
 
 
-def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
+def _stream_model_text_once(
+    model_name: str,
+    prompt: str,
+    temperature: float,
+    *,
+    attempt: int = 1,
+):
     """Single streaming attempt (no retry)."""
     client = _get_llm_client()
     model = client.GenerativeModel(model_name)
     increment_llm_call_counter()
-    try:
+    with model_call(
+        "stream_generation",
+        model_name,
+        attempt=attempt,
+        input_size=len(prompt or ""),
+    ) as call:
         try:
-            stream = model.generate_content(
-                prompt,
-                generation_config={"temperature": temperature},
-                stream=True,
-                request_options={"timeout": GEMINI_STREAM_TIMEOUT},
-            )
-        except TypeError:
-            stream = model.generate_content(
-                prompt,
-                generation_config={"temperature": temperature},
-                stream=True,
-            )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠️ Streaming generation failed to start: {exc}")
-        raise
-    for chunk in stream:
-        try:
-            piece = getattr(chunk, "text", "") or ""
-        except Exception:  # noqa: BLE001
-            piece = ""
-        if piece:
-            yield piece
+            try:
+                stream = model.generate_content(
+                    prompt,
+                    generation_config={"temperature": temperature},
+                    stream=True,
+                    request_options={"timeout": GEMINI_STREAM_TIMEOUT},
+                )
+            except TypeError:
+                stream = model.generate_content(
+                    prompt,
+                    generation_config={"temperature": temperature},
+                    stream=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Streaming generation failed to start: {exc}")
+            raise
+        output_chars = 0
+        for chunk in stream:
+            try:
+                piece = getattr(chunk, "text", "") or ""
+            except Exception:  # noqa: BLE001
+                piece = ""
+            if piece:
+                output_chars += len(piece)
+                call.set_output_size(output_chars)
+                yield piece
 
 
 def _pseudo_stream(text: str):

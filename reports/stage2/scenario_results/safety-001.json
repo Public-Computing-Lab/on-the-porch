@@ -1,0 +1,174 @@
+{
+  "scenario_id": "safety-001",
+  "title": "Safety concerns by evidence type",
+  "domain": "crime_public_safety",
+  "conversation_category": "source_refinement",
+  "turns": [
+    {
+      "scenario_id": "safety-001",
+      "turn_index": 0,
+      "user_message": "What are the main safety concerns in Dorchester?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! It's good to connect. When folks in Dorchester talk about safety, a few things tend to come up.\n\nFor instance, at a recent Codman Square neighborhood meeting, residents brought up concerns about pedestrian safety, especially along Washington Street. They also discussed the responsiveness of city services, like street lighting and trash collection, and were looking for clearer timelines on open service requests. These discussions, noted in the Codman Square neighborhood meeting public discussion notes, highlight how important everyday neighborhood upkeep and safety are to residents.\n\nThe Codman Square Neighborhood Development Corporation, which serves the area, focuses on housing, economic development, and community programs, all of which contribute to a stronger, safer community fabric. While these sources don't detail specific crime statistics, they point to the community's active engagement in identifying and addressing local issues that impact their well-being.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 83.31,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "safety-001",
+      "turn_index": 1,
+      "user_message": "Which of those come from official data?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What are the main safety concerns in Dorchester?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! It's good to connect. When folks in Dorchester talk about safety, a few things tend to come up.\n\nFor instance, at a recent Codman Square neighborhood meeting, residents brought up concerns about pedestrian safety, especially along Washington Street. They also discussed the responsiveness of city services, like street lighting and trash collection, and were looking for clearer timelines on open service requests. These discussions, noted in the Codman Square neighborhood meeting public discussion notes, highlight how important everyday neighborhood upkeep and safety are to residents.\n\nThe Codman Square Neighborhood Development Corporation, which serves the area, focuses on housing, economic development, and community programs, all of which contribute to a stronger, safer community fabric. While these sources don't detail specific crime statistics, they point to the community's active engagement in identifying and addressing local issues that impact their well-being.\n\nRetrieved 3 source passages for context."
+        }
+      ],
+      "assistant_answer": "The information about pedestrian safety on Washington Street and concerns regarding city services like street lighting and trash collection comes from the public discussion notes of a Codman Square neighborhood meeting. These notes, while reflecting community concerns, are not official city data in the sense of being a formal report or ordinance. Similarly, the overview of the Codman Square Neighborhood Development Corporation's work is from their own community organization materials, outlining their priorities and services, rather than official city records.\n\nRetrieved 2 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2509.428,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "safety-001",
+      "turn_index": 2,
+      "user_message": "What did residents themselves say?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What are the main safety concerns in Dorchester?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! It's good to connect. When folks in Dorchester talk about safety, a few things tend to come up.\n\nFor instance, at a recent Codman Square neighborhood meeting, residents brought up concerns about pedestrian safety, especially along Washington Street. They also discussed the responsiveness of city services, like street lighting and trash collection, and were looking for clearer timelines on open service requests. These discussions, noted in the Codman Square neighborhood meeting public discussion notes, highlight how important everyday neighborhood upkeep and safety are to residents.\n\nThe Codman Square Neighborhood Development Corporation, which serves the area, focuses on housing, economic development, and community programs, all of which contribute to a stronger, safer community fabric. While these sources don't detail specific crime statistics, they point to the community's active engagement in identifying and addressing local issues that impact their well-being.\n\nRetrieved 3 source passages for context."
+        },
+        {
+          "role": "user",
+          "content": "Which of those come from official data?"
+        },
+        {
+          "role": "assistant",
+          "content": "The information about pedestrian safety on Washington Street and concerns regarding city services like street lighting and trash collection comes from the public discussion notes of a Codman Square neighborhood meeting. These notes, while reflecting community concerns, are not official city data in the sense of being a formal report or ordinance. Similarly, the overview of the Codman Square Neighborhood Development Corporation's work is from their own community organization materials, outlining their priorities and services, rather than official city records.\n\nRetrieved 2 source passages for context."
+        }
+      ],
+      "assistant_answer": "At the Codman Square neighborhood meeting, residents themselves voiced concerns about pedestrian safety, particularly along Washington Street. They also brought up the responsiveness of city services, specifically mentioning street lighting and trash collection, and were looking for clearer timelines on when open service requests would be addressed. These points were captured in the public discussion notes from that meeting.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1373.533,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

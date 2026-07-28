@@ -1,0 +1,101 @@
+{
+  "scenario_id": "311-005",
+  "title": "More 311 results",
+  "domain": "boston_311",
+  "conversation_category": "continuation",
+  "turns": [
+    {
+      "scenario_id": "311-005",
+      "turn_index": 0,
+      "user_message": "Show me recent streetlight requests near Ashmont.",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Happy to help you with that.\n\nIt looks like there have been **15** recent reports about street lights needing attention near Ashmont in the last 7 days. All of these are still marked as \"In progress,\" meaning they're open and haven't been closed out yet. We're seeing a couple of reports on Neponset Ave and Ashmont St, with others spread across streets like Frontenac St and Floyd St. The most recent report was just from yesterday, July 24th. Hopefully, these get fixed up soon to brighten things up!",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1076.352,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "311-005",
+      "turn_index": 1,
+      "user_message": "Show me more.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Show me recent streetlight requests near Ashmont."
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! Happy to help you with that.\n\nIt looks like there have been **15** recent reports about street lights needing attention near Ashmont in the last 7 days. All of these are still marked as \"In progress,\" meaning they're open and haven't been closed out yet. We're seeing a couple of reports on Neponset Ave and Ashmont St, with others spread across streets like Frontenac St and Floyd St. The most recent report was just from yesterday, July 24th. Hopefully, these get fixed up soon to brighten things up!"
+        }
+      ],
+      "assistant_answer": "It sounds like you're interested in the broader context of community concerns and how city services are being discussed in Dorchester. At a recent Codman Square neighborhood meeting, for instance, residents brought up a few key topics. They talked about housing affordability, especially near transit areas, and pedestrian safety along Washington Street. A big part of the discussion also focused on how responsive city services are, specifically when it comes to things like street lighting and trash collection. Speakers at that meeting were asking for clearer timelines on service requests that are still open. These notes are from a community-published source and represent discussions, not official city actions.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2008.15,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

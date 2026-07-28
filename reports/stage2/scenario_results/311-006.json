@@ -1,0 +1,101 @@
+{
+  "scenario_id": "311-006",
+  "title": "Official complaints versus resident concerns",
+  "domain": "boston_311",
+  "conversation_category": "source_refinement",
+  "turns": [
+    {
+      "scenario_id": "311-006",
+      "turn_index": 0,
+      "user_message": "What 311 issues have the highest counts?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Looking at the 311 reports for Dorchester over the last 7 days, we've seen a total of **452** issues logged. The most frequent ones have been related to Parking Enforcement, with **70** reports, followed by Missed Waste Pick-up at **56**, and Litter & Debris with **52** reports. It's good to see these common neighborhood concerns being brought to attention, as it helps keep our streets and public spaces in better shape.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1007.776,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "311-006",
+      "turn_index": 1,
+      "user_message": "Which issues are residents most concerned about?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What 311 issues have the highest counts?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! Looking at the 311 reports for Dorchester over the last 7 days, we've seen a total of **452** issues logged. The most frequent ones have been related to Parking Enforcement, with **70** reports, followed by Missed Waste Pick-up at **56**, and Litter & Debris with **52** reports. It's good to see these common neighborhood concerns being brought to attention, as it helps keep our streets and public spaces in better shape."
+        }
+      ],
+      "assistant_answer": "Based on discussions and community feedback, residents in Dorchester, particularly around Codman Square, have expressed concerns about several key issues. Housing affordability, especially near transit corridors, is a significant topic, as noted in the Codman Square neighborhood meeting discussions. Pedestrian safety on Washington Street has also been a point of focus. Additionally, there's a desire for better responsiveness from city services regarding street lighting and trash collection, with residents seeking clearer timelines for open service requests. The Codman Square Neighborhood Development Corporation also highlights local priorities and services through their community programs.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1142.722,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

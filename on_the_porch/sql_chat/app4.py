@@ -10,6 +10,12 @@ from typing import Any, Dict, List, Callable
 import pymysql
 from pocketflow import Flow, Node
 import google.generativeai as genai  # type: ignore
+from turn_observability import (
+    model_call,
+    record_retry as record_observability_retry,
+    record_sql as record_observability_sql,
+    stage as observability_stage,
+)
 try:
     from langsmith.wrappers import wrap_openai  # type: ignore
 except Exception:
@@ -137,7 +143,7 @@ def _safe_extract_response_text(response: Any) -> str:
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
 
 
-def _generate_content(model, prompt, generation_config):
+def _generate_content(model, prompt, generation_config, *, attempt: int = 1):
     """Call ``model.generate_content`` with a per-request timeout when supported.
 
     google-generativeai versions differ on whether they accept
@@ -151,16 +157,38 @@ def _generate_content(model, prompt, generation_config):
         increment_llm_call_counter()
     except Exception:
         pass
-    if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+    model_name = str(
+        getattr(model, "model_name", None)
+        or getattr(model, "_model_name", None)
+        or GEMINI_MODEL
+    )
+    with model_call(
+        "sql_chat_generation",
+        model_name,
+        attempt=attempt,
+        input_size=len(prompt or ""),
+    ) as call:
+        if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
+            try:
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                    request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                )
+            except TypeError:
+                _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
+            else:
+                try:
+                    call.set_output_size(len(response.text or ""))
+                except Exception:
+                    pass
+                return response
+        response = model.generate_content(prompt, generation_config=generation_config)
         try:
-            return model.generate_content(
-                prompt,
-                generation_config=generation_config,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
-            )
-        except TypeError:
-            _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
-    return model.generate_content(prompt, generation_config=generation_config)
+            call.set_output_size(len(response.text or ""))
+        except Exception:
+            pass
+        return response
 
 
 @traceable(name="gemini_chat")
@@ -184,11 +212,13 @@ def _chat_with_model(user_message: str, model_name: str = GEMINI_MODEL, temperat
                 model,
                 user_message,
                 {"temperature": temperature},
+                attempt=attempt,
             )
             break
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
+                record_observability_retry("gemini_sql_chat")
                 backoff = min(2 ** (attempt - 1), 8) * 0.5
                 print(
                     f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
@@ -272,6 +302,7 @@ def _connect_mysql():
                 file=sys.stderr,
             )
             if attempt < DB_MAX_ATTEMPTS:
+                record_observability_retry("mysql_connection")
                 time.sleep(min(2 ** (attempt - 1), 4) * 0.5)
 
     # Do NOT sys.exit here: that raises SystemExit (a BaseException), which the
@@ -790,7 +821,8 @@ def _build_question_metadata(question: str) -> str:
     catalog = _load_catalog_entries()
     if not catalog:
         return _read_metadata_text()
-    tables = _llm_select_tables(question, catalog, GEMINI_FAST_MODEL)
+    with observability_stage("table_selection"):
+        tables = _llm_select_tables(question, catalog, GEMINI_FAST_MODEL)
     meta = _read_selected_metadata_json(tables, catalog)
     return meta or _read_metadata_text()
 
@@ -874,7 +906,12 @@ def _llm_generate_sql(question: str, schema: str, default_model: str, metadata: 
     full_prompt += user_prompt
     
     try:
-        content = _call_gemini_with_logging(default_model, full_prompt, temperature=0)
+        with observability_stage("sql_generation"):
+            content = _call_gemini_with_logging(
+                default_model,
+                full_prompt,
+                temperature=0,
+            )
         sql = _extract_sql_from_text(content)
         print("\n[Generated SQL Before Dorchester Filter]\n" + sql + "\n")
         # Post-process to ensure Dorchester filter is present
@@ -965,7 +1002,12 @@ def _llm_refine_sql(
     )
 
     prompt = f"{system_prompt}\n\n{user_prompt}"
-    content = _call_gemini_with_logging(default_model, prompt, temperature=0)
+    with observability_stage("sql_repair"):
+        content = _call_gemini_with_logging(
+            default_model,
+            prompt,
+            temperature=0,
+        )
     sql = _extract_sql_from_text(content)
     print("\n[Refined SQL Before Dorchester Filter]\n" + sql + "\n")
     # Post-process to ensure Dorchester filter is present
@@ -976,19 +1018,21 @@ def _llm_refine_sql(
 
 @traceable(name="execute_sql")
 def _execute_sql(sql: str) -> Dict[str, Any]:
-    conn = _get_db_connection()
-    # Connection is thread-owned and reused; do not close it here. A statement
-    # error leaves the connection usable (autocommit, no open transaction); the
-    # next borrow re-pings and reconnects if the socket was dropped.
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        rows = cur.fetchall()
-        cols = [d[0] for d in cur.description] if cur.description else []
+    with observability_stage("sql_execution"):
+        conn = _get_db_connection()
+        # Connection is thread-owned and reused; do not close it here. A statement
+        # error leaves the connection usable (autocommit, no open transaction); the
+        # next borrow re-pings and reconnects if the socket was dropped.
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description] if cur.description else []
 
     items: List[Dict[str, Any]] = []
     for row in rows:
         item = {cols[i]: row[i] for i in range(len(cols))}
         items.append(item)
+    record_observability_sql(sql, len(items))
     return {"columns": cols, "rows": items}
 
 
@@ -1009,6 +1053,8 @@ def _execute_with_retries(
     
     for attempt_idx in range(1, max_attempts + 1):
         try:
+            if attempt_idx > 1:
+                record_observability_retry("dynamic_sql")
             if attempt_idx == 1:
                 print("\n[SQL]\n" + sql + "\n")
             else:

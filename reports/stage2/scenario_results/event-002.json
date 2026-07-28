@@ -1,0 +1,81 @@
+{
+  "scenario_id": "event-002",
+  "title": "Change only the event date",
+  "domain": "events",
+  "conversation_category": "refinement",
+  "turns": [
+    {
+      "scenario_id": "event-002",
+      "turn_index": 0,
+      "user_message": "Are there family events in Dorchester tomorrow?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like there are a few family-friendly happenings in and around Dorchester tomorrow, July 29th, 2026!\n\nThe Codman Square Health Center is hosting a \"Virtual Baby Cafe\" from 2:00 PM to 4:00 PM. This is a great opportunity for parents and caregivers to connect virtually and get support.\n\nAdditionally, the Boston Ballet is holding \"Open Studio Days\" on July 28th, 29th, and 30th. While the event on the 29th is listed as being in Newton, the general invitation is for families with children ages 16 months to 6 years to try a free class, meet faculty, and explore studios. You can find more details on their website.\n\nThere are a total of **13** events listed in the data, all of which are marked as closed, meaning they have already occurred or are in the past. The dates range from July 28th to August 2nd, 2026.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1477.31,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "event-002",
+      "turn_index": 1,
+      "user_message": "Actually, make that Saturday.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Are there family events in Dorchester tomorrow?"
+        },
+        {
+          "role": "assistant",
+          "content": "It looks like there are a few family-friendly happenings in and around Dorchester tomorrow, July 29th, 2026!\n\nThe Codman Square Health Center is hosting a \"Virtual Baby Cafe\" from 2:00 PM to 4:00 PM. This is a great opportunity for parents and caregivers to connect virtually and get support.\n\nAdditionally, the Boston Ballet is holding \"Open Studio Days\" on July 28th, 29th, and 30th. While the event on the 29th is listed as being in Newton, the general invitation is for families with children ages 16 months to 6 years to try a free class, meet faculty, and explore studios. You can find more details on their website.\n\nThere are a total of **13** events listed in the data, all of which are marked as closed, meaning they have already occurred or are in the past. The dates range from July 28th to August 2nd, 2026."
+        }
+      ],
+      "assistant_answer": "Looking at Saturday, July 30th, 2026, there are a couple of events happening that might interest families.\n\nThe Boston Ballet is holding one of their \"Open Studio Days\" on July 30th, though this particular one is listed as being in Brookline. These events are for families with children ages 16 months to 6 years and offer a chance to try a free class and explore their studios.\n\nAlso on July 30th, the Codman Square Health Center is hosting a \"Climate Justice Alliance Party at Oasis on Ballou Farm\" from 6:00 PM to 7:30 PM. This sounds like a fun community gathering with music, dancing, a seedling and tree giveaway, and art activities, with food and drinks provided. It's happening right here in Dorchester at 100 Ballou Avenue.\n\nAdditionally, the \"Recharge! Middle School Therapy Group\" in Randolph is having its final session on July 30th from 10:00 AM to 11:00 AM. This is for middle schoolers in Randolph Public Schools and provides a supportive space to build friendships and develop skills for managing emotions.\n\nAcross all the events listed, the dates range from July 28th to August 10th, 2026, with a total of **13** events in the data. All of these are marked as closed, meaning they have already passed.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "history",
+      "mode": "history",
+      "latency_ms": 2911.974,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

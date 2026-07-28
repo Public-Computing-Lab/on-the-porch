@@ -1,0 +1,81 @@
+{
+  "scenario_id": "greet-005",
+  "title": "Greeting then civic question",
+  "domain": "conversation",
+  "conversation_category": "topic_switch",
+  "turns": [
+    {
+      "scenario_id": "greet-005",
+      "turn_index": 0,
+      "user_message": "Hey there",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hi! I'm here to help with Dorchester community questions \u2014 events, services, safety, and local news. What would you like to know?",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "chitchat",
+      "mode": "chitchat",
+      "latency_ms": 25.597,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "greet-005",
+      "turn_index": 1,
+      "user_message": "What is happening in Dorchester this weekend?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Hey there"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi! I'm here to help with Dorchester community questions \u2014 events, services, safety, and local news. What would you like to know?"
+        }
+      ],
+      "assistant_answer": "This weekend, there are a couple of community events happening. On **August 1st**, the Boston Ballet is hosting an Open Studio Day in Brighton, offering free classes for families with young children. Additionally, on **August 2nd**, there's an Open Streets event in Jamaica Plain, which will close streets to cars from 10:30 a.m. to 3:00 p.m. for festivities.\n\nHere are upcoming events I found:\n\n- **Boston Ballet Open Studio Day** \u2014 AUGUST 1\n  AUGUST 1 Brighton. Families of children ages 16 months to 6 years* are invited to an Open Studio Day. Try a free class, meet our faculty, and explore our studios. Learn more and sign up today bostonballet.org/dorchester-enroll\n- **Open Streets Boston - Jamaica Plain** \u2014 Aug. 2, 10:30:00\n  The festivals, organized by outside consultant Shana Bryant of Manifested Entertainment, will continue in four sections of Boston starting on Aug. 2 in Jamaica Plain. All events take place from 10:30 a.m. to 3:00 p.m. Streets will be closed",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 931.334,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}
