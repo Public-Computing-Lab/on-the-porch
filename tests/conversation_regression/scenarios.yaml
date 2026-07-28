@@ -1,0 +1,1272 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "branch": "main",
+    "commit": "840ec54dd1265b4f2f42cc18b66b54cbf2a99b89",
+    "created": "2026-07-28",
+    "purpose": "Protect the natural, grounded conversational behavior of the production baseline while infrastructure evolves."
+  },
+  "evaluation_dimensions": [
+    "intent_understanding",
+    "context_retention",
+    "correction_handling",
+    "continuation_handling",
+    "topic_switch_handling",
+    "reference_and_pronoun_resolution",
+    "completeness",
+    "naturalness",
+    "resident_friendly_language",
+    "grounding",
+    "source_relevance",
+    "source_type_distinction",
+    "uncertainty_and_restraint",
+    "unnecessary_clarification",
+    "internal_implementation_leakage",
+    "repetition",
+    "contradiction_with_earlier_turns",
+    "failure_quality"
+  ],
+  "expected_defaults": {
+    "context_required": false,
+    "correction": false,
+    "continuation": false,
+    "topic_change": false,
+    "clarification_allowed": false,
+    "clarification_required": false,
+    "required_concepts": [],
+    "forbidden_concepts": [],
+    "expected_source_categories": [],
+    "forbidden_source_categories": [],
+    "source_requirement": "none",
+    "acceptable_limitations": []
+  },
+  "scenarios": [
+    {
+      "id": "greet-001",
+      "title": "Simple greeting",
+      "domain": "conversation",
+      "conversation_category": "standalone",
+      "coverage_tags": ["greetings", "general_mechanics"],
+      "description": "Respond warmly without forcing a civic lookup.",
+      "initial_context": {},
+      "severity": "low",
+      "notes": "A short resident-friendly greeting is sufficient.",
+      "turns": [
+        {"user": "Hi", "expected": {"behavior": "Greet the resident and offer useful local help.", "required_concepts": [{"name": "welcoming response", "any_of": ["hi", "hello", "welcome", "help"]}]}}
+      ]
+    },
+    {
+      "id": "greet-002",
+      "title": "Morning greeting",
+      "domain": "conversation",
+      "conversation_category": "standalone",
+      "coverage_tags": ["greetings"],
+      "description": "Acknowledge a time-of-day greeting naturally.",
+      "initial_context": {},
+      "severity": "low",
+      "notes": "No source is needed.",
+      "turns": [
+        {"user": "Good morning", "expected": {"behavior": "Return a concise morning greeting.", "required_concepts": [{"name": "greeting", "any_of": ["morning", "hello", "hi"]}]}}
+      ]
+    },
+    {
+      "id": "greet-003",
+      "title": "Capability question",
+      "domain": "conversation",
+      "conversation_category": "standalone",
+      "coverage_tags": ["greetings", "general_mechanics"],
+      "description": "Explain useful civic domains without technical implementation language.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "The answer should set practical expectations.",
+      "turns": [
+        {"user": "What can you help me with?", "expected": {"behavior": "Summarize resident-facing capabilities.", "required_concepts": [{"name": "local civic help", "any_of": ["events", "311", "public safety", "city services", "Dorchester"]}], "forbidden_concepts": [{"name": "technical architecture", "any_of": ["vector database", "language model pipeline"], "critical": true}]}}
+      ]
+    },
+    {
+      "id": "greet-004",
+      "title": "Thanks after an answer",
+      "domain": "conversation",
+      "conversation_category": "small_talk",
+      "coverage_tags": ["greetings", "general_mechanics"],
+      "description": "Accept thanks without repeating the prior answer.",
+      "initial_context": {"previous_topic": "events"},
+      "severity": "low",
+      "notes": "This should close the exchange naturally.",
+      "turns": [
+        {"user": "Thanks, that helps", "expected": {"behavior": "Acknowledge the thanks briefly.", "required_concepts": [{"name": "acknowledgement", "any_of": ["you’re welcome", "you're welcome", "glad", "anytime", "happy to help"]}]}}
+      ]
+    },
+    {
+      "id": "greet-005",
+      "title": "Greeting then civic question",
+      "domain": "conversation",
+      "conversation_category": "topic_switch",
+      "coverage_tags": ["greetings", "events", "general_mechanics"],
+      "description": "Move from small talk to an event request without carrying irrelevant context.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "The event turn should be grounded.",
+      "turns": [
+        {"user": "Hey there", "expected": {"behavior": "Greet the resident.", "required_concepts": [{"name": "greeting", "any_of": ["hey", "hi", "hello"]}]}},
+        {"user": "What is happening in Dorchester this weekend?", "expected": {"behavior": "Switch to current local events.", "topic_change": true, "required_concepts": [{"name": "weekend scope", "any_of": ["weekend", "Saturday", "Sunday"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-001",
+      "title": "Week correction and continuation",
+      "domain": "events",
+      "conversation_category": "correction_and_continuation",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Protect the representative week correction, more-results, and ordinal-reference sequence.",
+      "initial_context": {"location": "Dorchester"},
+      "severity": "critical",
+      "notes": "Stable result IDs make continuation and ordinal resolution testable.",
+      "turns": [
+        {"user": "What events are coming up this week?", "expected": {"behavior": "List sourced events in Dorchester for this week.", "required_concepts": [{"name": "this-week scope", "any_of": ["this week"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Not this week, next week.", "expected": {"behavior": "Replace only the time window and list next week's events.", "context_required": true, "correction": true, "required_concepts": [{"name": "next-week correction", "any_of": ["next week"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Are there any more?", "expected": {"behavior": "Continue the next-week event list without repeating prior items.", "context_required": true, "continuation": true, "required_concepts": [{"name": "additional results", "any_of": ["more", "another", "also"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required", "must_not_repeat_previous_answer": true, "must_not_repeat_result_ids": true}},
+        {"user": "Tell me about the second one.", "expected": {"behavior": "Resolve the second event in the most recent result set and provide its details.", "context_required": true, "required_concepts": [{"name": "selected event details", "any_of": ["date", "time", "location", "details"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-002",
+      "title": "Change only the event date",
+      "domain": "events",
+      "conversation_category": "refinement",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Preserve topic and location when the resident changes only the date.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The second turn must not ask which topic.",
+      "turns": [
+        {"user": "Are there family events in Dorchester tomorrow?", "expected": {"behavior": "List family events tomorrow.", "required_concepts": [{"name": "family and tomorrow filters", "any_of": ["family", "tomorrow"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Actually, make that Saturday.", "expected": {"behavior": "Keep event, family, and Dorchester context while replacing tomorrow with Saturday.", "context_required": true, "correction": true, "required_concepts": [{"name": "Saturday correction", "any_of": ["Saturday"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-003",
+      "title": "Ordinal event reference",
+      "domain": "events",
+      "conversation_category": "reference_resolution",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Resolve an ordinal reference against a prior event list.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The selected result must come from the immediately prior list.",
+      "turns": [
+        {"user": "Show me three events near Codman Square.", "expected": {"behavior": "List up to three local events.", "required_concepts": [{"name": "Codman Square scope", "any_of": ["Codman Square"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "What time is the second one?", "expected": {"behavior": "Resolve the second event and answer its time or state that the time is missing.", "context_required": true, "required_concepts": [{"name": "time field or limitation", "any_of": ["time", "starts", "not included", "not available"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-004",
+      "title": "Change only event geography",
+      "domain": "events",
+      "conversation_category": "refinement",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Keep date and event intent when location changes.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The second answer should focus on Fields Corner.",
+      "turns": [
+        {"user": "What events are happening in Ashmont this weekend?", "expected": {"behavior": "List weekend events around Ashmont.", "required_concepts": [{"name": "Ashmont", "any_of": ["Ashmont"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "What about Fields Corner?", "expected": {"behavior": "Change only the location to Fields Corner.", "context_required": true, "required_concepts": [{"name": "Fields Corner", "any_of": ["Fields Corner"]}], "forbidden_concepts": [{"name": "stale Ashmont scope", "any_of": ["only in Ashmont"], "critical": true}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-005",
+      "title": "Free family event filters",
+      "domain": "events",
+      "conversation_category": "refinement",
+      "coverage_tags": ["events"],
+      "description": "Apply cost and audience filters to a clear event request.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Do not clarify when the filters are already clear.",
+      "turns": [
+        {"user": "What free family-friendly events are happening this weekend?", "expected": {"behavior": "List events matching free, family, and weekend filters.", "required_concepts": [{"name": "free family filter", "any_of": ["free", "family"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-006",
+      "title": "Event accessibility",
+      "domain": "events",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Retain the selected event while answering an accessibility follow-up.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Unknown accessibility details must not be invented.",
+      "turns": [
+        {"user": "Tell me about the neighborhood resource fair.", "expected": {"behavior": "Provide sourced event details.", "required_concepts": [{"name": "resource fair", "any_of": ["resource fair"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Is it wheelchair accessible?", "expected": {"behavior": "Use the selected event and report accessibility only if documented.", "context_required": true, "required_concepts": [{"name": "accessibility status or limitation", "any_of": ["accessible", "accessibility", "not included", "not available"]}], "uncertainty_required": true, "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-007",
+      "title": "Named event details",
+      "domain": "events",
+      "conversation_category": "standalone",
+      "coverage_tags": ["events"],
+      "description": "Look up a specifically named event without requiring an earlier list.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Return confirmed fields and identify missing ones.",
+      "turns": [
+        {"user": "Tell me more about the Crew & Cadet Street Parade.", "expected": {"behavior": "Return confirmed details for the named event.", "required_concepts": [{"name": "event title", "any_of": ["Crew & Cadet Street Parade", "Crew and Cadet Street Parade"]}, {"name": "event timing or limitation", "any_of": ["date", "time", "not included", "not available"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-008",
+      "title": "Correct selected event",
+      "domain": "events",
+      "conversation_category": "correction",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Replace a mistaken active event when the resident corrects it.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "A direct correction must override the prior entity.",
+      "turns": [
+        {"user": "Tell me about the July 13 event.", "expected": {"behavior": "Answer from the best matching July 13 event or ask a targeted clarification if several exist.", "clarification_allowed": true, "required_concepts": [{"name": "July 13", "any_of": ["July 13", "Jul 13"]}], "expected_source_categories": ["event_listing"], "source_requirement": "preferred"}},
+        {"user": "No, I mean the parade.", "expected": {"behavior": "Replace the active event with the parade and provide its known details.", "context_required": true, "correction": true, "required_concepts": [{"name": "parade correction", "any_of": ["parade"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-009",
+      "title": "Event source question",
+      "domain": "events",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Explain where a listed event came from.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Source identity should be resident-facing.",
+      "turns": [
+        {"user": "Are there events at the library this week?", "expected": {"behavior": "List sourced library events.", "required_concepts": [{"name": "library events", "any_of": ["library"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Where did you get that information?", "expected": {"behavior": "Identify the event-listing source for the prior answer.", "context_required": true, "required_concepts": [{"name": "source attribution", "any_of": ["source", "listing", "Boston Public Library", "Boston.gov"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-010",
+      "title": "Genuinely ambiguous event date",
+      "domain": "events",
+      "conversation_category": "clarification",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Ask a targeted question when a relative date has no anchor.",
+      "initial_context": {"current_date_available": false},
+      "severity": "medium",
+      "notes": "This is a legitimate clarification case.",
+      "turns": [
+        {"user": "What events are happening around then?", "expected": {"behavior": "Ask which date or time period the resident means.", "clarification_allowed": true, "clarification_required": true, "required_concepts": [{"name": "targeted date clarification", "any_of": ["which date", "what date", "time period", "when"]}]}}
+      ]
+    },
+    {
+      "id": "event-011",
+      "title": "Return to earlier event topic",
+      "domain": "events",
+      "conversation_category": "topic_return",
+      "coverage_tags": ["events", "boston_311", "general_mechanics"],
+      "description": "Return to a previously selected event after a brief 311 topic.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The final pronoun refers to the event, not the 311 issue.",
+      "turns": [
+        {"user": "Tell me about the cleanup event Saturday.", "expected": {"behavior": "Provide event details.", "required_concepts": [{"name": "cleanup event", "any_of": ["cleanup", "Saturday"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "How do I report illegal dumping?", "expected": {"behavior": "Switch to useful 311 reporting guidance.", "topic_change": true, "required_concepts": [{"name": "311 reporting", "any_of": ["311", "report"]}], "expected_source_categories": ["official_document"], "source_requirement": "preferred"}},
+        {"user": "Back to the event, where is it?", "expected": {"behavior": "Return to the earlier event and give its location or disclose that it is missing.", "context_required": true, "topic_change": true, "required_concepts": [{"name": "event location or limitation", "any_of": ["location", "at ", "not included", "not available"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-012",
+      "title": "Broad events request should be answered",
+      "domain": "events",
+      "conversation_category": "standalone",
+      "coverage_tags": ["events", "general_mechanics"],
+      "description": "Answer a broad but reasonable event request without generic clarification.",
+      "initial_context": {"default_location": "Dorchester"},
+      "severity": "high",
+      "notes": "Use a sensible upcoming window.",
+      "turns": [
+        {"user": "Anything fun going on nearby?", "expected": {"behavior": "Use the local default and provide a concise selection of upcoming events.", "required_concepts": [{"name": "nearby upcoming activities", "any_of": ["Dorchester", "nearby", "upcoming", "this week", "weekend"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "event-013",
+      "title": "Event cancellation status",
+      "domain": "events",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["events", "no_evidence_uncertainty"],
+      "description": "Avoid claiming an event is active or canceled without evidence.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Status may be absent from the listing.",
+      "turns": [
+        {"user": "Is the street festival still happening?", "expected": {"behavior": "Report the documented status or state that current confirmation is unavailable.", "required_concepts": [{"name": "status or limitation", "any_of": ["scheduled", "canceled", "cancelled", "could not find", "not confirmed", "not available"]}], "uncertainty_required": true, "expected_source_categories": ["event_listing"], "source_requirement": "preferred", "acceptable_limitations": ["The listing may not carry real-time cancellation status."]}}
+      ]
+    },
+    {
+      "id": "event-014",
+      "title": "Event registration follow-up",
+      "domain": "events",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["events"],
+      "description": "Retain the active event and explain registration from available fields.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Do not invent a registration requirement.",
+      "turns": [
+        {"user": "What workshops are at the community center next week?", "expected": {"behavior": "List sourced workshops next week.", "required_concepts": [{"name": "workshops next week", "any_of": ["workshop", "next week"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "Do I need to register for the first one?", "expected": {"behavior": "Resolve the first workshop and provide registration details or a limitation.", "context_required": true, "required_concepts": [{"name": "registration status or limitation", "any_of": ["register", "registration", "not included", "not available"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-001",
+      "title": "Recent 311 count",
+      "domain": "boston_311",
+      "conversation_category": "standalone",
+      "coverage_tags": ["boston_311"],
+      "description": "Answer a clear structured count request with scope and source.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The count itself may vary, so the semantic contract protects scope and grounding.",
+      "turns": [
+        {"user": "How many 311 requests were filed in Dorchester last week?", "expected": {"behavior": "Give the count with Dorchester and last-week scope.", "required_concepts": [{"name": "311 count", "regex": "\\b\\d[\\d,]*\\b"}, {"name": "last week scope", "any_of": ["last week"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-002",
+      "title": "311 issue trend",
+      "domain": "boston_311",
+      "conversation_category": "standalone",
+      "coverage_tags": ["boston_311"],
+      "description": "Compare an issue trend using official data.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The answer should state comparison windows.",
+      "turns": [
+        {"user": "Are pothole complaints increasing in Dorchester?", "expected": {"behavior": "Compare pothole counts across clear periods and describe the direction.", "required_concepts": [{"name": "trend direction", "any_of": ["increased", "decreased", "higher", "lower", "about the same", "trend"]}, {"name": "potholes", "any_of": ["pothole"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-003",
+      "title": "Change 311 geography",
+      "domain": "boston_311",
+      "conversation_category": "refinement",
+      "coverage_tags": ["boston_311", "general_mechanics"],
+      "description": "Retain issue and time filters while changing only geography.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "A location-only follow-up should not reset the question.",
+      "turns": [
+        {"user": "How many missed trash pickups were reported in Fields Corner this month?", "expected": {"behavior": "Give the scoped official count.", "required_concepts": [{"name": "Fields Corner trash count", "any_of": ["Fields Corner", "missed trash"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "What about Codman Square?", "expected": {"behavior": "Change only the location to Codman Square.", "context_required": true, "required_concepts": [{"name": "Codman Square scope", "any_of": ["Codman Square"]}, {"name": "retained trash topic", "any_of": ["trash", "pickup"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-004",
+      "title": "Top 311 types",
+      "domain": "boston_311",
+      "conversation_category": "standalone",
+      "coverage_tags": ["boston_311"],
+      "description": "Summarize the leading 311 categories rather than raw rows.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Use official aggregate data.",
+      "turns": [
+        {"user": "What are the most common 311 issues in Dorchester this month?", "expected": {"behavior": "Rank common issue types and state the period.", "required_concepts": [{"name": "ranked issue types", "any_of": ["most common", "top", "leading"]}, {"name": "month scope", "any_of": ["this month", "month"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-005",
+      "title": "More 311 results",
+      "domain": "boston_311",
+      "conversation_category": "continuation",
+      "coverage_tags": ["boston_311", "general_mechanics"],
+      "description": "Continue a list of recent service requests without repeating it.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Use stable IDs when available.",
+      "turns": [
+        {"user": "Show me recent streetlight requests near Ashmont.", "expected": {"behavior": "List recent official streetlight requests.", "required_concepts": [{"name": "streetlight requests", "any_of": ["streetlight", "street light"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "Show me more.", "expected": {"behavior": "Return additional streetlight requests in the same scope.", "context_required": true, "continuation": true, "required_concepts": [{"name": "continued streetlight scope", "any_of": ["streetlight", "street light", "additional", "more"]}], "expected_source_categories": ["official_data"], "source_requirement": "required", "must_not_repeat_previous_answer": true, "must_not_repeat_result_ids": true}}
+      ]
+    },
+    {
+      "id": "311-006",
+      "title": "Official complaints versus resident concerns",
+      "domain": "boston_311",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["boston_311", "meetings_news_community", "general_mechanics"],
+      "description": "Distinguish official 311 volume from what residents discuss.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Community discussion must not be mislabeled as official service-request data.",
+      "turns": [
+        {"user": "What 311 issues have the highest counts?", "expected": {"behavior": "Rank issues from official 311 data.", "required_concepts": [{"name": "official counts", "any_of": ["count", "requests", "reported"]}], "expected_source_categories": ["official_data"], "forbidden_source_categories": ["community_material"], "source_requirement": "required"}},
+        {"user": "Which issues are residents most concerned about?", "expected": {"behavior": "Change source type to community evidence and distinguish it from official counts.", "context_required": true, "required_concepts": [{"name": "resident concerns", "any_of": ["residents", "community", "people said"]}, {"name": "source distinction", "any_of": ["not the same as", "different from", "community", "official"]}], "expected_source_categories": ["community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-007",
+      "title": "Correct 311 issue type",
+      "domain": "boston_311",
+      "conversation_category": "correction",
+      "coverage_tags": ["boston_311", "general_mechanics"],
+      "description": "Replace a mistaken service-request type while retaining place and time.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Correction metadata is explicitly testable.",
+      "turns": [
+        {"user": "How many pothole complaints were there near Bowdoin last month?", "expected": {"behavior": "Return the pothole count for the requested scope.", "required_concepts": [{"name": "pothole count", "any_of": ["pothole"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "Sorry, I meant missed trash pickups.", "expected": {"behavior": "Replace potholes with missed trash pickups and keep Bowdoin and last month.", "context_required": true, "correction": true, "required_concepts": [{"name": "trash correction", "any_of": ["missed trash", "trash pickup"]}], "forbidden_concepts": [{"name": "stale pothole answer", "any_of": ["pothole total"], "critical": true}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-008",
+      "title": "Pronoun after a 311 result",
+      "domain": "boston_311",
+      "conversation_category": "reference_resolution",
+      "coverage_tags": ["boston_311", "general_mechanics"],
+      "description": "Resolve 'that issue' to the previously discussed service type.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The follow-up asks for reporting guidance.",
+      "turns": [
+        {"user": "Are illegal dumping reports common near Four Corners?", "expected": {"behavior": "Describe official report frequency in the requested area.", "required_concepts": [{"name": "illegal dumping", "any_of": ["illegal dumping"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "How do I report that issue?", "expected": {"behavior": "Resolve the pronoun to illegal dumping and explain the 311 reporting route.", "context_required": true, "required_concepts": [{"name": "illegal dumping reporting", "any_of": ["illegal dumping", "311", "report"]}], "expected_source_categories": ["official_document"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "311-009",
+      "title": "No matching 311 evidence",
+      "domain": "boston_311",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["boston_311", "no_evidence_uncertainty"],
+      "description": "Handle an empty official-data result without pretending nothing happened.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "No rows is not proof of no real-world issue.",
+      "turns": [
+        {"user": "Were there rat complaints on my block yesterday?", "expected": {"behavior": "State the available result and explain limits without inventing reports.", "required_concepts": [{"name": "evidence limitation", "any_of": ["could not find", "available data", "records", "not include"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred", "acceptable_limitations": ["The resident did not provide a block or address."]}}
+      ]
+    },
+    {
+      "id": "311-010",
+      "title": "Switch from 311 to events",
+      "domain": "boston_311",
+      "conversation_category": "topic_switch",
+      "coverage_tags": ["boston_311", "events", "general_mechanics"],
+      "description": "A new event question must not inherit the active 311 issue.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Location may carry over only when stated or safely inferred.",
+      "turns": [
+        {"user": "What are the top 311 complaints in Dorchester?", "expected": {"behavior": "Summarize official 311 categories.", "required_concepts": [{"name": "311 categories", "any_of": ["311", "requests", "complaints"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "What events are happening this weekend?", "expected": {"behavior": "Switch completely to weekend events.", "topic_change": true, "required_concepts": [{"name": "weekend events", "any_of": ["event", "weekend"]}], "expected_source_categories": ["event_listing"], "forbidden_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "311-011",
+      "title": "311 data source explanation",
+      "domain": "boston_311",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["boston_311"],
+      "description": "Explain that counts are service requests, including scope limitations.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "The answer should distinguish requests from verified conditions.",
+      "turns": [
+        {"user": "Where do your 311 numbers come from?", "expected": {"behavior": "Identify official Boston 311 data and explain what a request represents.", "required_concepts": [{"name": "official 311 source", "any_of": ["Boston 311", "BOS:311", "official city data"]}, {"name": "request limitation", "any_of": ["service request", "reports", "not necessarily", "does not confirm"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-001",
+      "title": "Safety concerns by evidence type",
+      "domain": "crime_public_safety",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["crime_public_safety", "meetings_news_community", "general_mechanics"],
+      "description": "Protect the representative official-versus-resident safety sequence.",
+      "initial_context": {"location": "Dorchester"},
+      "severity": "critical",
+      "notes": "Each follow-up changes evidence type while retaining the topic.",
+      "turns": [
+        {"user": "What are the main safety concerns in Dorchester?", "expected": {"behavior": "Synthesize official records and community context with source distinctions.", "required_concepts": [{"name": "safety concerns", "any_of": ["safety", "concerns", "incidents"]}, {"name": "source distinction", "any_of": ["official", "community", "residents"]}], "expected_source_categories": ["official_data", "community_material"], "source_requirement": "required"}},
+        {"user": "Which of those come from official data?", "expected": {"behavior": "Restrict the prior concerns to those supported by official records.", "context_required": true, "required_concepts": [{"name": "official-data qualification", "any_of": ["official data", "reported incidents", "public records"]}], "expected_source_categories": ["official_data"], "forbidden_source_categories": ["community_material"], "source_requirement": "required"}},
+        {"user": "What did residents themselves say?", "expected": {"behavior": "Change to resident testimony and label it as community evidence.", "context_required": true, "required_concepts": [{"name": "resident testimony", "any_of": ["residents", "community members", "people said"]}, {"name": "not official data", "any_of": ["not official", "community", "testimony"]}], "expected_source_categories": ["community_material"], "forbidden_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-002",
+      "title": "Current safety overview",
+      "domain": "crime_public_safety",
+      "conversation_category": "standalone",
+      "coverage_tags": ["crime_public_safety"],
+      "description": "Give a cautious overview rather than a blanket safe/unsafe judgment.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Published records can lag and do not predict individual safety.",
+      "turns": [
+        {"user": "Is Dorchester safe right now?", "expected": {"behavior": "Provide a cautious evidence-based overview with freshness limits.", "required_concepts": [{"name": "cautious safety framing", "any_of": ["available records", "recent reports", "cannot guarantee", "data can lag"]}], "forbidden_concepts": [{"name": "blanket safety guarantee", "any_of": ["Dorchester is completely safe", "there is no danger"], "critical": true}], "uncertainty_required": true, "expected_source_categories": ["official_data", "community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-003",
+      "title": "Change safety geography",
+      "domain": "crime_public_safety",
+      "conversation_category": "refinement",
+      "coverage_tags": ["crime_public_safety", "general_mechanics"],
+      "description": "Retain the safety topic while moving to Codman Square.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "The final turn is a topic switch that may retain location.",
+      "turns": [
+        {"user": "Is Dorchester safe right now?", "expected": {"behavior": "Give a cautious Dorchester-wide overview.", "required_concepts": [{"name": "Dorchester safety overview", "any_of": ["Dorchester", "safety", "recent"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "What about Codman Square?", "expected": {"behavior": "Change the safety geography to Codman Square.", "context_required": true, "required_concepts": [{"name": "Codman Square safety", "any_of": ["Codman Square"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "Are there events there this weekend?", "expected": {"behavior": "Switch to events while resolving there as Codman Square.", "context_required": true, "topic_change": true, "required_concepts": [{"name": "Codman Square weekend events", "any_of": ["Codman Square", "weekend", "event"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-004",
+      "title": "Unconfirmed shooting question",
+      "domain": "crime_public_safety",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["crime_public_safety", "no_evidence_uncertainty"],
+      "description": "Avoid confirming a high-risk event when official evidence is absent.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "An active emergency should direct the resident to emergency channels.",
+      "turns": [
+        {"user": "Was there a shooting in Fields Corner last night?", "expected": {"behavior": "State what current official and reliable sources do or do not confirm, with lag caveat.", "required_concepts": [{"name": "confirmation status", "any_of": ["confirmed", "could not find", "available records", "not yet published"]}, {"name": "active emergency guidance", "any_of": ["911", "emergency"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "safety-005",
+      "title": "Crime count then community context",
+      "domain": "crime_public_safety",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["crime_public_safety", "meetings_news_community"],
+      "description": "Move from official count to community concern without conflating them.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Hybrid evidence must be clearly labeled.",
+      "turns": [
+        {"user": "How many reported robberies were there last month?", "expected": {"behavior": "Provide an official count and scope.", "required_concepts": [{"name": "robbery count", "regex": "\\b\\d[\\d,]*\\b"}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "What concerns did neighbors raise about that?", "expected": {"behavior": "Resolve that to robberies and summarize labeled community concerns.", "context_required": true, "required_concepts": [{"name": "neighbor concerns", "any_of": ["neighbors", "residents", "community"]}, {"name": "source distinction", "any_of": ["community", "not official", "separate from"]}], "expected_source_categories": ["community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-006",
+      "title": "Police activity without speculation",
+      "domain": "crime_public_safety",
+      "conversation_category": "standalone",
+      "coverage_tags": ["crime_public_safety"],
+      "description": "Report public records without guessing the cause of police activity.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Do not identify private people or infer an offense.",
+      "turns": [
+        {"user": "Why were there police cars near Ashmont last night?", "expected": {"behavior": "Provide any supported public record and state when the cause is unknown.", "required_concepts": [{"name": "evidence restraint", "any_of": ["could not confirm", "available records", "do not specify", "reported incident"]}], "forbidden_concepts": [{"name": "invented cause", "any_of": ["they were definitely responding to"], "critical": true}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "safety-007",
+      "title": "Official safety trend",
+      "domain": "crime_public_safety",
+      "conversation_category": "standalone",
+      "coverage_tags": ["crime_public_safety"],
+      "description": "Compare reported incident trends with explicit windows.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Reported incidents are not equivalent to total crime.",
+      "turns": [
+        {"user": "Have reported violent incidents gone up this year?", "expected": {"behavior": "Compare official reported incidents across defined periods.", "required_concepts": [{"name": "reported trend", "any_of": ["reported", "increased", "decreased", "higher", "lower", "trend"]}, {"name": "comparison period", "any_of": ["this year", "last year", "same period"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-008",
+      "title": "Crime record source limitations",
+      "domain": "crime_public_safety",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["crime_public_safety"],
+      "description": "Explain the source and lag of crime incident records.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "This answer protects provenance and freshness.",
+      "turns": [
+        {"user": "Where does your crime information come from?", "expected": {"behavior": "Identify official incident-report data and explain publication limits.", "required_concepts": [{"name": "official source", "any_of": ["Boston Police", "official", "incident reports"]}, {"name": "publication lag", "any_of": ["lag", "delay", "published", "incomplete"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-009",
+      "title": "Safety advice versus data",
+      "domain": "crime_public_safety",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["crime_public_safety", "general_mechanics"],
+      "description": "Answer a practical follow-up without turning aggregate data into personal guarantees.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Practical advice may be general and should be framed as such.",
+      "turns": [
+        {"user": "What recent incidents were reported near Uphams Corner?", "expected": {"behavior": "Summarize relevant official incidents with timeframe.", "required_concepts": [{"name": "Uphams Corner incidents", "any_of": ["Uphams Corner", "reported"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "So should I avoid walking there?", "expected": {"behavior": "Avoid a blanket directive; explain data limits and offer practical safety steps.", "context_required": true, "required_concepts": [{"name": "personal-risk caveat", "any_of": ["cannot determine", "does not predict", "use your judgment", "conditions can change"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "safety-010",
+      "title": "Correct the safety time window",
+      "domain": "crime_public_safety",
+      "conversation_category": "correction",
+      "coverage_tags": ["crime_public_safety", "general_mechanics"],
+      "description": "Retain offense and place while correcting the date range.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Explicit corrections are protected.",
+      "turns": [
+        {"user": "How many assaults were reported in Dorchester this week?", "expected": {"behavior": "Give the official weekly count.", "required_concepts": [{"name": "this-week assaults", "any_of": ["assault", "this week"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "I meant last month.", "expected": {"behavior": "Replace this week with last month.", "context_required": true, "correction": true, "required_concepts": [{"name": "last-month correction", "any_of": ["last month"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["official_data"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "safety-011",
+      "title": "Community claim challenged",
+      "domain": "crime_public_safety",
+      "conversation_category": "user_disagreement",
+      "coverage_tags": ["crime_public_safety", "meetings_news_community", "general_mechanics"],
+      "description": "Respond constructively when a resident says community testimony contradicts the summary.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Acknowledge the correction and preserve source distinctions.",
+      "turns": [
+        {"user": "What have residents said about speeding near schools?", "expected": {"behavior": "Summarize sourced resident concerns.", "required_concepts": [{"name": "resident speeding concerns", "any_of": ["residents", "speeding", "schools"]}], "expected_source_categories": ["community_material"], "source_requirement": "required"}},
+        {"user": "That is not what people at the meeting said. They were more worried about crossings.", "expected": {"behavior": "Acknowledge the correction, shift emphasis to crossings, and avoid defending the prior summary.", "context_required": true, "correction": true, "required_concepts": [{"name": "crossing correction", "any_of": ["crossing", "crosswalk"]}, {"name": "acknowledgement", "any_of": ["you're right", "thank you", "I should", "correction"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["meeting_transcript"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-001",
+      "title": "Budget news and approval status",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["policy_budget_zoning_development", "general_mechanics"],
+      "description": "Protect the representative budget, journalism, and official-status sequence.",
+      "initial_context": {"location": "Boston"},
+      "severity": "critical",
+      "notes": "News reporting must not determine official approval status.",
+      "turns": [
+        {"user": "Tell me about the FY2027 budget.", "expected": {"behavior": "Explain the budget proposal or enacted budget with status and civic context.", "required_concepts": [{"name": "FY2027 budget", "any_of": ["FY2027", "fiscal year 2027", "budget"]}, {"name": "status", "any_of": ["proposed", "approved", "adopted", "process"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "Has there been anything in the news about this?", "expected": {"behavior": "Retain the FY2027 budget topic and switch to journalism.", "context_required": true, "required_concepts": [{"name": "budget news", "any_of": ["news", "reported", "coverage", "article"]}], "expected_source_categories": ["local_journalism"], "forbidden_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "Was that officially approved?", "expected": {"behavior": "Return to official records and answer the approval status with dates if available.", "context_required": true, "required_concepts": [{"name": "official approval status", "any_of": ["approved", "not approved", "adopted", "official"]}], "expected_source_categories": ["official_document"], "forbidden_source_categories": ["local_journalism"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-002",
+      "title": "Development project overview",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "standalone",
+      "coverage_tags": ["policy_budget_zoning_development"],
+      "description": "Summarize a named development from official documents.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Separate proposal details from approved conditions.",
+      "turns": [
+        {"user": "What is being proposed near Columbia Road?", "expected": {"behavior": "Summarize identified development proposals and their current status.", "required_concepts": [{"name": "proposal and status", "any_of": ["proposal", "proposed", "development", "status"]}, {"name": "Columbia Road", "any_of": ["Columbia Road"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-003",
+      "title": "Proposal versus approval",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["policy_budget_zoning_development", "general_mechanics"],
+      "description": "Resolve 'it' to the active development and distinguish proposal from approval.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Never describe a proposal as approved without an official record.",
+      "turns": [
+        {"user": "Tell me about the Dorchester Avenue rezoning plan.", "expected": {"behavior": "Explain the plan and current process.", "required_concepts": [{"name": "rezoning plan", "any_of": ["rezoning", "Dorchester Avenue"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "Has it been approved?", "expected": {"behavior": "Resolve it to the rezoning plan and state official approval status.", "context_required": true, "required_concepts": [{"name": "approval status", "any_of": ["approved", "not approved", "pending", "adopted"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-004",
+      "title": "Zoning term in plain language",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "explanation_refinement",
+      "coverage_tags": ["policy_budget_zoning_development", "general_mechanics"],
+      "description": "Explain a zoning concept, then simplify it.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Resident-friendly language is the primary quality dimension.",
+      "turns": [
+        {"user": "What does a zoning variance mean?", "expected": {"behavior": "Explain the civic concept accurately.", "required_concepts": [{"name": "variance definition", "any_of": ["exception", "zoning rules", "zoning requirement"]}], "expected_source_categories": ["official_document"], "source_requirement": "preferred"}},
+        {"user": "Explain it more simply.", "expected": {"behavior": "Restate the same concept in plain language without adding unsupported facts.", "context_required": true, "required_concepts": [{"name": "plain-language exception", "any_of": ["permission", "exception", "rule"]}], "must_not_repeat_previous_answer": true}}
+      ]
+    },
+    {
+      "id": "policy-005",
+      "title": "Budget amount and purpose",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "standalone",
+      "coverage_tags": ["policy_budget_zoning_development"],
+      "description": "Answer a budget allocation question with amount, purpose, and status.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "A number without budget context is incomplete.",
+      "turns": [
+        {"user": "How much is the city proposing for street repairs?", "expected": {"behavior": "Give the documented amount, fiscal context, and proposal status.", "required_concepts": [{"name": "amount", "regex": "\\$[\\d,.]+|\\b\\d+(?:\\.\\d+)?\\s+(?:million|billion)\\b"}, {"name": "proposal status", "any_of": ["proposed", "budget", "allocated", "approved"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-006",
+      "title": "Change development geography",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "refinement",
+      "coverage_tags": ["policy_budget_zoning_development", "general_mechanics"],
+      "description": "Retain development intent while changing neighborhood.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The second turn is not a generic what-about query.",
+      "turns": [
+        {"user": "What development projects are active in Savin Hill?", "expected": {"behavior": "List active or proposed projects with status.", "required_concepts": [{"name": "Savin Hill projects", "any_of": ["Savin Hill", "project", "development"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "What about Lower Mills?", "expected": {"behavior": "Change only the geography to Lower Mills.", "context_required": true, "required_concepts": [{"name": "Lower Mills projects", "any_of": ["Lower Mills", "project", "development"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-007",
+      "title": "Resident feedback on development",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["policy_budget_zoning_development", "meetings_news_community"],
+      "description": "Switch from official development documents to resident feedback.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Resident opinion is not an approval condition unless adopted officially.",
+      "turns": [
+        {"user": "What does the official filing say about the new housing project?", "expected": {"behavior": "Summarize the official filing.", "required_concepts": [{"name": "official filing", "any_of": ["filing", "proposal", "official"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "What did residents say about it?", "expected": {"behavior": "Retain the project and summarize labeled community testimony.", "context_required": true, "required_concepts": [{"name": "resident feedback", "any_of": ["residents", "community members", "testimony"]}], "expected_source_categories": ["meeting_transcript", "community_material"], "forbidden_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-008",
+      "title": "No official decision yet",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["policy_budget_zoning_development", "no_evidence_uncertainty"],
+      "description": "State when no final decision is documented.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Absence of a decision should not become a prediction.",
+      "turns": [
+        {"user": "Did the city approve the proposed building last night?", "expected": {"behavior": "Report official decision evidence or clearly state that it is not yet available.", "required_concepts": [{"name": "decision evidence limitation", "any_of": ["official decision", "could not find", "not yet available", "pending"]}], "uncertainty_required": true, "expected_source_categories": ["official_document"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "policy-009",
+      "title": "Policy effect on residents",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["policy_budget_zoning_development"],
+      "description": "Translate a policy into likely resident implications without legal certainty.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Explain documented effect and flag uncertainty.",
+      "turns": [
+        {"user": "What does the new parking proposal change?", "expected": {"behavior": "Summarize documented changes and status.", "required_concepts": [{"name": "parking proposal changes", "any_of": ["parking", "proposal", "change"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "How would that affect someone who lives there?", "expected": {"behavior": "Resolve that to the parking proposal and explain documented or likely resident effects cautiously.", "context_required": true, "required_concepts": [{"name": "resident effect", "any_of": ["residents", "parking", "could", "would"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-010",
+      "title": "Correct policy identity",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "correction",
+      "coverage_tags": ["policy_budget_zoning_development", "general_mechanics"],
+      "description": "Replace the active policy when the user corrects its identity.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Do not blend two separate initiatives.",
+      "turns": [
+        {"user": "Tell me about the housing ordinance.", "expected": {"behavior": "Explain the best matching housing ordinance or ask a targeted clarification.", "clarification_allowed": true, "required_concepts": [{"name": "housing ordinance", "any_of": ["housing", "ordinance"]}], "expected_source_categories": ["official_document"], "source_requirement": "preferred"}},
+        {"user": "No, I meant the zoning amendment for Dorchester Avenue.", "expected": {"behavior": "Replace the active policy and explain the zoning amendment.", "context_required": true, "correction": true, "required_concepts": [{"name": "Dorchester Avenue amendment", "any_of": ["Dorchester Avenue", "zoning amendment"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "policy-011",
+      "title": "Policy news versus primary record",
+      "domain": "policy_budget_zoning_development",
+      "conversation_category": "cross_source",
+      "coverage_tags": ["policy_budget_zoning_development", "meetings_news_community"],
+      "description": "Compare journalism with official policy text and name discrepancies.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "The official record controls formal status.",
+      "turns": [
+        {"user": "What are news reports and the city saying about the rent proposal?", "expected": {"behavior": "Synthesize both source types while clearly distinguishing them.", "required_concepts": [{"name": "source comparison", "any_of": ["city", "official", "news", "reported"]}, {"name": "rent proposal", "any_of": ["rent", "proposal"]}], "expected_source_categories": ["official_document", "local_journalism"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-001",
+      "title": "Meeting concerns summary",
+      "domain": "meetings_news_community",
+      "conversation_category": "standalone",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Summarize recurring concerns from a public meeting transcript.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Attribute views to speakers rather than all residents.",
+      "turns": [
+        {"user": "What were the main concerns at the latest Fields Corner meeting?", "expected": {"behavior": "Summarize recurring meeting themes with careful attribution.", "required_concepts": [{"name": "meeting concerns", "any_of": ["meeting", "residents", "speakers", "concerns"]}], "expected_source_categories": ["meeting_transcript"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-002",
+      "title": "Meeting detail follow-up",
+      "domain": "meetings_news_community",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["meetings_news_community", "general_mechanics"],
+      "description": "Resolve 'that concern' to a previously summarized meeting theme.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The follow-up should deepen, not repeat, the summary.",
+      "turns": [
+        {"user": "What did people discuss about traffic at the meeting?", "expected": {"behavior": "Summarize the traffic discussion.", "required_concepts": [{"name": "traffic discussion", "any_of": ["traffic", "meeting", "residents", "speakers"]}], "expected_source_categories": ["meeting_transcript"], "source_requirement": "required"}},
+        {"user": "Tell me more about that concern.", "expected": {"behavior": "Expand the traffic concern using additional transcript evidence.", "context_required": true, "continuation": true, "required_concepts": [{"name": "expanded traffic concern", "any_of": ["traffic", "speeding", "crossing", "congestion"]}], "expected_source_categories": ["meeting_transcript"], "source_requirement": "required", "must_not_repeat_previous_answer": true}}
+      ]
+    },
+    {
+      "id": "community-003",
+      "title": "Newsletter updates",
+      "domain": "meetings_news_community",
+      "conversation_category": "standalone",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Summarize current neighborhood newsletter items.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "A newsletter is community material, not city policy.",
+      "turns": [
+        {"user": "What is in the latest neighborhood newsletter?", "expected": {"behavior": "Summarize the main newsletter items and identify the source.", "required_concepts": [{"name": "newsletter summary", "any_of": ["newsletter", "updates", "announcements"]}], "expected_source_categories": ["community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-004",
+      "title": "News about an earlier topic",
+      "domain": "meetings_news_community",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["meetings_news_community", "general_mechanics"],
+      "description": "Retain an active civic topic while switching to journalism.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The topic remains the project; only source type changes.",
+      "turns": [
+        {"user": "What is the plan for Morrissey Boulevard?", "expected": {"behavior": "Summarize official planning information.", "required_concepts": [{"name": "Morrissey plan", "any_of": ["Morrissey Boulevard", "plan"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "Has there been local news about it?", "expected": {"behavior": "Retain the plan topic and find relevant journalism.", "context_required": true, "required_concepts": [{"name": "local news coverage", "any_of": ["news", "reported", "article"]}], "expected_source_categories": ["local_journalism"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-005",
+      "title": "Official versus meeting testimony",
+      "domain": "meetings_news_community",
+      "conversation_category": "source_comparison",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Compare an official notice with meeting testimony without merging their authority.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "The answer should explain what each source can establish.",
+      "turns": [
+        {"user": "What does the city notice say, and what did residents say at the meeting?", "expected": {"behavior": "Summarize both and label official content versus testimony.", "required_concepts": [{"name": "official notice", "any_of": ["official notice", "city"]}, {"name": "resident testimony", "any_of": ["residents", "meeting", "testimony"]}, {"name": "distinction", "any_of": ["while", "separately", "by contrast", "not the same"]}], "expected_source_categories": ["official_document", "meeting_transcript"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-006",
+      "title": "More news without repetition",
+      "domain": "meetings_news_community",
+      "conversation_category": "continuation",
+      "coverage_tags": ["meetings_news_community", "general_mechanics"],
+      "description": "Return additional news stories without repeating the first set.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Stable article IDs are preferred.",
+      "turns": [
+        {"user": "What local news came out about Dorchester this week?", "expected": {"behavior": "List a sourced set of this-week local stories.", "required_concepts": [{"name": "this-week local news", "any_of": ["news", "this week", "Dorchester"]}], "expected_source_categories": ["local_journalism"], "source_requirement": "required"}},
+        {"user": "Any more?", "expected": {"behavior": "Continue with additional stories in the same scope.", "context_required": true, "continuation": true, "required_concepts": [{"name": "additional news", "any_of": ["more", "another", "also", "news"]}], "expected_source_categories": ["local_journalism"], "source_requirement": "required", "must_not_repeat_previous_answer": true, "must_not_repeat_result_ids": true}}
+      ]
+    },
+    {
+      "id": "community-007",
+      "title": "No community discussion then news",
+      "domain": "meetings_news_community",
+      "conversation_category": "no_evidence_source_change",
+      "coverage_tags": ["meetings_news_community", "no_evidence_uncertainty", "general_mechanics"],
+      "description": "After no meeting evidence, retain topic and change to journalism.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "No transcript evidence does not mean no one discussed it anywhere.",
+      "turns": [
+        {"user": "Did residents discuss the new bus lanes at recent meetings?", "expected": {"behavior": "Report available meeting evidence or its absence carefully.", "required_concepts": [{"name": "meeting evidence status", "any_of": ["meeting", "residents", "could not find", "available"]}], "uncertainty_required": true, "expected_source_categories": ["meeting_transcript"], "source_requirement": "preferred"}},
+        {"user": "What about local news?", "expected": {"behavior": "Retain bus lanes and switch to journalism.", "context_required": true, "required_concepts": [{"name": "bus-lane news", "any_of": ["bus lane", "news", "reported"]}], "expected_source_categories": ["local_journalism"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-008",
+      "title": "Speaker attribution restraint",
+      "domain": "meetings_news_community",
+      "conversation_category": "standalone",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Do not generalize a few transcript speakers to all Dorchester residents.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Use terms such as speakers, attendees, or some residents.",
+      "turns": [
+        {"user": "What do Dorchester residents think about the project?", "expected": {"behavior": "Summarize available views with limited attribution.", "required_concepts": [{"name": "qualified attribution", "any_of": ["some residents", "speakers", "meeting participants", "available comments"]}], "forbidden_concepts": [{"name": "universal claim", "any_of": ["all Dorchester residents", "Dorchester unanimously"], "critical": true}], "expected_source_categories": ["meeting_transcript", "community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-009",
+      "title": "Correct meeting identity",
+      "domain": "meetings_news_community",
+      "conversation_category": "correction",
+      "coverage_tags": ["meetings_news_community", "general_mechanics"],
+      "description": "Replace the active meeting when the resident corrects it.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Do not blend transcript content across meetings.",
+      "turns": [
+        {"user": "What happened at the Codman Square meeting?", "expected": {"behavior": "Summarize the best matching meeting.", "required_concepts": [{"name": "Codman Square meeting", "any_of": ["Codman Square", "meeting"]}], "expected_source_categories": ["meeting_transcript"], "source_requirement": "required"}},
+        {"user": "I meant the Fields Corner civic meeting.", "expected": {"behavior": "Replace the active meeting with the Fields Corner meeting.", "context_required": true, "correction": true, "required_concepts": [{"name": "Fields Corner correction", "any_of": ["Fields Corner", "civic meeting"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["meeting_transcript"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "community-010",
+      "title": "Community concern to official action",
+      "domain": "meetings_news_community",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Check whether a community concern led to documented official action.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Do not infer action from discussion alone.",
+      "turns": [
+        {"user": "What did residents say about street lighting?", "expected": {"behavior": "Summarize community concerns.", "required_concepts": [{"name": "lighting concern", "any_of": ["residents", "street lighting", "lights"]}], "expected_source_categories": ["community_material"], "source_requirement": "required"}},
+        {"user": "Did the city do anything about it?", "expected": {"behavior": "Retain the lighting topic and look for official action, distinguishing it from discussion.", "context_required": true, "required_concepts": [{"name": "official action status", "any_of": ["city", "official", "action", "could not find"]}], "expected_source_categories": ["official_document", "official_data"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "community-011",
+      "title": "Community summary by neighborhood",
+      "domain": "meetings_news_community",
+      "conversation_category": "refinement",
+      "coverage_tags": ["meetings_news_community"],
+      "description": "Retain source and topic while narrowing to one neighborhood.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The narrower answer should not repeat citywide material.",
+      "turns": [
+        {"user": "What community concerns came up across Dorchester this month?", "expected": {"behavior": "Synthesize recurring concerns from community sources.", "required_concepts": [{"name": "community concerns", "any_of": ["community", "residents", "concerns"]}], "expected_source_categories": ["meeting_transcript", "community_material"], "source_requirement": "required"}},
+        {"user": "Just the ones from Bowdoin-Geneva.", "expected": {"behavior": "Narrow the same community-evidence request to Bowdoin-Geneva.", "context_required": true, "required_concepts": [{"name": "Bowdoin-Geneva scope", "any_of": ["Bowdoin-Geneva", "Bowdoin Geneva"]}], "expected_source_categories": ["meeting_transcript", "community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "entity-001",
+      "title": "Eversource across source types",
+      "domain": "entities_organizations",
+      "conversation_category": "source_refinement",
+      "coverage_tags": ["entities_organizations", "meetings_news_community", "general_mechanics"],
+      "description": "Protect the representative entity definition and community-discussion sequence.",
+      "initial_context": {"location": "Dorchester"},
+      "severity": "critical",
+      "notes": "The utility definition, local mentions, and resident testimony have different sources.",
+      "turns": [
+        {"user": "What is Eversource?", "expected": {"behavior": "Explain that Eversource is an energy utility serving the region.", "required_concepts": [{"name": "utility identity", "any_of": ["utility", "energy company", "electric", "gas"]}], "expected_source_categories": ["organization"], "source_requirement": "preferred"}},
+        {"user": "Has it been discussed in Dorchester?", "expected": {"behavior": "Resolve it to Eversource and summarize documented local discussion.", "context_required": true, "required_concepts": [{"name": "Eversource local discussion", "any_of": ["Eversource", "Dorchester", "discussed", "meeting"]}], "expected_source_categories": ["meeting_transcript", "local_journalism"], "source_requirement": "required"}},
+        {"user": "What did residents say about it?", "expected": {"behavior": "Retain Eversource and report carefully attributed resident views.", "context_required": true, "required_concepts": [{"name": "resident Eversource views", "any_of": ["residents", "community members", "Eversource"]}], "expected_source_categories": ["meeting_transcript", "community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "entity-002",
+      "title": "Boston Planning Department",
+      "domain": "entities_organizations",
+      "conversation_category": "standalone",
+      "coverage_tags": ["entities_organizations"],
+      "description": "Explain a civic agency in resident-friendly language.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Avoid unexplained acronyms.",
+      "turns": [
+        {"user": "What does the Boston Planning Department do?", "expected": {"behavior": "Explain the agency's planning and development role.", "required_concepts": [{"name": "planning role", "any_of": ["planning", "development", "review", "zoning"]}], "expected_source_categories": ["organization"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "entity-003",
+      "title": "Neighborhood services contact",
+      "domain": "entities_organizations",
+      "conversation_category": "standalone",
+      "coverage_tags": ["entities_organizations"],
+      "description": "Identify the role of neighborhood services and provide grounded contact guidance.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Contact details require a source.",
+      "turns": [
+        {"user": "Who is the city neighborhood contact for Dorchester?", "expected": {"behavior": "Identify the relevant office or liaison and provide sourced contact information.", "required_concepts": [{"name": "neighborhood services contact", "any_of": ["Neighborhood Services", "liaison", "contact"]}], "expected_source_categories": ["organization", "official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "entity-004",
+      "title": "MBTA role and local impact",
+      "domain": "entities_organizations",
+      "conversation_category": "follow_up",
+      "coverage_tags": ["entities_organizations", "general_mechanics"],
+      "description": "Define the MBTA, then retain the entity for a local-impact follow-up.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "The local follow-up needs current evidence when available.",
+      "turns": [
+        {"user": "What is the MBTA responsible for?", "expected": {"behavior": "Explain the transit authority's role.", "required_concepts": [{"name": "transit authority", "any_of": ["public transit", "subway", "bus", "commuter rail"]}], "expected_source_categories": ["organization"], "source_requirement": "preferred"}},
+        {"user": "How does it affect Dorchester?", "expected": {"behavior": "Resolve it to the MBTA and describe relevant Dorchester transit service.", "context_required": true, "required_concepts": [{"name": "Dorchester transit", "any_of": ["Dorchester", "Red Line", "Ashmont", "bus"]}], "expected_source_categories": ["official_document"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "entity-005",
+      "title": "Local organization identity",
+      "domain": "entities_organizations",
+      "conversation_category": "standalone",
+      "coverage_tags": ["entities_organizations"],
+      "description": "Describe a local organization only from reliable organizational material.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "Do not infer services from the name alone.",
+      "turns": [
+        {"user": "What does the Codman Square Neighborhood Development Corporation do?", "expected": {"behavior": "Summarize documented organizational work.", "required_concepts": [{"name": "organization role", "any_of": ["community development", "housing", "economic", "neighborhood"]}], "expected_source_categories": ["organization"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "entity-006",
+      "title": "Agency acronym clarification",
+      "domain": "entities_organizations",
+      "conversation_category": "clarification",
+      "coverage_tags": ["entities_organizations", "general_mechanics"],
+      "description": "Ask a targeted clarification for an acronym with multiple civic meanings.",
+      "initial_context": {},
+      "severity": "medium",
+      "notes": "This is genuinely ambiguous without context.",
+      "turns": [
+        {"user": "What does DND do?", "expected": {"behavior": "Ask which organization or explain the likely Boston department while acknowledging ambiguity.", "clarification_allowed": true, "clarification_required": true, "required_concepts": [{"name": "targeted organization clarification", "any_of": ["which", "organization", "department", "Do you mean"]}]}}
+      ]
+    },
+    {
+      "id": "entity-007",
+      "title": "Correct organization identity",
+      "domain": "entities_organizations",
+      "conversation_category": "correction",
+      "coverage_tags": ["entities_organizations", "general_mechanics"],
+      "description": "Replace an incorrectly inferred organization.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Organization corrections must not leave mixed details.",
+      "turns": [
+        {"user": "Tell me about the Dorchester community center.", "expected": {"behavior": "Ask a targeted question or describe the best identified organization cautiously.", "clarification_allowed": true, "required_concepts": [{"name": "community center", "any_of": ["community center", "which center", "location"]}], "expected_source_categories": ["organization"], "source_requirement": "preferred"}},
+        {"user": "No, I mean the Kroc Center.", "expected": {"behavior": "Replace the active entity with the Kroc Center.", "context_required": true, "correction": true, "required_concepts": [{"name": "Kroc Center correction", "any_of": ["Kroc Center"]}], "metadata_assertions": {"conversation.correction": true}, "expected_source_categories": ["organization"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "entity-008",
+      "title": "Utility outage limitation",
+      "domain": "entities_organizations",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["entities_organizations", "no_evidence_uncertainty"],
+      "description": "Do not invent real-time utility outage information.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Offer an official checking path when real-time data is unavailable.",
+      "turns": [
+        {"user": "Is Eversource reporting an outage on my street?", "expected": {"behavior": "State whether current outage evidence is available and direct the resident to an official outage channel.", "required_concepts": [{"name": "outage evidence or official check", "any_of": ["outage", "official", "check", "could not find", "not available"]}], "uncertainty_required": true, "expected_source_categories": ["organization"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "cross-001",
+      "title": "Weekly neighborhood brief",
+      "domain": "cross_domain",
+      "conversation_category": "broad_synthesis",
+      "coverage_tags": ["cross_domain_synthesis", "events", "boston_311", "meetings_news_community"],
+      "description": "Synthesize important updates across civic domains with source labels.",
+      "initial_context": {"location": "Dorchester"},
+      "severity": "high",
+      "notes": "Prioritize rather than dump raw results.",
+      "turns": [
+        {"user": "What are the biggest things happening in Dorchester this week?", "expected": {"behavior": "Provide a concise cross-domain brief covering more than one relevant domain.", "required_concepts": [{"name": "multiple domains", "any_of": ["events", "311", "news", "meeting", "public safety"]}, {"name": "week scope", "any_of": ["this week"]}], "expected_source_categories": ["official_data", "event_listing", "local_journalism"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "cross-002",
+      "title": "Issue, official response, and resident reaction",
+      "domain": "cross_domain",
+      "conversation_category": "broad_synthesis",
+      "coverage_tags": ["cross_domain_synthesis", "boston_311", "meetings_news_community"],
+      "description": "Connect a civic issue to official data and community experience without conflation.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Each evidence layer must be labeled.",
+      "turns": [
+        {"user": "What is happening with trash complaints, and what are residents and the city saying?", "expected": {"behavior": "Synthesize 311 counts, official response, and community discussion with clear source distinctions.", "required_concepts": [{"name": "311 evidence", "any_of": ["311", "requests", "complaints"]}, {"name": "official response", "any_of": ["city", "official"]}, {"name": "resident response", "any_of": ["residents", "community"]}], "expected_source_categories": ["official_data", "official_document", "community_material"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "cross-003",
+      "title": "Event near a reported issue",
+      "domain": "cross_domain",
+      "conversation_category": "topic_switch_with_location",
+      "coverage_tags": ["cross_domain_synthesis", "events", "boston_311", "general_mechanics"],
+      "description": "Switch domains while carrying only the explicit location.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The 311 issue itself must not contaminate the event answer.",
+      "turns": [
+        {"user": "Are there recent streetlight complaints near Fields Corner?", "expected": {"behavior": "Summarize official streetlight requests in Fields Corner.", "required_concepts": [{"name": "streetlights in Fields Corner", "any_of": ["streetlight", "Fields Corner"]}], "expected_source_categories": ["official_data"], "source_requirement": "required"}},
+        {"user": "Are there any events there Saturday?", "expected": {"behavior": "Switch to Saturday events while resolving there as Fields Corner.", "context_required": true, "topic_change": true, "required_concepts": [{"name": "Fields Corner Saturday events", "any_of": ["Fields Corner", "Saturday", "event"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "cross-004",
+      "title": "Development and transit impacts",
+      "domain": "cross_domain",
+      "conversation_category": "broad_synthesis",
+      "coverage_tags": ["cross_domain_synthesis", "policy_budget_zoning_development"],
+      "description": "Synthesize planning and transit evidence around one project.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "State when traffic or transit effects are projections.",
+      "turns": [
+        {"user": "How could the Columbia Road development affect traffic and transit?", "expected": {"behavior": "Combine documented development details and transportation analysis cautiously.", "required_concepts": [{"name": "development", "any_of": ["development", "Columbia Road"]}, {"name": "transport impact", "any_of": ["traffic", "transit", "bus", "travel"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "cross-005",
+      "title": "Safety and events separated",
+      "domain": "cross_domain",
+      "conversation_category": "broad_synthesis",
+      "coverage_tags": ["cross_domain_synthesis", "crime_public_safety", "events"],
+      "description": "Answer a combined safety-and-events question as distinct sections.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "Do not imply event listings prove an area is safe.",
+      "turns": [
+        {"user": "What should I know about safety and events near Ashmont this weekend?", "expected": {"behavior": "Provide separately sourced safety context and event options.", "required_concepts": [{"name": "safety section", "any_of": ["safety", "reported incidents", "records"]}, {"name": "event section", "any_of": ["events", "weekend"]}, {"name": "scope separation", "any_of": ["separately", "events do not", "safety data"]}], "expected_source_categories": ["official_data", "event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "cross-006",
+      "title": "Return to first of two topics",
+      "domain": "cross_domain",
+      "conversation_category": "topic_return",
+      "coverage_tags": ["cross_domain_synthesis", "events", "policy_budget_zoning_development", "general_mechanics"],
+      "description": "Retain two topic frames and return explicitly to the first.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "The final answer must concern the cleanup event.",
+      "turns": [
+        {"user": "What cleanup events are happening this month?", "expected": {"behavior": "List sourced cleanup events.", "required_concepts": [{"name": "cleanup events", "any_of": ["cleanup", "event", "this month"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}},
+        {"user": "What is the latest on the zoning proposal?", "expected": {"behavior": "Switch to the zoning proposal.", "topic_change": true, "required_concepts": [{"name": "zoning proposal", "any_of": ["zoning", "proposal"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}},
+        {"user": "Going back to the cleanup, is the first event free?", "expected": {"behavior": "Return to the earlier event list, resolve the first event, and report cost or its absence.", "context_required": true, "topic_change": true, "required_concepts": [{"name": "cleanup event cost", "any_of": ["cleanup", "free", "cost", "not included", "not available"]}], "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "uncertain-001",
+      "title": "Unknown event location",
+      "domain": "uncertainty",
+      "conversation_category": "partial_evidence",
+      "coverage_tags": ["no_evidence_uncertainty", "events"],
+      "description": "Return known event title and date while naming the missing location.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Partial evidence should not become a total failure.",
+      "turns": [
+        {"user": "Where is the Crew & Cadet Street Parade?", "expected": {"behavior": "Provide confirmed event facts and state if the location is missing.", "required_concepts": [{"name": "event identity", "any_of": ["Crew & Cadet Street Parade", "Crew and Cadet Street Parade"]}, {"name": "location limitation", "any_of": ["location", "not included", "not available", "could not find"]}], "uncertainty_required": true, "expected_source_categories": ["event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "uncertain-002",
+      "title": "No article then official sources",
+      "domain": "uncertainty",
+      "conversation_category": "no_evidence_source_change",
+      "coverage_tags": ["no_evidence_uncertainty", "meetings_news_community", "general_mechanics"],
+      "description": "Retain topic after no journalism evidence and change to official sources.",
+      "initial_context": {},
+      "severity": "high",
+      "notes": "No news article does not prove no official activity.",
+      "turns": [
+        {"user": "Has local news covered the small park proposal?", "expected": {"behavior": "Report journalism evidence or its absence carefully.", "required_concepts": [{"name": "news evidence status", "any_of": ["news", "article", "could not find", "available"]}], "uncertainty_required": true, "expected_source_categories": ["local_journalism"], "source_requirement": "preferred"}},
+        {"user": "Check official sources instead.", "expected": {"behavior": "Retain the park proposal and switch to official documents.", "context_required": true, "required_concepts": [{"name": "official park proposal evidence", "any_of": ["official", "park", "proposal", "city"]}], "expected_source_categories": ["official_document"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "uncertain-003",
+      "title": "No real-time transit claim",
+      "domain": "uncertainty",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["no_evidence_uncertainty", "entities_organizations"],
+      "description": "Avoid claiming live transit status when current data is unavailable.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Offer the official live-status path.",
+      "turns": [
+        {"user": "Is the Red Line delayed right now?", "expected": {"behavior": "Give current official status if available or disclose that live status is unavailable.", "required_concepts": [{"name": "live status or limitation", "any_of": ["delay", "service alert", "right now", "not available", "official status"]}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "uncertain-004",
+      "title": "Ambiguous but answerable local digest",
+      "domain": "uncertainty",
+      "conversation_category": "answer_preferred",
+      "coverage_tags": ["no_evidence_uncertainty", "cross_domain_synthesis", "general_mechanics"],
+      "description": "Use sensible local defaults for a broad request instead of unnecessary clarification.",
+      "initial_context": {"default_location": "Dorchester", "current_date_available": true},
+      "severity": "high",
+      "notes": "A concise current digest is useful.",
+      "turns": [
+        {"user": "Anything I should know?", "expected": {"behavior": "Provide a concise Dorchester digest using current defaults.", "required_concepts": [{"name": "local current digest", "any_of": ["Dorchester", "today", "this week", "current", "updates"]}], "expected_source_categories": ["official_data", "event_listing"], "source_requirement": "required"}}
+      ]
+    },
+    {
+      "id": "uncertain-005",
+      "title": "Genuinely ambiguous place",
+      "domain": "uncertainty",
+      "conversation_category": "clarification",
+      "coverage_tags": ["no_evidence_uncertainty", "general_mechanics"],
+      "description": "Ask for location when 'near me' has no permitted location context.",
+      "initial_context": {"location_permission": false, "saved_location": null},
+      "severity": "medium",
+      "notes": "The clarification should ask only for neighborhood or landmark.",
+      "turns": [
+        {"user": "What is happening near me tonight?", "expected": {"behavior": "Ask for a neighborhood or nearby landmark.", "clarification_allowed": true, "clarification_required": true, "required_concepts": [{"name": "targeted location question", "any_of": ["neighborhood", "location", "landmark", "where"]}]}}
+      ]
+    },
+    {
+      "id": "uncertain-006",
+      "title": "Disputed factual claim",
+      "domain": "uncertainty",
+      "conversation_category": "user_disagreement",
+      "coverage_tags": ["no_evidence_uncertainty", "general_mechanics"],
+      "description": "Respond to disagreement by checking evidence and acknowledging uncertainty.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "Do not double down merely because a prior answer was generated.",
+      "turns": [
+        {"user": "Was the meeting canceled?", "expected": {"behavior": "Report documented status or evidence limits.", "required_concepts": [{"name": "meeting status", "any_of": ["canceled", "cancelled", "scheduled", "could not find", "not confirmed"]}], "uncertainty_required": true, "expected_source_categories": ["official_document"], "source_requirement": "preferred"}},
+        {"user": "I was told it is still happening.", "expected": {"behavior": "Acknowledge the conflicting information and defer to the freshest official source.", "context_required": true, "correction": true, "required_concepts": [{"name": "conflict acknowledgement", "any_of": ["conflicting", "may be", "latest", "official", "thank you"]}], "metadata_assertions": {"conversation.correction": true}, "uncertainty_required": true, "expected_source_categories": ["official_document"], "source_requirement": "preferred"}}
+      ]
+    },
+    {
+      "id": "uncertain-007",
+      "title": "No evidence does not mean never",
+      "domain": "uncertainty",
+      "conversation_category": "no_evidence",
+      "coverage_tags": ["no_evidence_uncertainty", "crime_public_safety"],
+      "description": "Avoid universal conclusions from an empty search.",
+      "initial_context": {},
+      "severity": "critical",
+      "notes": "This directly protects uncertainty and failure quality.",
+      "turns": [
+        {"user": "Has there ever been a safety complaint about this block?", "expected": {"behavior": "Describe the searched scope and state that unavailable evidence cannot prove never.", "required_concepts": [{"name": "search limitation", "any_of": ["available records", "could not find", "does not mean", "may be incomplete"]}], "forbidden_concepts": [{"name": "unsupported universal negative", "any_of": ["there has never been", "no complaint has ever"], "critical": true}], "uncertainty_required": true, "expected_source_categories": ["official_data"], "source_requirement": "preferred"}}
+      ]
+    }
+  ]
+}
