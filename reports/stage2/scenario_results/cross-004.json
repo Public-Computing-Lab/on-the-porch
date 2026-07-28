@@ -1,0 +1,50 @@
+{
+  "scenario_id": "cross-004",
+  "title": "Development and transit impacts",
+  "domain": "cross_domain",
+  "conversation_category": "broad_synthesis",
+  "turns": [
+    {
+      "scenario_id": "cross-004",
+      "turn_index": 0,
+      "user_message": "How could the Columbia Road development affect traffic and transit?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! It's great you're thinking about how the Columbia Road development might impact our daily commutes and getting around.\n\nFrom what I've gathered, discussions around developments like this often touch on traffic and transit, especially when they're near important corridors. While the specific details for the Columbia Road development aren't laid out in the notes I have, the Codman Square Neighborhood Development Corporation, which works in our area, has highlighted housing affordability near transit corridors as a local priority. This suggests that how new developments interact with public transportation and road usage is a key concern for residents and organizations like the NDC.\n\nOften, when new projects are proposed, there's a focus on how they'll affect pedestrian safety and how people can move around the neighborhood. It's common for these conversations to involve looking at how traffic patterns might change and what improvements might be needed for bus routes or other transit options to handle any increased demand.\n\nRight now, I don't have specific details on the traffic and transit plans for the Columbia Road development itself, but it's definitely a topic that community groups like the Codman Square NDC keep an eye on.\n\nRetrieved 2 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 3423.658,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "scenario_id": "greet-004",
+  "title": "Thanks after an answer",
+  "domain": "conversation",
+  "conversation_category": "small_talk",
+  "turns": [
+    {
+      "scenario_id": "greet-004",
+      "turn_index": 0,
+      "user_message": "Thanks, that helps",
+      "conversation_history_supplied": [],
+      "assistant_answer": "You're welcome! Ask anytime about events, city services, safety, or what's happening in the neighborhood.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "chitchat",
+      "mode": "chitchat",
+      "latency_ms": 26.173,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

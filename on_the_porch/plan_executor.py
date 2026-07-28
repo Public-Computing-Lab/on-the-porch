@@ -15,6 +15,7 @@ from execution_plan import (
     log_fact_bundle,
 )
 from query_plan import resolve_period
+from turn_observability import submit_with_trace
 
 from sql_chat import prepared_sql
 
@@ -200,7 +201,8 @@ def execute_plan(
     else:
         workers = min(_MAX_WORKERS, len(plan.parts))
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            fact_parts = list(executor.map(_run, plan.parts))
+            futures = [submit_with_trace(executor, _run, part) for part in plan.parts]
+            fact_parts = [future.result() for future in futures]
 
     execute_ms = int((time.perf_counter() - started) * 1000)
     bundle = FactBundle(

@@ -90,6 +90,18 @@ from unified_chatbot import (  # noqa: E402
     _try_311_advisory_response,
     _try_crime_clarification_response,
 )
+from turn_observability import (  # noqa: E402
+    activate_trace,
+    begin_turn,
+    bind_trace,
+    deactivate_trace,
+    finish_turn,
+    get_current_trace,
+    normalize_error_category,
+    record_fields as record_observability_fields,
+    stage as observability_stage,
+    start_stage as start_observability_stage,
+)
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
     build_semantic_cache_backend,
@@ -188,15 +200,21 @@ def _iter_stream_agent_with_keepalive(
     """Run stream_agent_response in a worker thread; emit None while waiting."""
     done = object()
     event_queue: queue.Queue = queue.Queue()
+    turn_trace = get_current_trace()
 
     def _worker() -> None:
-        try:
-            for item in stream_agent_response(message, conversation_history, thread_state):
-                event_queue.put(item)
-        except Exception as exc:  # noqa: BLE001
-            event_queue.put(exc)
-        finally:
-            event_queue.put(done)
+        with bind_trace(turn_trace):
+            try:
+                for item in stream_agent_response(
+                    message,
+                    conversation_history,
+                    thread_state,
+                ):
+                    event_queue.put(item)
+            except Exception as exc:  # noqa: BLE001
+                event_queue.put(exc)
+            finally:
+                event_queue.put(done)
 
     threading.Thread(target=_worker, daemon=True).start()
     while True:
@@ -704,6 +722,10 @@ def _log_agent_metrics(
     streaming: bool = False,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
+    route = mode
+    if extra:
+        route = str(extra.get("intent") or extra.get("prepared_intent") or mode)
+    record_observability_fields(mode=mode, route=route)
     if not Config.REQUEST_METRICS_ENABLED:
         return
     merged_extra = {"embed_provider": Config.EMBED_PROVIDER}
@@ -1978,6 +2000,10 @@ def _execute_agent_response(
     streaming: bool = False,
 ) -> Dict[str, Any]:
     reset_request_metrics()
+    record_observability_fields(
+        history_message_count=len(conversation_history or []),
+        conversation_id=thread_id,
+    )
     cache = retrieval_cache or create_empty_cache()
     has_history = bool(conversation_history)
     has_cache = bool(cache and cache.get("mode"))
@@ -2036,21 +2062,23 @@ def _execute_agent_response(
             return out
 
     if has_history or has_cache:
-        effective_message, force_fresh = resolve_effective_question(
-            message, conversation_history, cache,
-        )
-        if force_fresh:
-            history_check = {"needs_new_data": True, "reason": "rewritten follow-up"}
-        else:
-            history_check = _check_if_needs_new_data(
-                effective_message, conversation_history, cache,
+        with observability_stage("follow_up_gate"):
+            effective_message, force_fresh = resolve_effective_question(
+                message, conversation_history, cache,
             )
+            if force_fresh:
+                history_check = {"needs_new_data": True, "reason": "rewritten follow-up"}
+            else:
+                history_check = _check_if_needs_new_data(
+                    effective_message, conversation_history, cache,
+                )
     else:
         effective_message, force_fresh = message, False
         history_check = {"needs_new_data": True, "reason": "No history or cache"}
 
     if not history_check.get("needs_new_data", True) and (has_history or has_cache):
-        answer = _answer_from_history(message, conversation_history, cache)
+        with observability_stage("history_answer"):
+            answer = _answer_from_history(message, conversation_history, cache)
         out = {
             "answer": answer,
             "mode": "history",
@@ -2066,7 +2094,8 @@ def _execute_agent_response(
         )
         return out
 
-    plan = _route_question(effective_message)
+    with observability_stage("routing"):
+        plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
 
     pipeline_out = run_execution_pipeline(
@@ -2202,6 +2231,34 @@ def before_request_handler():
     g.clear_auth_cookies = False
     g.csrf_cookie_written = False
     g.request_id = str(uuid.uuid4())[:12]
+    path = request.path
+    transport = None
+    if request.method == "POST":
+        if path.endswith("/messages/stream"):
+            transport = "sse"
+        elif re.fullmatch(r"/conversations/[^/]+/messages", path):
+            transport = "json"
+        elif path == "/chat":
+            transport = "legacy"
+    g.turn_trace = begin_turn(
+        request_id=g.request_id,
+        conversation_id=(
+            request.view_args.get("thread_id")
+            if request.view_args and request.view_args.get("thread_id")
+            else None
+        ),
+        user_category="unknown",
+        transport=transport or "non_chat",
+        scenario_id=request.headers.get("X-Stage2-Scenario-ID"),
+    ) if transport else None
+    g.turn_trace_token = (
+        activate_trace(g.turn_trace) if g.turn_trace is not None else None
+    )
+    g.turn_auth_stage = (
+        start_observability_stage("authentication")
+        if g.turn_trace is not None
+        else None
+    )
 
     provided_api_key = request.headers.get("RethinkAI-API-Key", "")
     if provided_api_key and provided_api_key in Config.RETHINKAI_API_KEYS:
@@ -2220,6 +2277,8 @@ def before_request_handler():
             via_bearer = bool(session_token)
 
     if not session_token:
+        if g.turn_auth_stage is not None:
+            g.turn_auth_stage.finish()
         return None
 
     conn = None
@@ -2234,10 +2293,50 @@ def before_request_handler():
     finally:
         if conn:
             conn.close()
+        if g.turn_auth_stage is not None:
+            g.turn_auth_stage.finish()
+        user_category = "unknown"
+        if g.get("current_user_row"):
+            if g.current_user_row.get("role") == "admin":
+                user_category = "admin"
+            elif g.get("is_guest"):
+                user_category = "guest"
+            else:
+                user_category = "authenticated"
+        elif g.get("api_key_authenticated"):
+            user_category = "api_key"
+        record_observability_fields(user_category=user_category)
 
 
 @app.after_request
 def after_request_handler(response):
+    auth_stage = getattr(g, "turn_auth_stage", None)
+    if auth_stage is not None:
+        auth_stage.finish()
+    trace = getattr(g, "turn_trace", None)
+    token = getattr(g, "turn_trace_token", None)
+    if trace is not None:
+        user_category = "unknown"
+        if g.get("current_user_row"):
+            if g.current_user_row.get("role") == "admin":
+                user_category = "admin"
+            elif g.get("is_guest"):
+                user_category = "guest"
+            else:
+                user_category = "authenticated"
+        elif g.get("api_key_authenticated"):
+            user_category = "api_key"
+        record_observability_fields(http_status=response.status_code)
+        record_observability_fields(user_category=user_category)
+        if response.mimetype != "text/event-stream":
+            if response.status_code >= 500:
+                record_observability_fields(error_category="http_5xx")
+            elif response.status_code >= 400:
+                record_observability_fields(error_category="http_4xx")
+            finish_turn(trace, status="auto", http_status=response.status_code)
+        if token is not None:
+            deactivate_trace(token)
+            g.turn_trace_token = None
     if getattr(g, "clear_auth_cookies", False):
         _clear_auth_cookies(response)
     if not request.cookies.get(Config.AUTH_CSRF_COOKIE_NAME) and not getattr(g, "csrf_cookie_written", False):
@@ -2719,68 +2818,93 @@ def post_conversation_message(thread_id: str):
     conn = None
     try:
         conn = get_db_connection()
-        thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
+        with observability_stage("ownership_verification"):
+            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
 
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
-        thread_state = json_loads(thread.get("thread_state_json"), create_empty_cache())
+        with observability_stage("history_loading"):
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
+        with observability_stage("thread_state_loading"):
+            thread_state = json_loads(
+                thread.get("thread_state_json"),
+                create_empty_cache(),
+            )
+        record_observability_fields(
+            history_message_count=len(conversation_history),
+            conversation_id=thread_id,
+        )
         conn.close()
         conn = None
 
         # Run the expensive agent path outside any open DB transaction so
         # long LLM/sql execution does not hold row locks on the conversation.
-        agent_result = _execute_agent_response(
-            message,
-            conversation_history=conversation_history,
-            retrieval_cache=thread_state,
-            thread_id=thread_id,
-        )
+        with observability_stage("turn_execution"):
+            agent_result = _execute_agent_response(
+                message,
+                conversation_history=conversation_history,
+                retrieval_cache=thread_state,
+                thread_id=thread_id,
+            )
         answer = agent_result["answer"]
         mode = agent_result["mode"]
         sources = agent_result["sources"]
         next_cache = agent_result["retrieval_cache"]
+        record_observability_fields(
+            mode=mode,
+            source_count=len(sources or []),
+            response_char_count=len(answer or ""),
+        )
 
         conn = get_db_connection()
-        thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
+        with observability_stage("ownership_verification"):
+            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
 
-        user_message_row = _insert_message(
-            conn,
-            thread_id=thread_id,
-            user_id=g.current_user_row["id"],
-            role="user",
-            content=message,
-        )
+        with observability_stage("message_persistence"):
+            user_message_row = _insert_message(
+                conn,
+                thread_id=thread_id,
+                user_id=g.current_user_row["id"],
+                role="user",
+                content=message,
+            )
 
-        assistant_message_row = _insert_message(
-            conn,
-            thread_id=thread_id,
-            user_id=g.current_user_row["id"],
-            role="assistant",
-            content=answer,
-            response_mode=mode,
-            sources=sources,
-            model_name=os.getenv("GEMINI_MODEL", ""),
-        )
+            assistant_message_row = _insert_message(
+                conn,
+                thread_id=thread_id,
+                user_id=g.current_user_row["id"],
+                role="assistant",
+                content=answer,
+                response_mode=mode,
+                sources=sources,
+                model_name=os.getenv("GEMINI_MODEL", ""),
+            )
 
         if thread["title"] == "New conversation" and len(history_rows) == 0:
             _update_thread(conn, thread_id, title=summarize_thread_title(message))
-        _update_thread_state(conn, thread_id, next_cache)
+        with observability_stage("thread_state_persistence"):
+            _update_thread_state(conn, thread_id, next_cache)
 
-        log_id = log_interaction(
-            session_id=g.session_row["session_id"],
-            client_query=message,
-            app_response=answer,
-            mode=mode,
-            user_id=g.current_user_row["id"],
-            thread_id=thread_id,
-            message_id=assistant_message_row["id"],
-        )
-        _update_message_meta(conn, assistant_message_row["id"], {"log_id": log_id})
-        conn.commit()
+        with observability_stage("interaction_logging"):
+            log_id = log_interaction(
+                session_id=g.session_row["session_id"],
+                client_query=message,
+                app_response=answer,
+                mode=mode,
+                user_id=g.current_user_row["id"],
+                thread_id=thread_id,
+                message_id=assistant_message_row["id"],
+            )
+            _update_message_meta(
+                conn,
+                assistant_message_row["id"],
+                {"log_id": log_id},
+            )
+        with observability_stage("message_persistence"):
+            conn.commit()
 
         refreshed_thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
@@ -2796,6 +2920,9 @@ def post_conversation_message(thread_id: str):
         if conn:
             conn.rollback()
         _log_exception("Error posting conversation message", exc)
+        record_observability_fields(
+            error_category=normalize_error_category(exc),
+        )
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
     finally:
         if conn:
@@ -2838,14 +2965,27 @@ def post_conversation_message_stream(thread_id: str):
     conn = None
     try:
         conn = get_db_connection()
-        thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
+        with observability_stage("ownership_verification"):
+            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
         if not thread:
             return _json_error("Conversation not found.", 404, "conversation_not_found")
-        history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-        conversation_history = _conversation_history_from_rows(history_rows)
-        thread_state = json_loads(thread.get("thread_state_json"), create_empty_cache())
+        with observability_stage("history_loading"):
+            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
+            conversation_history = _conversation_history_from_rows(history_rows)
+        with observability_stage("thread_state_loading"):
+            thread_state = json_loads(
+                thread.get("thread_state_json"),
+                create_empty_cache(),
+            )
+        record_observability_fields(
+            history_message_count=len(conversation_history),
+            conversation_id=thread_id,
+        )
     except Exception as exc:
         _log_exception("Error preparing streamed message", exc)
+        record_observability_fields(
+            error_category=normalize_error_category(exc),
+        )
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
     finally:
         if conn:
@@ -2857,11 +2997,12 @@ def post_conversation_message_stream(thread_id: str):
     session_id = g.session_row["session_id"]
     is_first_message = len(history_rows) == 0
     existing_title = thread["title"]
+    turn_trace = get_current_trace()
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
 
-    def _generate():
+    def _generate_body():
         reset_request_metrics()
         full_answer = ""
         mode = "hybrid"
@@ -2884,24 +3025,28 @@ def post_conversation_message_stream(thread_id: str):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
                 streamed_text = ""
-                for item in _iter_stream_agent_with_keepalive(
-                    message, conversation_history, thread_state,
-                ):
-                    if item is None:
-                        yield ": keepalive\n\n"
-                        continue
-                    kind, data = item
-                    if kind == "delta":
-                        streamed_text += data
-                        yield _sse({"type": "delta", "text": data})
-                    elif kind == "final":
-                        full_answer = data.get("answer", streamed_text)
-                        mode = data.get("mode", "hybrid")
-                        result_payload = data.get("result", {})
-                        next_cache = data.get("retrieval_cache", thread_state)
+                with observability_stage("turn_execution"):
+                    for item in _iter_stream_agent_with_keepalive(
+                        message,
+                        conversation_history,
+                        thread_state,
+                    ):
+                        if item is None:
+                            yield ": keepalive\n\n"
+                            continue
+                        kind, data = item
+                        if kind == "delta":
+                            streamed_text += data
+                            yield _sse({"type": "delta", "text": data})
+                        elif kind == "final":
+                            full_answer = data.get("answer", streamed_text)
+                            mode = data.get("mode", "hybrid")
+                            result_payload = data.get("result", {})
+                            next_cache = data.get("retrieval_cache", thread_state)
                 if not full_answer and streamed_text:
                     full_answer = streamed_text
             if not full_answer and not cache_hit:
+                record_observability_fields(error_category="empty_generation")
                 yield _sse({"type": "error", "error": "Generation failed."})
                 return
         except Exception as exc:  # noqa: BLE001
@@ -2909,6 +3054,9 @@ def post_conversation_message_stream(thread_id: str):
                 _log_exception("Stream ended with partial answer after error", exc)
             else:
                 _log_exception("Error during streamed generation", exc)
+                record_observability_fields(
+                    error_category=normalize_error_category(exc),
+                )
                 yield _sse({"type": "error", "error": _stream_generation_error(exc)})
                 return
 
@@ -2921,6 +3069,7 @@ def post_conversation_message_stream(thread_id: str):
                 conversation_history=conversation_history,
             )
             if enriched != full_answer:
+                record_observability_fields(sse_fallback=True)
                 yield _sse({"type": "correction", "text": enriched})
                 full_answer = enriched
             if (
@@ -2946,29 +3095,61 @@ def post_conversation_message_stream(thread_id: str):
                 if cache_hit and cached_sources
                 else extract_sources(mode, result_payload)
             )
+            record_observability_fields(
+                mode=mode,
+                route=str(
+                    result_payload.get("intent")
+                    or result_payload.get("prepared_intent")
+                    or mode
+                ),
+                source_count=len(sources or []),
+                response_char_count=len(full_answer or ""),
+            )
             conn2 = get_db_connection()
-            thread2 = _fetch_thread(conn2, user_id, thread_id)
+            with observability_stage("ownership_verification"):
+                thread2 = _fetch_thread(conn2, user_id, thread_id)
             if not thread2:
                 yield _sse({"type": "error", "error": "Conversation not found."})
                 return
-            user_message_row = _insert_message(
-                conn2, thread_id=thread_id, user_id=user_id, role="user", content=message,
-            )
-            assistant_message_row = _insert_message(
-                conn2, thread_id=thread_id, user_id=user_id, role="assistant",
-                content=full_answer, response_mode=mode, sources=sources,
-                model_name=os.getenv("GEMINI_MODEL", ""),
-            )
+            with observability_stage("message_persistence"):
+                user_message_row = _insert_message(
+                    conn2,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    role="user",
+                    content=message,
+                )
+                assistant_message_row = _insert_message(
+                    conn2,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    role="assistant",
+                    content=full_answer,
+                    response_mode=mode,
+                    sources=sources,
+                    model_name=os.getenv("GEMINI_MODEL", ""),
+                )
             if existing_title == "New conversation" and is_first_message:
                 _update_thread(conn2, thread_id, title=summarize_thread_title(message))
-            _update_thread_state(conn2, thread_id, next_cache)
-            log_id = log_interaction(
-                session_id=session_id, client_query=message, app_response=full_answer,
-                mode=mode, user_id=user_id, thread_id=thread_id,
-                message_id=assistant_message_row["id"],
-            )
-            _update_message_meta(conn2, assistant_message_row["id"], {"log_id": log_id})
-            conn2.commit()
+            with observability_stage("thread_state_persistence"):
+                _update_thread_state(conn2, thread_id, next_cache)
+            with observability_stage("interaction_logging"):
+                log_id = log_interaction(
+                    session_id=session_id,
+                    client_query=message,
+                    app_response=full_answer,
+                    mode=mode,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    message_id=assistant_message_row["id"],
+                )
+                _update_message_meta(
+                    conn2,
+                    assistant_message_row["id"],
+                    {"log_id": log_id},
+                )
+            with observability_stage("message_persistence"):
+                conn2.commit()
             refreshed_thread = _fetch_thread(conn2, user_id, thread_id)
             assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
             yield _sse({
@@ -2994,6 +3175,7 @@ def post_conversation_message_stream(thread_id: str):
                     timeout_seconds=Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS,
                 )
                 if enriched != full_answer:
+                    record_observability_fields(sse_fallback=True)
                     yield _sse({"type": "correction", "text": enriched})
                     try:
                         cursor = conn2.cursor()
@@ -3019,12 +3201,31 @@ def post_conversation_message_stream(thread_id: str):
                 except Exception:
                     pass
             _log_exception("Error persisting streamed message", exc)
+            record_observability_fields(
+                error_category=normalize_error_category(exc),
+            )
             yield _sse({"type": "error", "error": "Failed to save message."})
         finally:
             if conn2:
                 conn2.close()
 
-    return Response(
+    def _generate():
+        with bind_trace(turn_trace):
+            try:
+                with observability_stage("streaming_duration"):
+                    yield from _generate_body()
+            except GeneratorExit:
+                record_observability_fields(sse_disconnect=True)
+                raise
+            except BaseException as exc:
+                record_observability_fields(
+                    error_category=normalize_error_category(exc),
+                )
+                raise
+            finally:
+                finish_turn(turn_trace, status="auto", http_status=200)
+
+    response = Response(
         stream_with_context(_generate()),
         mimetype="text/event-stream",
         headers={
@@ -3033,6 +3234,13 @@ def post_conversation_message_stream(thread_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+    def _finish_unconsumed_stream_trace() -> None:
+        if turn_trace is not None:
+            turn_trace.update(sse_disconnect=True)
+            finish_turn(turn_trace, status="auto", http_status=200)
+
+    response.call_on_close(_finish_unconsumed_stream_trace)
+    return response
 
 
 # =============================================================================
@@ -3061,19 +3269,33 @@ def chat():
     retrieval_cache = _session_cache.get(session_id)
 
     try:
-        agent_result = _execute_agent_response(
-            message,
-            conversation_history=conversation_history,
-            retrieval_cache=retrieval_cache,
+        record_observability_fields(
+            history_message_count=len(conversation_history or []),
         )
+        with observability_stage("turn_execution"):
+            agent_result = _execute_agent_response(
+                message,
+                conversation_history=conversation_history,
+                retrieval_cache=retrieval_cache,
+            )
         _session_cache.set(session_id, agent_result["retrieval_cache"])
-        log_id = log_interaction(
-            session_id=session_id,
-            client_query=message,
-            app_response=agent_result["answer"],
+        record_observability_fields(
             mode=agent_result["mode"],
-            user_id=g.current_user_row["id"] if g.get("current_user_row") else None,
+            source_count=len(agent_result.get("sources") or []),
+            response_char_count=len(agent_result.get("answer") or ""),
         )
+        with observability_stage("interaction_logging"):
+            log_id = log_interaction(
+                session_id=session_id,
+                client_query=message,
+                app_response=agent_result["answer"],
+                mode=agent_result["mode"],
+                user_id=(
+                    g.current_user_row["id"]
+                    if g.get("current_user_row")
+                    else None
+                ),
+            )
         return jsonify(
             {
                 "session_id": session_id,
@@ -3085,6 +3307,9 @@ def chat():
         )
     except Exception as exc:
         _log_exception("Error in /chat", exc)
+        record_observability_fields(
+            error_category=normalize_error_category(exc),
+        )
         return _json_error("Internal server error.", 500, "chat_failed")
 
 

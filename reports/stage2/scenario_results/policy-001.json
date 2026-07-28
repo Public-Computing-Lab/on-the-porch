@@ -1,0 +1,196 @@
+{
+  "scenario_id": "policy-001",
+  "title": "Budget news and approval status",
+  "domain": "policy_budget_zoning_development",
+  "conversation_category": "source_refinement",
+  "turns": [
+    {
+      "scenario_id": "policy-001",
+      "turn_index": 0,
+      "user_message": "Tell me about the FY2027 budget.",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hello there! It's great to connect with you.\n\nRegarding the FY2027 budget, the information I have access to doesn't specifically detail the budget for fiscal year 2027. My sources primarily cover community discussions and initiatives, like those from the Codman Square Neighborhood Council and the Codman Square Neighborhood Development Corporation (CSNDC). For instance, the CSNDC has been involved in advocating for local businesses, as highlighted by UMass Boston students' findings on business displacement in Codman Square. Additionally, community meeting notes from Codman Square mention discussions around housing affordability, pedestrian safety, and the responsiveness of city services for street lighting and trash collection, with residents seeking clearer timelines on open service requests.\n\nWhile these community efforts and discussions are vital for understanding local needs and priorities, they don't directly outline the city's budget allocations for future fiscal years like FY2027. For official budget information, you would typically need to refer to the City of Boston's budget office or relevant municipal documents.\n\nRetrieved 8 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.codman.org/blog/for-local-health-leaders-racial-equity-and-health-equity-go-hand-in-hand-bay-state-banner/",
+          "source": "Codman Square Health Center",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/umass-boston-students-present-findings-from-study-of-business-displacement-in-codman-square/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 65.002,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "policy-001",
+      "turn_index": 1,
+      "user_message": "Has there been anything in the news about this?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Tell me about the FY2027 budget."
+        },
+        {
+          "role": "assistant",
+          "content": "Hello there! It's great to connect with you.\n\nRegarding the FY2027 budget, the information I have access to doesn't specifically detail the budget for fiscal year 2027. My sources primarily cover community discussions and initiatives, like those from the Codman Square Neighborhood Council and the Codman Square Neighborhood Development Corporation (CSNDC). For instance, the CSNDC has been involved in advocating for local businesses, as highlighted by UMass Boston students' findings on business displacement in Codman Square. Additionally, community meeting notes from Codman Square mention discussions around housing affordability, pedestrian safety, and the responsiveness of city services for street lighting and trash collection, with residents seeking clearer timelines on open service requests.\n\nWhile these community efforts and discussions are vital for understanding local needs and priorities, they don't directly outline the city's budget allocations for future fiscal years like FY2027. For official budget information, you would typically need to refer to the City of Boston's budget office or relevant municipal documents.\n\nRetrieved 8 source passages for context."
+        }
+      ],
+      "assistant_answer": "While I don't have specific news articles about the FY2027 budget, there's been ongoing community discussion about local priorities that shape budget needs. For instance, the Codman Square Neighborhood Council has been active in advocating for food justice, as noted in their posts about the Dorchester Winter Market. The Codman Square Neighborhood Development Corporation (CSNDC) has also been working with UMass Boston students to study business displacement in the area, which helps inform their advocacy for local businesses.\n\nCommunity meeting notes from Codman Square have touched on important issues like housing affordability, pedestrian safety along Washington Street, and the responsiveness of city services for things like street lighting and trash collection. Residents have been asking for clearer timelines on open service requests, which highlights areas where city resources are being focused or where more attention might be needed. These discussions, while not directly about the FY2027 budget itself, reflect the kinds of community needs and concerns that typically influence budget allocations.\n\nRetrieved 8 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "calendar_event",
+          "path": "https://codmansquarecouncil.org/2022/03/16/https-www-dotnews-com-2022-dorchester-winter-market-highlights-return-outdoors/",
+          "source": "Codman Square Neighborhood Council",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "calendar_event",
+          "path": "https://www.csndc.com/umass-boston-students-present-findings-from-study-of-business-displacement-in-codman-square/",
+          "source": "Codman Square Neighborhood Development Corporation",
+          "type": "rag",
+          "category": "event_listing"
+        },
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1547.967,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "policy-001",
+      "turn_index": 2,
+      "user_message": "Was that officially approved?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Tell me about the FY2027 budget."
+        },
+        {
+          "role": "assistant",
+          "content": "Hello there! It's great to connect with you.\n\nRegarding the FY2027 budget, the information I have access to doesn't specifically detail the budget for fiscal year 2027. My sources primarily cover community discussions and initiatives, like those from the Codman Square Neighborhood Council and the Codman Square Neighborhood Development Corporation (CSNDC). For instance, the CSNDC has been involved in advocating for local businesses, as highlighted by UMass Boston students' findings on business displacement in Codman Square. Additionally, community meeting notes from Codman Square mention discussions around housing affordability, pedestrian safety, and the responsiveness of city services for street lighting and trash collection, with residents seeking clearer timelines on open service requests.\n\nWhile these community efforts and discussions are vital for understanding local needs and priorities, they don't directly outline the city's budget allocations for future fiscal years like FY2027. For official budget information, you would typically need to refer to the City of Boston's budget office or relevant municipal documents.\n\nRetrieved 8 source passages for context."
+        },
+        {
+          "role": "user",
+          "content": "Has there been anything in the news about this?"
+        },
+        {
+          "role": "assistant",
+          "content": "While I don't have specific news articles about the FY2027 budget, there's been ongoing community discussion about local priorities that shape budget needs. For instance, the Codman Square Neighborhood Council has been active in advocating for food justice, as noted in their posts about the Dorchester Winter Market. The Codman Square Neighborhood Development Corporation (CSNDC) has also been working with UMass Boston students to study business displacement in the area, which helps inform their advocacy for local businesses.\n\nCommunity meeting notes from Codman Square have touched on important issues like housing affordability, pedestrian safety along Washington Street, and the responsiveness of city services for things like street lighting and trash collection. Residents have been asking for clearer timelines on open service requests, which highlights areas where city resources are being focused or where more attention might be needed. These discussions, while not directly about the FY2027 budget itself, reflect the kinds of community needs and concerns that typically influence budget allocations.\n\nRetrieved 8 source passages for context."
+        }
+      ],
+      "assistant_answer": "The information I have access to doesn't indicate official approval for the community discussions mentioned. For example, the notes from the Codman Square neighborhood meeting describe a public discussion about housing affordability, pedestrian safety on Washington Street, and city services like street lighting and trash collection. While residents asked for clearer timelines on service requests, these notes specify that it was a \"Discussion only \u2014 not an adopted City ordinance, BPDA vote, or ISD ruling,\" and \"No binding vote was recorded.\" Similarly, the UMass Boston students' findings on business displacement presented to the Codman Square Neighborhood Development Corporation (CSNDC) are intended to help them advocate, rather than representing an official policy decision.",
+      "sources": [],
+      "http_status": 201,
+      "transport": "json",
+      "route": "history",
+      "mode": "history",
+      "latency_ms": 1326.268,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

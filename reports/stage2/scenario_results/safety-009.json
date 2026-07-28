@@ -1,0 +1,115 @@
+{
+  "scenario_id": "safety-009",
+  "title": "Safety advice versus data",
+  "domain": "crime_public_safety",
+  "conversation_category": "follow_up",
+  "turns": [
+    {
+      "scenario_id": "safety-009",
+      "turn_index": 0,
+      "user_message": "What recent incidents were reported near Uphams Corner?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! I'm happy to help you find out what's been happening around Uphams Corner.\n\nLooking at the information I have, there aren't any specific recent incidents reported near Uphams Corner in the provided community notes. The discussions from a Codman Square neighborhood meeting, for example, focused more on broader community concerns like housing affordability, pedestrian safety on Washington Street, and the city's responsiveness to service requests for things like street lighting and trash collection. They were looking for clearer timelines on those open service requests.\n\nThe Codman Square Neighborhood Development Corporation also provides an overview of their work, which includes housing, economic development, and community programs in the area, but doesn't detail specific incidents.\n\nSometimes, more immediate reports might be found through other channels, but based on these community-focused documents, there's no mention of particular recent incidents.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 2167.113,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "safety-009",
+      "turn_index": 1,
+      "user_message": "So should I avoid walking there?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What recent incidents were reported near Uphams Corner?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! I'm happy to help you find out what's been happening around Uphams Corner.\n\nLooking at the information I have, there aren't any specific recent incidents reported near Uphams Corner in the provided community notes. The discussions from a Codman Square neighborhood meeting, for example, focused more on broader community concerns like housing affordability, pedestrian safety on Washington Street, and the city's responsiveness to service requests for things like street lighting and trash collection. They were looking for clearer timelines on those open service requests.\n\nThe Codman Square Neighborhood Development Corporation also provides an overview of their work, which includes housing, economic development, and community programs in the area, but doesn't detail specific incidents.\n\nSometimes, more immediate reports might be found through other channels, but based on these community-focused documents, there's no mention of particular recent incidents.\n\nRetrieved 3 source passages for context."
+        }
+      ],
+      "assistant_answer": "The information I have doesn't suggest you should avoid walking in the Uphams Corner area. The community discussions I reviewed, like those from a Codman Square neighborhood meeting, focused on broader concerns such as housing affordability, pedestrian safety on Washington Street, and the city's responsiveness to service requests like street lighting and trash collection. These conversations were about improving the neighborhood and ensuring city services are meeting residents' needs, rather than indicating any specific safety concerns that would make walking there inadvisable. The Codman Square Neighborhood Development Corporation also highlights their work in housing, economic development, and community programs, all aimed at strengthening the area.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1649.918,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

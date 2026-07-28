@@ -1,0 +1,43 @@
+{
+  "scenario_id": "311-004",
+  "title": "Top 311 types",
+  "domain": "boston_311",
+  "conversation_category": "standalone",
+  "turns": [
+    {
+      "scenario_id": "311-004",
+      "turn_index": 0,
+      "user_message": "What are the most common 311 issues in Dorchester this month?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! Happy to give you the rundown on what folks in Dorchester have been reporting through 311 this month. So far in July 2026, we've seen a total of **2,593** reports come in.\n\nWhen we look at the types of issues, \"Parking Enforcement\" is the most frequent, with **343** reports. This often includes things like cars blocking driveways or parking violations. Following that, \"Litter & Debris\" has **238** reports, which can cover anything from overflowing trash cans to general street cleaning needs. \"Missed Waste Pick-up\" is also a common one, with **147** reports, so it seems like some of our trash and recycling collections have been a bit off schedule.\n\nOther categories that have seen a good number of reports include \"Improper Trash Storage\" (**73**), \"Overgrown Weeds\" (**69**), and a few tied at **67** reports each: \"Abandoned Vehicles,\" \"Illegal Dumping or Disposal,\" and \"Sidewalk Repair.\" We're also seeing reports for \"Rodent Activity\" (**64**) and \"Dead Animal General\" (**62**). These numbers give us a good picture of what's on people's minds and what needs attention around the neighborhood.",
+      "sources": [
+        {
+          "table": "service_requests_311",
+          "type": "sql",
+          "category": "official_data"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1605.881,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

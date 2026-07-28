@@ -1,0 +1,115 @@
+{
+  "scenario_id": "community-006",
+  "title": "More news without repetition",
+  "domain": "meetings_news_community",
+  "conversation_category": "continuation",
+  "turns": [
+    {
+      "scenario_id": "community-006",
+      "turn_index": 0,
+      "user_message": "What local news came out about Dorchester this week?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! It sounds like you're curious about what's been happening in Dorchester lately.\n\nThis week, there was a neighborhood meeting in Codman Square where folks were talking about some really important local issues. As the Codman Square NDC community organization shared, residents brought up concerns about housing affordability, especially near transit areas. They also discussed pedestrian safety along Washington Street and how city services are responding to requests for street lighting and trash collection. It seems like people are looking for clearer timelines on those open service requests.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1818.11,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "community-006",
+      "turn_index": 1,
+      "user_message": "Any more?",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "What local news came out about Dorchester this week?"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey there! It sounds like you're curious about what's been happening in Dorchester lately.\n\nThis week, there was a neighborhood meeting in Codman Square where folks were talking about some really important local issues. As the Codman Square NDC community organization shared, residents brought up concerns about housing affordability, especially near transit areas. They also discussed pedestrian safety along Washington Street and how city services are responding to requests for street lighting and trash collection. It seems like people are looking for clearer timelines on those open service requests.\n\nRetrieved 3 source passages for context."
+        }
+      ],
+      "assistant_answer": "This week, the Codman Square NDC shared more details about the neighborhood meeting, highlighting that residents are keen to understand the city's response to their concerns. Beyond housing affordability and pedestrian safety on Washington Street, the discussion also touched on the need for better street lighting and more consistent trash collection. The community organization noted that attendees were looking for clearer timelines from city staff regarding these ongoing service requests.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1721.809,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

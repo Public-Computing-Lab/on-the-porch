@@ -1,0 +1,50 @@
+{
+  "scenario_id": "greet-003",
+  "title": "Capability question",
+  "domain": "conversation",
+  "conversation_category": "standalone",
+  "turns": [
+    {
+      "scenario_id": "greet-003",
+      "turn_index": 0,
+      "user_message": "What can you help me with?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! I'm here to help you understand what's happening in our Dorchester community, drawing from local discussions and neighborhood organizations.\n\nFor instance, I can tell you about topics that have come up in community meetings, like the discussions at the Codman Square neighborhood meeting. People there talked about important things such as housing affordability, especially near transit areas, and how to improve pedestrian safety on Washington Street. They also brought up concerns about how quickly city services respond to requests for things like street lighting and trash collection, and they were looking for clearer timelines on those open service requests.\n\nI can also share information from community groups like the Codman Square Neighborhood Development Corporation. They focus on things like housing, economic development, and community programs right here in Codman Square. Their materials often highlight local priorities and the services they offer to residents.\n\nSo, whether you're curious about neighborhood discussions, local development efforts, or community services, I can help shed some light on it!\n\nRetrieved 2 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 10978.447,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

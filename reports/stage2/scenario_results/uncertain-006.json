@@ -1,0 +1,88 @@
+{
+  "scenario_id": "uncertain-006",
+  "title": "Disputed factual claim",
+  "domain": "uncertainty",
+  "conversation_category": "user_disagreement",
+  "turns": [
+    {
+      "scenario_id": "uncertain-006",
+      "turn_index": 0,
+      "user_message": "Was the meeting canceled?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Based on the information we have, it doesn't look like any meetings were canceled in Dorchester. The count for canceled meetings is zero.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1873.886,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    },
+    {
+      "scenario_id": "uncertain-006",
+      "turn_index": 1,
+      "user_message": "I was told it is still happening.",
+      "conversation_history_supplied": [
+        {
+          "role": "user",
+          "content": "Was the meeting canceled?"
+        },
+        {
+          "role": "assistant",
+          "content": "Based on the information we have, it doesn't look like any meetings were canceled in Dorchester. The count for canceled meetings is zero."
+        }
+      ],
+      "assistant_answer": "It sounds like you're looking for information about upcoming events! I can help with that.\n\nHere are some events happening in Dorchester that are scheduled to take place from today onwards:\n\n*   **Teen Craft & Trade Intensives** is running from July 1, 2026, to August 31, 2026.\n*   **Special Exhibition: Ros\u00e2ngela Renn\u00f3 and Histories of Memory and Migration in Brazil** is scheduled from April 4, 2026, to August 2, 2026.\n*   There are several **Boston Ballet Open Studio Day** events happening in late July and early August 2026.\n*   **Open Streets Boston** events are planned for Jamaica Plain on August 2, 2026, and Mattapan on September 12, 2026.\n*   A **Markey and Moulton Senate Debate** is scheduled for August 20, 2026.\n*   **Early Voting in the Primary** will take place from August 22, 2026, to August 28, 2026.\n*   The **Boston Water and Sewer Commission** is holding neighborhood services in Uphams Corner on August 14, 2026, and in Mattapan on August 6, 2026.\n*   **Free Summer Sports Clinics** are happening from July 6, 2026, to August 14, 2026, and **Summer Sports Centers** are available from July 6, 2026, to August 21, 2026.\n*   **Color Flows on Winter Street** is an ongoing event from June 11, 2026, to October 23, 2026.\n*   **FarmStand Fridays** will be running from June 26, 2026, to November 20, 2026.\n*   The **Boston Caribbean Carnival** is on August 29, 2026, with a **Carnival Gala** on August 7, 2026, and **Junior Carnival** on August 23, 2026.\n*   There are **Ecumenical Services** on August 16, 2026, and a **King and Queen Showcase** on August 27, 2026.\n*   A **45th Anniversary Celebration Gala** is planned for October 8, 2026.\n*   **Virtual Baby Cafe** sessions are scheduled throughout August 2026 on Wednesdays.\n*   A **Community Meeting (Hosted by Substance Recovery Services)** is happening on August 20, 2026.",
+      "sources": [
+        {
+          "path": "",
+          "source": "Community calendar",
+          "type": "event",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 3583.08,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

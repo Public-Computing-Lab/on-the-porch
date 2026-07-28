@@ -183,6 +183,16 @@ INGEST_STALE_HOURS=26
 REQUEST_METRICS_ENABLED=true
 STREAMING_ENABLED=true
 
+# Structured Stage 2 turn observability (disabled by default)
+TURN_OBSERVABILITY_ENABLED=false
+# stdout, jsonl, or none
+TURN_OBSERVABILITY_SINK=stdout
+TURN_OBSERVABILITY_SAMPLE_RATE=1.0
+# Local evaluation only: permits synthetic scenario IDs, never prompts or answers.
+TURN_OBSERVABILITY_LOG_TEXT=false
+# Used only when TURN_OBSERVABILITY_SINK=jsonl.
+TURN_OBSERVABILITY_OUTPUT_PATH=logs/turn_observability.jsonl
+
 # ============================================================================
 # MySQL database configuration
 # ============================================================================

@@ -1,0 +1,57 @@
+{
+  "scenario_id": "safety-007",
+  "title": "Official safety trend",
+  "domain": "crime_public_safety",
+  "conversation_category": "standalone",
+  "turns": [
+    {
+      "scenario_id": "safety-007",
+      "turn_index": 0,
+      "user_message": "Have reported violent incidents gone up this year?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "Hey there! It's a good question to keep an eye on what's happening in our community.\n\nLooking at the information I have, I don't see specific data that tracks whether reported violent incidents have gone up this year in Dorchester. The sources I've reviewed, like notes from a Codman Square neighborhood meeting and an overview from the Codman Square Neighborhood Development Corporation, touch on community concerns like pedestrian safety and city service responsiveness. However, they don't provide the kind of crime statistics you're asking about.\n\nRetrieved 3 source passages for context.",
+      "sources": [
+        {
+          "doc_type": "policy",
+          "path": "http://127.0.0.1:8000/Policies/boston_zoning_resident_pointer.html",
+          "source": "boston_zoning_resident_pointer",
+          "type": "rag",
+          "category": "official_document"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "meeting_transcript"
+        },
+        {
+          "doc_type": "transcript",
+          "source": "Community Transcripts",
+          "type": "rag",
+          "category": "community_material"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "rag",
+      "mode": "rag",
+      "latency_ms": 1086.756,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "scenario_id": "cross-002",
+  "title": "Issue, official response, and resident reaction",
+  "domain": "cross_domain",
+  "conversation_category": "broad_synthesis",
+  "turns": [
+    {
+      "scenario_id": "cross-002",
+      "turn_index": 0,
+      "user_message": "What is happening with trash complaints, and what are residents and the city saying?",
+      "conversation_history_supplied": [],
+      "assistant_answer": "It looks like you're asking about trash complaints, but the information I have here is actually about upcoming events in and around Dorchester. I don't have any specific data on trash complaints or what residents and the city are saying about them.\n\nHowever, I can tell you about some events happening soon! On **July 29th**, there's a Virtual Baby Cafe hosted by Codman Square Health Center from 2:00 PM to 4:00 PM. Also on the 29th, the Boston Ballet is holding an Open Studio Day, though the details mention Newton for this specific date.\n\nLooking ahead to **July 30th**, the Boston Ballet has another Open Studio Day, this time in Brookline. Later that evening, from 6:00 PM to 7:30 PM, you can join the Climate Justice Alliance Party at Oasis on Ballou Farm for music, dancing, and a seedling giveaway.\n\nThen, on **August 2nd**, there's an Open Streets Boston event happening in Jamaica Plain from 10:30 AM to 3:00 PM, with streets closed to traffic from 9:00 AM to 4:00 PM.",
+      "sources": [
+        {
+          "table": "events_materialized",
+          "type": "sql",
+          "category": "event_listing"
+        }
+      ],
+      "http_status": 201,
+      "transport": "json",
+      "route": "sql",
+      "mode": "sql",
+      "latency_ms": 1658.18,
+      "error": null,
+      "timeout": false,
+      "environment": {
+        "captured_at": "2026-07-28T20:55:26.669287+00:00",
+        "database_host_category": "local",
+        "database_name": "sentiment_demo",
+        "database_user_category": "demo",
+        "vector_provider": "chroma",
+        "vector_path_category": "local_repository_snapshot",
+        "embedding_provider": "local",
+        "api_url": "http://127.0.0.1:8890",
+        "frontend_port": null,
+        "external_model_calls": true,
+        "write_scope": "local demo users, conversations, messages, and interaction logs",
+        "production_access": false
+      }
+    }
+  ]
+}
