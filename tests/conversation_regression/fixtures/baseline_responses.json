@@ -1,0 +1,140 @@
+{
+  "fixture_version": 1,
+  "description": "Synthetic responses for deterministic harness replay. These are not production snapshots.",
+  "responses": {
+    "greet-001": [
+      {
+        "answer": "Hi! I can help with Dorchester events, city services, and other local questions.",
+        "sources": [],
+        "result_ids": [],
+        "metadata": {}
+      }
+    ],
+    "event-001": [
+      {
+        "answer": "Here are several Dorchester events happening this week, with dates and locations from the current listings.",
+        "sources": [{"category": "event_listing", "id": "event-source-1"}],
+        "result_ids": ["event-101", "event-102"],
+        "metadata": {}
+      },
+      {
+        "answer": "For next week, the listings include a neighborhood cleanup and a library workshop.",
+        "sources": [{"category": "event_listing", "id": "event-source-1"}],
+        "result_ids": ["event-201", "event-202"],
+        "metadata": {"conversation": {"correction": true}}
+      },
+      {
+        "answer": "There are also more options next week, including a youth arts session and a public garden tour.",
+        "sources": [{"category": "event_listing", "id": "event-source-1"}],
+        "result_ids": ["event-203", "event-204"],
+        "metadata": {}
+      },
+      {
+        "answer": "The second event is the public garden tour. Its details include the date, start time, and meeting location.",
+        "sources": [{"category": "event_listing", "id": "event-source-1"}],
+        "result_ids": ["event-204"],
+        "metadata": {}
+      }
+    ],
+    "311-006": [
+      {
+        "answer": "Official Boston 311 request counts show that street conditions and sanitation have the highest reported totals in this period.",
+        "sources": [{"category": "official_data", "id": "311-aggregate"}],
+        "result_ids": ["311-summary-1"],
+        "metadata": {}
+      },
+      {
+        "answer": "In community material, residents most often raised trash pickup, street lighting, and speeding. Those concerns reflect community discussion and are different from official request counts.",
+        "sources": [{"category": "community_material", "id": "community-summary-1"}],
+        "result_ids": ["community-1"],
+        "metadata": {}
+      }
+    ],
+    "safety-001": [
+      {
+        "answer": "The available safety picture combines reported incidents in official records with concerns residents raised about speeding, lighting, and violence. The two source types describe different parts of the issue.",
+        "sources": [
+          {"category": "official_data", "id": "crime-summary"},
+          {"category": "community_material", "id": "meeting-summary"}
+        ],
+        "result_ids": ["crime-summary", "meeting-summary"],
+        "metadata": {}
+      },
+      {
+        "answer": "The concerns supported by official data are those reflected in reported incidents and other public records.",
+        "sources": [{"category": "official_data", "id": "crime-summary"}],
+        "result_ids": ["crime-summary"],
+        "metadata": {}
+      },
+      {
+        "answer": "Residents and community members spoke about lighting, speeding, and fear of violence. This is community testimony, not official incident data.",
+        "sources": [{"category": "community_material", "id": "meeting-summary"}],
+        "result_ids": ["meeting-summary"],
+        "metadata": {}
+      }
+    ],
+    "policy-001": [
+      {
+        "answer": "The FY2027 budget is the city's fiscal year 2027 spending plan. The official document identifies which items are proposed and where they stand in the approval process.",
+        "sources": [{"category": "official_document", "id": "fy2027-budget"}],
+        "result_ids": ["fy2027-budget"],
+        "metadata": {}
+      },
+      {
+        "answer": "Local news coverage has reported on the FY2027 budget debate, including reactions to the proposed priorities.",
+        "sources": [{"category": "local_journalism", "id": "budget-news-1"}],
+        "result_ids": ["budget-news-1"],
+        "metadata": {}
+      },
+      {
+        "answer": "The official record says the budget was approved after the council vote and final action; that status comes from the city document rather than the news coverage.",
+        "sources": [{"category": "official_document", "id": "fy2027-budget"}],
+        "result_ids": ["fy2027-budget"],
+        "metadata": {}
+      }
+    ],
+    "entity-001": [
+      {
+        "answer": "Eversource is an energy utility that provides electric and gas service in parts of the region.",
+        "sources": [{"category": "organization", "id": "eversource-about"}],
+        "result_ids": ["eversource-about"],
+        "metadata": {}
+      },
+      {
+        "answer": "Eversource has been discussed in Dorchester meeting records and local reporting, particularly around utility projects and service concerns.",
+        "sources": [
+          {"category": "meeting_transcript", "id": "meeting-eversource"},
+          {"category": "local_journalism", "id": "news-eversource"}
+        ],
+        "result_ids": ["meeting-eversource", "news-eversource"],
+        "metadata": {}
+      },
+      {
+        "answer": "Residents discussing Eversource raised concerns about project impacts, communication, and service. These views come from community members rather than an official city finding.",
+        "sources": [
+          {"category": "meeting_transcript", "id": "meeting-eversource"},
+          {"category": "community_material", "id": "community-eversource"}
+        ],
+        "result_ids": ["meeting-eversource", "community-eversource"],
+        "metadata": {}
+      }
+    ],
+    "uncertain-001": [
+      {
+        "answer": "The Crew & Cadet Street Parade is listed with a date, but its location is not included in the available event listing.",
+        "sources": [{"category": "event_listing", "id": "parade-listing"}],
+        "result_ids": ["parade-listing"],
+        "metadata": {}
+      }
+    ],
+    "uncertain-005": [
+      {
+        "answer": "Which neighborhood or nearby landmark should I use for tonight's events?",
+        "sources": [],
+        "result_ids": [],
+        "metadata": {},
+        "clarification": true
+      }
+    ]
+  }
+}

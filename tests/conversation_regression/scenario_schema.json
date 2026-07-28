@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ontheporch.example/schemas/conversation-regression-v1.json",
+  "title": "On the Porch conversation regression corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "baseline",
+    "evaluation_dimensions",
+    "expected_defaults",
+    "scenarios"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branch", "commit", "created", "purpose"],
+      "properties": {
+        "branch": {"const": "main"},
+        "commit": {
+          "const": "840ec54dd1265b4f2f42cc18b66b54cbf2a99b89"
+        },
+        "created": {"type": "string", "format": "date"},
+        "purpose": {"type": "string", "minLength": 1}
+      }
+    },
+    "evaluation_dimensions": {
+      "type": "array",
+      "minItems": 18,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "expected_defaults": {
+      "$ref": "#/$defs/expectationDefaults"
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 80,
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "sourceCategory": {
+      "enum": [
+        "official_data",
+        "official_document",
+        "event_listing",
+        "local_journalism",
+        "meeting_transcript",
+        "community_material",
+        "organization",
+        "none"
+      ]
+    },
+    "concept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "any_of": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "regex": {"type": "string", "minLength": 1},
+        "critical": {"type": "boolean"},
+        "dimension": {"type": "string", "minLength": 1}
+      },
+      "anyOf": [
+        {"required": ["any_of"]},
+        {"required": ["regex"]}
+      ]
+    },
+    "expectationDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context_required",
+        "correction",
+        "continuation",
+        "topic_change",
+        "clarification_allowed",
+        "clarification_required",
+        "required_concepts",
+        "forbidden_concepts",
+        "expected_source_categories",
+        "forbidden_source_categories",
+        "source_requirement",
+        "acceptable_limitations"
+      ],
+      "properties": {
+        "context_required": {"type": "boolean"},
+        "correction": {"type": "boolean"},
+        "continuation": {"type": "boolean"},
+        "topic_change": {"type": "boolean"},
+        "clarification_allowed": {"type": "boolean"},
+        "clarification_required": {"type": "boolean"},
+        "required_concepts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/concept"}
+        },
+        "forbidden_concepts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/concept"}
+        },
+        "expected_source_categories": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceCategory"}
+        },
+        "forbidden_source_categories": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceCategory"}
+        },
+        "source_requirement": {
+          "enum": ["none", "preferred", "required"]
+        },
+        "acceptable_limitations": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "expectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["behavior"],
+      "properties": {
+        "behavior": {"type": "string", "minLength": 1},
+        "context_required": {"type": "boolean"},
+        "correction": {"type": "boolean"},
+        "continuation": {"type": "boolean"},
+        "topic_change": {"type": "boolean"},
+        "clarification_allowed": {"type": "boolean"},
+        "clarification_required": {"type": "boolean"},
+        "required_concepts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/concept"}
+        },
+        "forbidden_concepts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/concept"}
+        },
+        "expected_source_categories": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceCategory"}
+        },
+        "forbidden_source_categories": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceCategory"}
+        },
+        "source_requirement": {
+          "enum": ["none", "preferred", "required"]
+        },
+        "acceptable_limitations": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "metadata_assertions": {
+          "type": "object"
+        },
+        "uncertainty_required": {"type": "boolean"},
+        "must_not_repeat_previous_answer": {"type": "boolean"},
+        "must_not_repeat_result_ids": {"type": "boolean"}
+      }
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user", "expected"],
+      "properties": {
+        "user": {"type": "string", "minLength": 1},
+        "expected": {"$ref": "#/$defs/expectation"}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "domain",
+        "conversation_category",
+        "coverage_tags",
+        "description",
+        "initial_context",
+        "turns",
+        "severity",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{2,63}$"
+        },
+        "title": {"type": "string", "minLength": 1},
+        "domain": {"type": "string", "minLength": 1},
+        "conversation_category": {"type": "string", "minLength": 1},
+        "coverage_tags": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "description": {"type": "string", "minLength": 1},
+        "initial_context": {"type": "object"},
+        "turns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/turn"}
+        },
+        "severity": {
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "notes": {"type": "string"}
+      }
+    }
+  }
+}
