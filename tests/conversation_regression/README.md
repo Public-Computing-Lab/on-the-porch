@@ -23,7 +23,10 @@ database, mutate a vector index, use credentials, or call an external model.
 - `run_regression.py` provides validation, fixture, captured-report, and opt-in
   loopback API modes.
 - `test_harness.py` tests the test system itself.
+- `test_stage2_5_calibration.py` validates calibration, triage, tiers, and gates.
 - `fixtures/baseline_responses.json` contains synthetic examples for offline replay.
+- `quality_gate.yaml` defines the three scenario tiers and future release gate.
+- `stage2_5_decisions.json` records evidence-based failure classifications.
 - `reports/` ignores generated reports except for its `.gitignore`.
 
 ## Runner modes
@@ -48,6 +51,30 @@ python3 tests/conversation_regression/run_regression.py report \
   --responses /path/to/responses.json \
   --output-dir /tmp/on-the-porch-regression
 ```
+
+Use the calibrated profile or one scenario tier:
+
+```bash
+python3 tests/conversation_regression/run_regression.py fixture \
+  --calibrated --tier 1 \
+  --output-dir /tmp/on-the-porch-regression
+```
+
+Apply the future release gate to a complete captured-response file:
+
+```bash
+python3 tests/conversation_regression/run_regression.py report \
+  --responses /path/to/complete-responses.json \
+  --calibrated --quality-gate \
+  --compare-baseline reports/stage2_5/calibrated_baseline.json \
+  --engineer-review /path/to/candidate-engineer-review.json \
+  --compare-engineer-review reports/stage2_5/engineer_review_by_codex.json \
+  --output-dir /tmp/on-the-porch-regression
+```
+
+Inspect only the explicitly recorded Tier 1 known defects with
+`--known-defects`. Tier 2 live execution is advisory until the controlled
+fixtures in `docs/CONVERSATIONAL_FIXTURE_REQUIREMENTS.md` exist.
 
 The optional API mode accepts loopback URLs only and requires an explicit opt-in
 plus caller-supplied local credentials:

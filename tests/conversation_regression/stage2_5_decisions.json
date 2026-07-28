@@ -1,0 +1,645 @@
+{
+  "schema_version": 1,
+  "baseline_report": "reports/stage2/conversational_baseline.json",
+  "decisions": {
+    "greet-002": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": ["NONDETERMINISTIC_ACCEPTABLE_VARIATION"],
+      "confidence": "high",
+      "relevant_data_existed": "not_applicable",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "\"Good to see you\" is a concise, natural morning greeting, but the phrase list recognized only morning, hello, or hi."
+    },
+    "event-001": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE", "TEST_HARNESS_DEFECT", "REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The week correction was understood, but continuation did not retrieve another page and the ordinal reference resolved to an answer that contained no second event."
+    },
+    "event-002": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT", "TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The assistant retained the family-event topic but mapped Saturday to July 30, 2026, which was not a Saturday; correction metadata was also unavailable to the capture."
+    },
+    "event-003": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The prior list contained a second event and its time, but the follow-up lost that identity and exposed event_by_name."
+    },
+    "event-004": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The assistant recognized Fields Corner as a location refinement but reused Ashmont results instead of performing the required fresh lookup."
+    },
+    "event-006": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE", "REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "Retrieval substituted an unrelated business expo for the named resource fair, so the accessibility follow-up stayed coherent with the wrong event."
+    },
+    "event-007": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT", "ENVIRONMENT_MISMATCH"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The named parade was present in the event product surface, but the turn bypassed exact structured event resolution and retrieved unrelated documents."
+    },
+    "event-008": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT", "TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The July 13 record and the explicit parade correction were not resolved to the known event; correction metadata was not exposed in the captured response."
+    },
+    "event-009": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The library filter was ignored and the source follow-up described a generic list without resident-verifiable attribution."
+    },
+    "event-010": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": "not_applicable",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The relative reference \"then\" had no date anchor, yet the assistant returned an arbitrary event list instead of asking a targeted date question."
+    },
+    "event-011": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "After a 311 topic switch, \"back to the event\" did not restore the earlier selected event and was treated as a literal event title."
+    },
+    "event-013": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": ["DATA_FRESHNESS_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "\"I did not find exact information\" is an acceptable limitation for an unnamed event, but the evaluator did not recognize that wording."
+    },
+    "event-014": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "medium",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The registration limitation was reasonable, but retrieval lost the selected workshop and attached unrelated community and policy material."
+    },
+    "311-001": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The query asked for last week, but the answer reported a 14-day count."
+    },
+    "311-003": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The Codman Square geography refinement abandoned the 311 topic and returned unrelated community development material."
+    },
+    "311-004": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The answer ranked issue types using \"most frequent,\" an acceptable synonym omitted from the concept matcher."
+    },
+    "311-005": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "\"Show me more\" abandoned the streetlight result set and returned unrelated meeting themes."
+    },
+    "311-006": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": ["NONDETERMINISTIC_ACCEPTABLE_VARIATION"],
+      "confidence": "medium",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The first answer contained official counts and the second used community discussion; the phrase-only official-count check was stricter than the observable behavior."
+    },
+    "311-007": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT", "TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The issue-type correction was understood, but the Bowdoin geography was lost and replaced with all Dorchester; capture metadata could not verify the correction flag."
+    },
+    "311-008": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The pronoun resolved to illegal dumping, but the assistant did not actually explain the 311 reporting channel or steps."
+    },
+    "311-009": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["SCENARIO_SPECIFICATION_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": "partial",
+      "evaluator_logic_correct": true,
+      "note": "Without a block location, a Dorchester-wide zero cannot support a claim about the resident's block; the answer omitted that limitation."
+    },
+    "safety-001": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE", "DATA_COVERAGE_FAILURE"],
+      "confidence": "medium",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": "partial",
+      "evaluator_logic_correct": "partial",
+      "note": "The source-type conversation was mostly coherent, but the initial answer never retrieved an official-data baseline; some later source assertions incorrectly required official data after the assistant explicitly said none supported the prior claims."
+    },
+    "safety-002": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A current safety judgment was synthesized from a small community corpus without an official-data baseline or a sufficiently explicit data-freshness limitation."
+    },
+    "safety-003": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The Codman Square refinement became an organization overview, and the subsequent event request returned events outside the requested neighborhood."
+    },
+    "safety-004": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["DATA_FRESHNESS_FAILURE", "UNSUPPORTED_CAPABILITY"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The answer relied on community sources to discuss a possible recent shooting and omitted clear emergency guidance and official-data lag."
+    },
+    "safety-005": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT", "REAL_GROUNDING_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The robbery count path failed and leaked crime_monthly_count; the follow-up then attached unrelated neighborhood concerns to robberies."
+    },
+    "safety-006": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": ["DATA_FRESHNESS_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "\"I did not find exact information\" appropriately avoided inventing a cause, but the evaluator's limitation phrases did not recognize it."
+    },
+    "safety-007": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["ENVIRONMENT_MISMATCH"],
+      "confidence": "medium",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A structured official trend question was answered from unrelated community documents rather than the available civic-data path."
+    },
+    "safety-008": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The source explanation described community meetings but did not accurately explain the official crime-data source or its publication lag."
+    },
+    "safety-009": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "Unrelated Codman Square material was used for Uphams Corner, followed by personal-safety advice that was not supported by incident data."
+    },
+    "safety-010": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The time correction ran, but the answer changed from assaults to a malformed offense breakdown with missing counts; correction metadata was unobservable."
+    },
+    "safety-011": {
+      "primary": "TEST_HARNESS_DEFECT",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The assistant explicitly acknowledged and adopted the resident's crossings correction; the critical failure came from unavailable correction metadata and a narrow acknowledgement phrase list."
+    },
+    "policy-001": {
+      "primary": "DATA_FRESHNESS_FAILURE",
+      "secondary": ["DATA_COVERAGE_FAILURE", "REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The local corpus contained no FY2027 budget, current journalism, or approval record, and retrieval filled the gap with unrelated Codman Square material."
+    },
+    "policy-002": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The Columbia Road query retrieved Four Corners projects and meeting material that did not answer the requested location."
+    },
+    "policy-003": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "No Dorchester Avenue rezoning record was present, so the assistant could only provide cautious but unrelated background."
+    },
+    "policy-005": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A budget proposal question was misinterpreted as a 311 issue count and leaked 311_issue_count."
+    },
+    "policy-006": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The local corpus had no Savin Hill or Lower Mills development inventory; unrelated Codman Square evidence was returned."
+    },
+    "policy-007": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["REAL_GROUNDING_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The official filing was absent, so the follow-up resident discussion could not be tied to a specific project."
+    },
+    "policy-008": {
+      "primary": "SCENARIO_SPECIFICATION_DEFECT",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": false,
+      "evaluator_logic_correct": true,
+      "note": "\"The proposed building\" has no identifying context in this standalone scenario; the assistant should clarify, but the scenario instead assumes a resolvable project."
+    },
+    "policy-009": {
+      "primary": "SCENARIO_SPECIFICATION_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": false,
+      "evaluator_logic_correct": true,
+      "note": "\"The new parking proposal\" is not identified, so neither the policy nor its resident impact is deterministically measurable."
+    },
+    "policy-010": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The correction to Dorchester Avenue was understood, but no specific amendment was available; the capture also omitted correction metadata."
+    },
+    "policy-011": {
+      "primary": "ENVIRONMENT_MISMATCH",
+      "secondary": ["DATA_COVERAGE_FAILURE", "DATA_FRESHNESS_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The scenario requires both current journalism and a primary city record, neither of which exists in the demo source inventory."
+    },
+    "community-001": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A meeting-summary request was routed to a 311 aggregation and presented illegal dumping as the meeting's main concern."
+    },
+    "community-002": {
+      "primary": "TEST_HARNESS_DEFECT",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The follow-up accurately expanded the prior traffic concern, but the history response did not repeat source objects and the evaluator treated that as two critical content failures."
+    },
+    "community-004": {
+      "primary": "DATA_FRESHNESS_FAILURE",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The demo corpus contained no current Morrissey Boulevard plan or relevant local journalism; unrelated older Codman Square news was returned."
+    },
+    "community-005": {
+      "primary": "SCENARIO_SPECIFICATION_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": false,
+      "evaluator_logic_correct": true,
+      "note": "Neither \"the city notice\" nor \"the meeting\" is identified, so the expected cross-source comparison has no stable referent."
+    },
+    "community-006": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["DATA_FRESHNESS_FAILURE", "REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "\"Any more?\" repeated and expanded the same meeting themes rather than continuing to additional news items."
+    },
+    "community-007": {
+      "primary": "DATA_FRESHNESS_FAILURE",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The demo corpus had no recent bus-lane meeting material or related local news, and only stale unrelated news was available."
+    },
+    "community-008": {
+      "primary": "SCENARIO_SPECIFICATION_DEFECT",
+      "secondary": ["REAL_GROUNDING_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": false,
+      "evaluator_logic_correct": true,
+      "note": "\"The project\" is unidentified in a standalone scenario; the answer also generalized a small Codman Square sample to residents broadly."
+    },
+    "community-009": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT", "TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "A civic-meeting request was interpreted as health-center events, and the explicit Fields Corner correction did not recover."
+    },
+    "community-010": {
+      "primary": "REAL_RETRIEVAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The resident-testimony turn was misrouted to structured data, and the official-action follow-up returned the meeting concern again without city action."
+    },
+    "entity-001": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["ENVIRONMENT_MISMATCH"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The demo corpus has no Eversource organization or discussion material, so all three turns stayed coherent but substantively empty."
+    },
+    "entity-002": {
+      "primary": "NONDETERMINISTIC_ACCEPTABLE_VARIATION",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The answer accurately explains the planning department; failure came only from a preferred source-category mismatch."
+    },
+    "entity-003": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["ENVIRONMENT_MISMATCH", "DATA_FRESHNESS_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A community development corporation was presented instead of the current city neighborhood liaison."
+    },
+    "entity-004": {
+      "primary": "NONDETERMINISTIC_ACCEPTABLE_VARIATION",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE", "DATA_COVERAGE_FAILURE"],
+      "confidence": "medium",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The MBTA role was accurately explained and the follow-up remained on transit; failures were noncritical preferred-category checks."
+    },
+    "entity-005": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The answer correctly describes CSNDC from its public overview, but the source adapter labeled it official_document instead of organization."
+    },
+    "entity-006": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["SCENARIO_SPECIFICATION_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "not_applicable",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "DND is ambiguous in Boston civic contexts, but the assistant confidently expanded it to the wrong organization instead of clarifying."
+    },
+    "entity-007": {
+      "primary": "DATA_COVERAGE_FAILURE",
+      "secondary": ["TEST_HARNESS_DEFECT", "REAL_GROUNDING_DEFECT"],
+      "confidence": "medium",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": "partial",
+      "note": "The Kroc Center correction was understood, but the answer was unsupported by the retrieved sources and correction metadata was unavailable."
+    },
+    "entity-008": {
+      "primary": "UNSUPPORTED_CAPABILITY",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT", "REAL_GROUNDING_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": "partial",
+      "evaluator_logic_correct": true,
+      "note": "Street-level live utility outage lookup is not supported; the response should have said so without leaking 311_issue_recent."
+    },
+    "cross-001": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "A broad neighborhood brief collapsed to events only and omitted other civic domains."
+    },
+    "cross-002": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_STRUCTURED_DATA_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The trash-complaint question was routed to event listings and openly acknowledged that mismatch."
+    },
+    "cross-004": {
+      "primary": "ENVIRONMENT_MISMATCH",
+      "secondary": ["DATA_COVERAGE_FAILURE"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The requested Columbia Road project and transit-impact evidence are absent from the demo source inventory."
+    },
+    "cross-005": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The combined safety-and-events request returned only events and did not separate the two evidence scopes."
+    },
+    "cross-006": {
+      "primary": "EVALUATOR_FALSE_POSITIVE",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The raw-SQL regex matched ordinary prose beginning with \"Real Estate Update\" and later containing \"from\"; separately, the return-to-cleanup answer remains a known qualitative defect."
+    },
+    "uncertain-001": {
+      "primary": "REAL_STRUCTURED_DATA_DEFECT",
+      "secondary": ["REAL_RETRIEVAL_DEFECT", "ENVIRONMENT_MISMATCH"],
+      "confidence": "high",
+      "relevant_data_existed": true,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The parade record existed in the event surface, but the query used unrelated RAG evidence and failed to return the known partial event fields."
+    },
+    "uncertain-002": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["DATA_COVERAGE_FAILURE", "REAL_RETRIEVAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "The official-source follow-up mislabeled community organizations as official and returned unrelated material."
+    },
+    "uncertain-003": {
+      "primary": "UNSUPPORTED_CAPABILITY",
+      "secondary": ["REAL_CONVERSATIONAL_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": false,
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "Real-time MBTA status is unavailable, and the failure response leaked the unrelated events_list identifier."
+    },
+    "uncertain-004": {
+      "primary": "NONDETERMINISTIC_ACCEPTABLE_VARIATION",
+      "secondary": ["EVALUATOR_FALSE_POSITIVE"],
+      "confidence": "high",
+      "relevant_data_existed": "partial",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": false,
+      "note": "The answer supplied a reasonable neighborhood digest; the deterministic check required specific current-scope words and source categories despite multiple valid answer structures."
+    },
+    "uncertain-005": {
+      "primary": "REAL_CONVERSATIONAL_DEFECT",
+      "secondary": [],
+      "confidence": "high",
+      "relevant_data_existed": "not_applicable",
+      "scenario_expectations_correct": true,
+      "evaluator_logic_correct": true,
+      "note": "With no location permission or saved place, \"near me\" required a targeted location clarification, but the assistant returned arbitrary Dorchester events."
+    },
+    "uncertain-006": {
+      "primary": "SCENARIO_SPECIFICATION_DEFECT",
+      "secondary": ["REAL_GROUNDING_DEFECT", "TEST_HARNESS_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": false,
+      "evaluator_logic_correct": "partial",
+      "note": "The meeting is never identified, making cancellation status unmeasurable; the assistant nevertheless overclaimed zero cancellations and ignored the resident's conflicting report."
+    },
+    "uncertain-007": {
+      "primary": "REAL_GROUNDING_DEFECT",
+      "secondary": ["SCENARIO_SPECIFICATION_DEFECT"],
+      "confidence": "high",
+      "relevant_data_existed": "unknown",
+      "scenario_expectations_correct": "partial",
+      "evaluator_logic_correct": true,
+      "note": "No block location was provided, and a zero result cannot establish that a complaint has never existed."
+    }
+  }
+}

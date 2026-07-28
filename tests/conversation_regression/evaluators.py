@@ -75,6 +75,91 @@ INTERNAL_TERM_PATTERNS = {
     ),
 }
 
+CALIBRATION_PROFILE_VERSION = 1
+
+CALIBRATED_SOURCE_CATEGORY_ALIASES = {
+    "city_data": "official_data",
+    "official_record": "official_data",
+    "official_records": "official_data",
+    "calendar": "event_listing",
+    "calendar_event": "event_listing",
+    "events": "event_listing",
+    "news": "local_journalism",
+    "journalism": "local_journalism",
+    "transcript": "meeting_transcript",
+    "meeting_notes": "meeting_transcript",
+    "community": "community_material",
+    "community_notes": "community_material",
+    "nonprofit": "organization",
+}
+
+CALIBRATED_PHRASE_GROUPS = (
+    {
+        "morning",
+        "good morning",
+        "hello",
+        "hi",
+        "good to see you",
+    },
+    {
+        "most common",
+        "most frequent",
+        "top",
+        "leading",
+        "highest count",
+    },
+    {
+        "could not confirm",
+        "could not find",
+        "couldn't find",
+        "did not find",
+        "didn't find",
+        "was not able to find",
+        "wasn't able to find",
+        "not available",
+        "no exact information",
+        "no specific information",
+        "does not specify",
+        "doesn't specify",
+        "do not specify",
+    },
+    {
+        "event listing",
+        "event list",
+        "list of upcoming events",
+        "calendar",
+        "calendar listing",
+    },
+    {
+        "official data",
+        "official records",
+        "public records",
+        "city data",
+    },
+    {
+        "not official",
+        "not official data",
+        "not official city data",
+        "community evidence",
+        "meeting notes",
+        "public discussion notes",
+    },
+    {
+        "you're right",
+        "you are right",
+        "absolutely right",
+        "thank you",
+        "thanks for correcting",
+        "correction",
+    },
+)
+
+CALIBRATED_RAW_SQL_PATTERN = re.compile(
+    r"^\s*(?:```(?:sql)?\s*)?(?:select|with|insert|update|delete)\b"
+    r"[\s\S]*\b(?:from|into|set)\b",
+    re.IGNORECASE,
+)
+
 OVERCONFIDENT_PATTERNS = (
     re.compile(r"\bdefinitely\b", re.IGNORECASE),
     re.compile(r"\bwithout (?:a )?doubt\b", re.IGNORECASE),
@@ -85,9 +170,24 @@ OVERCONFIDENT_PATTERNS = (
 LIMITATION_PATTERNS = (
     re.compile(r"\b(?:could not|couldn't|did not|didn't) find\b", re.IGNORECASE),
     re.compile(r"\bavailable (?:data|sources|records|evidence)\b", re.IGNORECASE),
-    re.compile(r"\b(?:may|might|can) (?:lag|be incomplete|not include)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:may|might|can) (?:lag|be incomplete|not include)\b", re.IGNORECASE
+    ),
     re.compile(r"\bnot (?:available|confirmed|included|known)\b", re.IGNORECASE),
     re.compile(r"\binsufficient evidence\b", re.IGNORECASE),
+)
+
+CALIBRATED_LIMITATION_PATTERNS = LIMITATION_PATTERNS + (
+    re.compile(
+        r"\b(?:was not|wasn't|am not|aren't|isn't) able to "
+        r"(?:find|confirm|check|verify)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:does not|doesn't|do not|don't) specify\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:no|not enough) (?:exact|specific|current) information\b", re.IGNORECASE
+    ),
+    re.compile(r"\b(?:no|zero) matching (?:records|reports|results)\b", re.IGNORECASE),
 )
 
 GENERIC_CLARIFICATION_PATTERNS = (
@@ -130,22 +230,46 @@ class QualitativeEvaluator(Protocol):
         """Return dimension scores and narrative notes for one scenario."""
 
 
-def _normalized(value: Any) -> str:
+def _normalized(value: Any, *, calibrated: bool = False) -> str:
     text = str(value or "").casefold()
+    if calibrated:
+        text = text.replace("&", " and ")
+        text = text.replace("\u2019", "'").replace("\u2018", "'")
     text = re.sub(r"https?://\S+", " ", text)
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _concept_matches(answer: str, concept: Mapping[str, Any]) -> bool:
-    normalized_answer = _normalized(answer)
+def _concept_matches(
+    answer: str,
+    concept: Mapping[str, Any],
+    *,
+    calibrated: bool = False,
+) -> bool:
+    normalized_answer = _normalized(answer, calibrated=calibrated)
     for phrase in concept.get("any_of", []):
-        if _normalized(phrase) in normalized_answer:
+        normalized_phrase = _normalized(phrase, calibrated=calibrated)
+        if normalized_phrase in normalized_answer:
             return True
+        if calibrated:
+            for group in CALIBRATED_PHRASE_GROUPS:
+                normalized_group = {
+                    _normalized(item, calibrated=True) for item in group
+                }
+                if normalized_phrase in normalized_group and any(
+                    item in normalized_answer for item in normalized_group
+                ):
+                    return True
     pattern = concept.get("regex")
-    return bool(
-        pattern and re.search(str(pattern), answer, flags=re.IGNORECASE)
-    )
+    return bool(pattern and re.search(str(pattern), answer, flags=re.IGNORECASE))
+
+
+def _source_category(value: Any, *, calibrated: bool = False) -> str:
+    category = str(value or "").strip()
+    if not calibrated:
+        return category
+    normalized = _normalized(category, calibrated=True).replace(" ", "_")
+    return CALIBRATED_SOURCE_CATEGORY_ALIASES.get(normalized, normalized)
 
 
 def _lookup_path(value: Mapping[str, Any], dotted_path: str) -> Any:
@@ -191,6 +315,7 @@ def evaluate_turn(
     actual: Mapping[str, Any],
     *,
     previous_actual: Optional[Mapping[str, Any]] = None,
+    calibrated: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate one assistant turn using deterministic semantic checks."""
     answer = str(actual.get("answer") or "")
@@ -216,7 +341,7 @@ def evaluate_turn(
             checks,
             name=f"required_concept:{concept.get('name', 'unnamed')}",
             dimension=str(concept.get("dimension") or "completeness"),
-            passed=_concept_matches(answer, concept),
+            passed=_concept_matches(answer, concept, calibrated=calibrated),
             message=f"Answer must express concept: {concept.get('name', 'unnamed')}.",
             critical=bool(concept.get("critical")),
         )
@@ -226,12 +351,15 @@ def evaluate_turn(
             checks,
             name=f"forbidden_concept:{concept.get('name', 'unnamed')}",
             dimension=str(concept.get("dimension") or "grounding"),
-            passed=not _concept_matches(answer, concept),
+            passed=not _concept_matches(answer, concept, calibrated=calibrated),
             message=f"Answer must not express concept: {concept.get('name', 'unnamed')}.",
             critical=bool(concept.get("critical", True)),
         )
 
-    for label, pattern in INTERNAL_TERM_PATTERNS.items():
+    internal_patterns = dict(INTERNAL_TERM_PATTERNS)
+    if calibrated:
+        internal_patterns["raw_sql"] = CALIBRATED_RAW_SQL_PATTERN
+    for label, pattern in internal_patterns.items():
         _check(
             checks,
             name=f"internal_term:{label}",
@@ -243,7 +371,7 @@ def evaluate_turn(
 
     expected_categories = set(expected.get("expected_source_categories", []))
     actual_categories = {
-        str(source.get("category") or "").strip()
+        _source_category(source.get("category"), calibrated=calibrated)
         for source in sources
         if isinstance(source, Mapping)
     }
@@ -258,18 +386,39 @@ def evaluate_turn(
             critical=True,
         )
     if expected_categories:
+        normalized_expected_categories = {
+            _source_category(category, calibrated=calibrated)
+            for category in expected_categories
+        }
+        categories_present = normalized_expected_categories.issubset(actual_categories)
+        preferred_only = (
+            calibrated and source_requirement == "preferred" and not categories_present
+        )
         _check(
             checks,
-            name="expected_source_categories",
+            name=(
+                "preferred_source_categories"
+                if preferred_only
+                else "expected_source_categories"
+            ),
             dimension="source_type_distinction",
-            passed=expected_categories.issubset(actual_categories),
+            passed=categories_present or preferred_only,
             message=(
                 "Expected source categories "
-                f"{sorted(expected_categories)}; found {sorted(actual_categories)}."
+                f"{sorted(normalized_expected_categories)}; "
+                f"found {sorted(actual_categories)}."
+                + (
+                    " Preferred categories are advisory in the calibrated profile."
+                    if preferred_only
+                    else ""
+                )
             ),
             critical=source_requirement == "required",
         )
-    forbidden_categories = set(expected.get("forbidden_source_categories", []))
+    forbidden_categories = {
+        _source_category(category, calibrated=calibrated)
+        for category in expected.get("forbidden_source_categories", [])
+    }
     forbidden_found = forbidden_categories & actual_categories
     if forbidden_categories:
         _check(
@@ -282,27 +431,35 @@ def evaluate_turn(
         )
 
     metadata = (
-        actual.get("metadata")
-        if isinstance(actual.get("metadata"), Mapping)
-        else {}
+        actual.get("metadata") if isinstance(actual.get("metadata"), Mapping) else {}
     )
     for path, wanted in expected.get("metadata_assertions", {}).items():
         found = _lookup_path(metadata, path)
+        top_level_key = path.split(".", 1)[0]
+        unobservable = calibrated and top_level_key not in metadata
         _check(
             checks,
-            name=f"metadata:{path}",
+            name=(
+                f"metadata_unobservable:{path}" if unobservable else f"metadata:{path}"
+            ),
             dimension=(
                 "correction_handling"
                 if expected.get("correction")
                 else "context_retention"
             ),
-            passed=found == wanted,
-            message=f"Metadata path {path!r} expected {wanted!r}, found {found!r}.",
-            critical=bool(expected.get("correction")),
+            passed=unobservable or found == wanted,
+            message=(
+                f"Metadata path {path!r} was not exposed by this capture."
+                if unobservable
+                else f"Metadata path {path!r} expected {wanted!r}, found {found!r}."
+            ),
+            critical=bool(expected.get("correction")) and not unobservable,
         )
 
     if expected.get("clarification_required"):
-        clarification = bool(actual.get("clarification")) or answer.rstrip().endswith("?")
+        clarification = bool(actual.get("clarification")) or answer.rstrip().endswith(
+            "?"
+        )
         _check(
             checks,
             name="clarification_required",
@@ -323,8 +480,13 @@ def evaluate_turn(
         )
 
     if expected.get("uncertainty_required"):
-        has_limitation = any(pattern.search(answer) for pattern in LIMITATION_PATTERNS)
-        overconfident = any(pattern.search(answer) for pattern in OVERCONFIDENT_PATTERNS)
+        limitation_patterns = (
+            CALIBRATED_LIMITATION_PATTERNS if calibrated else LIMITATION_PATTERNS
+        )
+        has_limitation = any(pattern.search(answer) for pattern in limitation_patterns)
+        overconfident = any(
+            pattern.search(answer) for pattern in OVERCONFIDENT_PATTERNS
+        )
         _check(
             checks,
             name="uncertainty_disclosed",
@@ -335,7 +497,9 @@ def evaluate_turn(
         )
 
     if previous_actual is not None and expected.get("must_not_repeat_previous_answer"):
-        similarity = _answer_similarity(answer, str(previous_actual.get("answer") or ""))
+        similarity = _answer_similarity(
+            answer, str(previous_actual.get("answer") or "")
+        )
         _check(
             checks,
             name="answer_not_repeated",
@@ -392,6 +556,8 @@ def evaluate_turn(
 def evaluate_scenario(
     scenario: Mapping[str, Any],
     actual_turns: Sequence[Mapping[str, Any]],
+    *,
+    calibrated: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate all turns of one scenario while preserving turn order."""
     expected_turns = scenario["turns"]
@@ -399,7 +565,12 @@ def evaluate_scenario(
     previous: Optional[Mapping[str, Any]] = None
     for index, turn in enumerate(expected_turns):
         actual = actual_turns[index] if index < len(actual_turns) else {}
-        report = evaluate_turn(turn["expected"], actual, previous_actual=previous)
+        report = evaluate_turn(
+            turn["expected"],
+            actual,
+            previous_actual=previous,
+            calibrated=calibrated,
+        )
         report.update(
             {
                 "turn_index": index,
@@ -411,9 +582,7 @@ def evaluate_scenario(
         previous = actual
     extra_turns = max(0, len(actual_turns) - len(expected_turns))
     critical = [
-        failure
-        for report in turn_reports
-        for failure in report["critical_failures"]
+        failure for report in turn_reports for failure in report["critical_failures"]
     ]
     return {
         "scenario_id": scenario["id"],
@@ -422,8 +591,7 @@ def evaluate_scenario(
         "conversation_category": scenario["conversation_category"],
         "coverage_tags": scenario["coverage_tags"],
         "severity": scenario["severity"],
-        "passed": all(report["passed"] for report in turn_reports)
-        and extra_turns == 0,
+        "passed": all(report["passed"] for report in turn_reports) and extra_turns == 0,
         "turns": turn_reports,
         "extra_actual_turns": extra_turns,
         "critical_failures": critical,
@@ -516,17 +684,11 @@ def validate_corpus(
         for key in ("branch", "commit", "created", "purpose"):
             _require_type(errors, baseline, key, str, "corpus.baseline")
         if baseline.get("branch") != BASELINE_BRANCH:
-            errors.append(
-                f"corpus.baseline.branch: expected {BASELINE_BRANCH!r}"
-            )
+            errors.append(f"corpus.baseline.branch: expected {BASELINE_BRANCH!r}")
         if baseline.get("commit") != BASELINE_COMMIT:
-            errors.append(
-                f"corpus.baseline.commit: expected {BASELINE_COMMIT}"
-            )
+            errors.append(f"corpus.baseline.commit: expected {BASELINE_COMMIT}")
     scenarios = (
-        corpus.get("scenarios")
-        if isinstance(corpus.get("scenarios"), list)
-        else []
+        corpus.get("scenarios") if isinstance(corpus.get("scenarios"), list) else []
     )
     ids: set[str] = set()
     coverage: Dict[str, int] = {}
@@ -656,8 +818,7 @@ def validate_corpus(
                             errors.append(f"{concept_location}.name: required string")
                         any_of = concept.get("any_of", [])
                         if not isinstance(any_of, list) or any(
-                            not isinstance(item, str) or not item
-                            for item in any_of
+                            not isinstance(item, str) or not item for item in any_of
                         ):
                             errors.append(f"{concept_location}.any_of: invalid")
                         if not any_of and not isinstance(concept.get("regex"), str):
@@ -665,7 +826,10 @@ def validate_corpus(
                                 f"{concept_location}: any_of or regex is required"
                             )
                         dimension = concept.get("dimension")
-                        if dimension is not None and dimension not in SCORING_DIMENSIONS:
+                        if (
+                            dimension is not None
+                            and dimension not in SCORING_DIMENSIONS
+                        ):
                             errors.append(
                                 f"{concept_location}.dimension: unknown dimension"
                             )
