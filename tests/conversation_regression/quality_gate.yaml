@@ -1,0 +1,442 @@
+{
+  "schema_version": 1,
+  "name": "On the Porch calibrated conversational quality gate",
+  "baseline_commit": "840ec54dd1265b4f2f42cc18b66b54cbf2a99b89",
+  "baseline_dev_commit": "6e57d3ae9e528602eba0e260ef2c42e3c5d5d81d",
+  "calibration_profile_version": 1,
+  "tiers": {
+    "tier1": [
+      "greet-001",
+      "greet-002",
+      "greet-003",
+      "greet-004",
+      "greet-005",
+      "event-001",
+      "event-002",
+      "event-003",
+      "event-004",
+      "event-008",
+      "event-010",
+      "event-011",
+      "311-003",
+      "311-005",
+      "311-007",
+      "311-008",
+      "311-010",
+      "safety-003",
+      "safety-010",
+      "safety-011",
+      "policy-010",
+      "community-002",
+      "community-006",
+      "community-009",
+      "entity-006",
+      "entity-007",
+      "cross-003",
+      "cross-006",
+      "uncertain-005"
+    ],
+    "tier2": [
+      "event-005",
+      "event-006",
+      "event-007",
+      "event-009",
+      "event-012",
+      "event-013",
+      "event-014",
+      "311-001",
+      "311-002",
+      "311-004",
+      "311-006",
+      "311-009",
+      "311-011",
+      "safety-004",
+      "safety-005",
+      "safety-006",
+      "safety-007",
+      "safety-008",
+      "policy-002",
+      "policy-003",
+      "policy-005",
+      "policy-006",
+      "policy-007",
+      "policy-008",
+      "community-003",
+      "entity-002",
+      "entity-003",
+      "entity-005",
+      "entity-008",
+      "uncertain-001",
+      "uncertain-003",
+      "uncertain-007"
+    ],
+    "tier3": [
+      "safety-001",
+      "safety-002",
+      "safety-009",
+      "policy-001",
+      "policy-004",
+      "policy-009",
+      "policy-011",
+      "community-001",
+      "community-004",
+      "community-005",
+      "community-007",
+      "community-008",
+      "community-010",
+      "community-011",
+      "entity-001",
+      "entity-004",
+      "cross-001",
+      "cross-002",
+      "cross-004",
+      "cross-005",
+      "uncertain-002",
+      "uncertain-004",
+      "uncertain-006"
+    ]
+  },
+  "tier1_dispositions": {
+    "hard_gate_passing_baseline": [
+      "greet-001",
+      "greet-002",
+      "greet-003",
+      "greet-004",
+      "greet-005",
+      "311-010",
+      "safety-011",
+      "policy-010",
+      "cross-003"
+    ],
+    "known_baseline_defect": [
+      "event-010",
+      "community-006",
+      "entity-006",
+      "cross-006",
+      "uncertain-005"
+    ],
+    "blocked_by_fixture_or_environment": [
+      "event-001",
+      "event-002",
+      "event-003",
+      "event-004",
+      "event-008",
+      "event-011",
+      "311-003",
+      "311-005",
+      "311-007",
+      "311-008",
+      "safety-003",
+      "safety-010",
+      "community-002",
+      "community-009",
+      "entity-007"
+    ]
+  },
+  "critical_failure_definitions": [
+    "empty_answer",
+    "lost_explicit_correction",
+    "lost_required_context",
+    "wrong_active_topic",
+    "unsupported_material_civic_claim",
+    "community_evidence_presented_as_official",
+    "internal_implementation_leakage",
+    "repeated_result_set",
+    "contradiction_with_immediately_prior_answer",
+    "unsafe_no_evidence_claim"
+  ],
+  "known_defects": {
+    "event-010": "An unanchored relative date receives arbitrary events instead of a targeted date clarification.",
+    "community-006": "A continuation request repeats the same news and meeting material.",
+    "entity-006": "The ambiguous acronym DND is expanded confidently instead of clarified.",
+    "cross-006": "The return to the earlier cleanup topic does not resolve the prior event result.",
+    "uncertain-005": "A near-me request without location permission is answered instead of clarified."
+  },
+  "blocked_scenarios": {
+    "event-001": "Requires a stable paginated event result set and IDs.",
+    "event-002": "Requires a calendar fixture with known weekday/date mapping.",
+    "event-003": "Requires a stable ordered event result set.",
+    "event-004": "Requires controlled Ashmont and Fields Corner event records.",
+    "event-008": "Requires the July 13 parade fixture and correction state.",
+    "event-011": "Requires stable selected-event state across a 311 topic switch.",
+    "311-003": "Requires controlled geography-specific 311 counts.",
+    "311-005": "Requires a paginated 311 result set with stable IDs.",
+    "311-007": "Requires controlled issue and geography counts.",
+    "311-008": "Requires a controlled 311 result plus reporting guidance.",
+    "safety-003": "Requires controlled official safety and neighborhood event data.",
+    "safety-010": "Requires controlled assault counts for two time windows.",
+    "community-002": "The current capture does not associate prior-turn sources with a history-only continuation.",
+    "community-009": "Requires named meeting fixtures for both identities.",
+    "entity-007": "Requires an authoritative Kroc Center organization fixture."
+  },
+  "tier2_requirements": {
+    "event-005": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "frozen_clock_and_event_window",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "event-006": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "frozen_clock_and_accessibility_fields",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "event-007": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "named_event_snapshot",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "event-009": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "named_event_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "event-012": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "frozen_clock_and_event_window",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "event-013": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "event_status_snapshot",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "event-014": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "registration_snapshot",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-001": {
+      "fixture_datasets": ["boston_311"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "frozen_311_cutoff",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-002": {
+      "fixture_datasets": ["boston_311"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "two_frozen_comparison_windows",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-004": {
+      "fixture_datasets": ["boston_311"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "frozen_311_cutoff",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-006": {
+      "fixture_datasets": ["boston_311", "community_notes"],
+      "expected_source_categories": ["official_data", "community_material"],
+      "freshness_dependency": "aligned_311_and_community_windows",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-009": {
+      "fixture_datasets": ["boston_311"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "explicit_negative_control",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "311-011": {
+      "fixture_datasets": ["boston_311"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "versioned_source_metadata",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "safety-004": {
+      "fixture_datasets": ["crime", "public_safety", "local_news"],
+      "expected_source_categories": ["official_data", "official_document", "local_journalism"],
+      "freshness_dependency": "frozen_publication_cutoff",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "safety-005": {
+      "fixture_datasets": ["crime", "meeting_transcripts"],
+      "expected_source_categories": ["official_data", "meeting_transcript"],
+      "freshness_dependency": "aligned_official_and_meeting_windows",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "safety-006": {
+      "fixture_datasets": ["crime", "public_safety"],
+      "expected_source_categories": ["official_data", "official_document"],
+      "freshness_dependency": "frozen_publication_cutoff",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "safety-007": {
+      "fixture_datasets": ["crime"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "two_frozen_comparison_windows",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "safety-008": {
+      "fixture_datasets": ["crime"],
+      "expected_source_categories": ["official_data"],
+      "freshness_dependency": "versioned_source_metadata",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "policy-002": {
+      "fixture_datasets": ["policy", "local_news"],
+      "expected_source_categories": ["official_document", "local_journalism"],
+      "freshness_dependency": "development_project_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "policy-003": {
+      "fixture_datasets": ["policy"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "versioned_proposal_and_approval_status",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "policy-005": {
+      "fixture_datasets": ["budget"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "frozen_fiscal_year",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "policy-006": {
+      "fixture_datasets": ["policy"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "development_project_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "policy-007": {
+      "fixture_datasets": ["policy", "meeting_transcripts", "community_notes"],
+      "expected_source_categories": ["official_document", "meeting_transcript", "community_material"],
+      "freshness_dependency": "aligned_project_and_feedback_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "policy-008": {
+      "fixture_datasets": ["policy"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "versioned_decision_status",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "community-003": {
+      "fixture_datasets": ["newsletters"],
+      "expected_source_categories": ["community_material"],
+      "freshness_dependency": "frozen_newsletter_window",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "entity-002": {
+      "fixture_datasets": ["organizations"],
+      "expected_source_categories": ["organization", "official_document"],
+      "freshness_dependency": "versioned_organization_directory",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "entity-003": {
+      "fixture_datasets": ["organizations"],
+      "expected_source_categories": ["organization"],
+      "freshness_dependency": "verified_contact_snapshot",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "entity-005": {
+      "fixture_datasets": ["organizations"],
+      "expected_source_categories": ["organization"],
+      "freshness_dependency": "versioned_organization_directory",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "entity-008": {
+      "fixture_datasets": ["utilities"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "frozen_outage_notice_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "uncertain-001": {
+      "fixture_datasets": ["events"],
+      "expected_source_categories": ["event_listing"],
+      "freshness_dependency": "named_event_snapshot_with_missing_location",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    },
+    "uncertain-003": {
+      "fixture_datasets": ["utilities"],
+      "expected_source_categories": ["official_document"],
+      "freshness_dependency": "static_transit_notice_snapshot",
+      "exact_values_fixture_bound": false,
+      "live_execution_advisory_only": true
+    },
+    "uncertain-007": {
+      "fixture_datasets": ["crime", "public_safety"],
+      "expected_source_categories": ["official_data", "official_document"],
+      "freshness_dependency": "explicit_negative_control_with_publication_lag",
+      "exact_values_fixture_bound": true,
+      "live_execution_advisory_only": true
+    }
+  },
+  "require_engineer_review_comparison": true,
+  "material_decline": {
+    "engineer_review_dimension_drop": 1.0,
+    "engineer_review_average_drop": 0.25,
+    "domain_average_drop": 0.25,
+    "source_relevance_average_drop": 0.25,
+    "naturalness_average_drop": 0.25,
+    "resident_friendly_language_average_drop": 0.25,
+    "unnecessary_clarification_increase": 0,
+    "new_critical_failures": 0
+  },
+  "domain_score_thresholds": {
+    "conversation": 3.0,
+    "events": 2.25,
+    "boston_311": 2.5,
+    "crime_public_safety": 2.25,
+    "policy_budget_zoning_development": 2.0,
+    "meetings_news_community": 2.25,
+    "entities_organizations": 2.25,
+    "cross_domain": 2.0,
+    "uncertainty": 2.25
+  },
+  "comparison_behavior": {
+    "hard_gate": "Every hard-gate scenario must pass the calibrated deterministic evaluator.",
+    "known_defect": "A known defect may remain, but it may not gain a new failed critical check, a new failed deterministic check, or a material engineer-review decline.",
+    "blocked": "Blocked scenarios are reported but do not gate until their named controlled fixture is available.",
+    "tier2": "Run as a hard gate only against the controlled fixture inventory; live or stale-data execution is advisory.",
+    "tier3": "Apply deterministic safety checks and compare structured review trends; phrase-only pass rates are advisory."
+  },
+  "required_reports": [
+    "reports/stage2_5/failure_triage.json",
+    "reports/stage2_5/calibrated_baseline.json",
+    "reports/stage2_5/engineer_review_by_codex.json"
+  ],
+  "merge_blockers": [
+    "any new critical failure",
+    "any hard-gate baseline scenario changing from pass to fail",
+    "any new wrong-topic answer",
+    "any new internal implementation leakage",
+    "loss of an explicit correction or context-retention behavior",
+    "regression in official versus community source distinction",
+    "worsening of a known baseline defect",
+    "material decline beyond configured tolerances"
+  ]
+}

@@ -16,6 +16,10 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SCENARIOS = HERE / "scenarios.yaml"
 DEFAULT_FIXTURES = HERE / "fixtures" / "baseline_responses.json"
 DEFAULT_REPORTS = HERE / "reports"
+DEFAULT_QUALITY_GATE = HERE / "quality_gate.yaml"
+DEFAULT_CALIBRATED_BASELINE = (
+    HERE.parents[1] / "reports" / "stage2_5" / "calibrated_baseline.json"
+)
 
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
@@ -45,6 +49,8 @@ def _load_responses(path: Path) -> Dict[str, List[Dict[str, Any]]]:
 def _evaluate_response_map(
     corpus: Mapping[str, Any],
     responses: Mapping[str, List[Dict[str, Any]]],
+    *,
+    calibrated: bool = False,
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     reports: List[Dict[str, Any]] = []
     skipped: List[Dict[str, str]] = []
@@ -58,8 +64,95 @@ def _evaluate_response_map(
                 }
             )
             continue
-        reports.append(evaluate_scenario(scenario, responses[scenario_id]))
+        reports.append(
+            evaluate_scenario(
+                scenario,
+                responses[scenario_id],
+                calibrated=calibrated,
+            )
+        )
     return reports, skipped
+
+
+def _add_quality_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="Use the versioned Stage 2.5 evaluator calibration profile.",
+    )
+    parser.add_argument(
+        "--tier",
+        choices=("1", "2", "3"),
+        help="Evaluate only the scenarios assigned to this quality tier.",
+    )
+    parser.add_argument(
+        "--quality-gate",
+        action="store_true",
+        help="Apply the calibrated future-release gate to a complete run.",
+    )
+    parser.add_argument(
+        "--quality-gate-config",
+        type=Path,
+        default=DEFAULT_QUALITY_GATE,
+    )
+    parser.add_argument(
+        "--compare-baseline",
+        type=Path,
+        help="Compare gate behavior with a committed evaluator report.",
+    )
+    parser.add_argument(
+        "--engineer-review",
+        type=Path,
+        help="Structured candidate ENGINEER_REVIEW_BY_CODEX JSON.",
+    )
+    parser.add_argument(
+        "--compare-engineer-review",
+        type=Path,
+        help="Committed baseline ENGINEER_REVIEW_BY_CODEX JSON.",
+    )
+    parser.add_argument(
+        "--known-defects",
+        action="store_true",
+        help="Evaluate only explicitly recorded Tier 1 known defects.",
+    )
+
+
+def _load_evaluator_report(path: Path) -> Dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain an object")
+    if isinstance(value.get("calibrated_report"), dict):
+        return dict(value["calibrated_report"])
+    if isinstance(value.get("evaluation"), dict):
+        return dict(value["evaluation"])
+    if isinstance(value.get("totals"), dict) and isinstance(
+        value.get("scenarios"), list
+    ):
+        return value
+    raise ValueError(f"{path} does not contain an evaluator report")
+
+
+def _filter_corpus(
+    corpus: Mapping[str, Any],
+    args: argparse.Namespace,
+    gate: Mapping[str, Any],
+) -> Dict[str, Any]:
+    if args.tier and args.known_defects:
+        raise ValueError("--tier and --known-defects cannot be combined")
+    if args.quality_gate and (args.tier or args.known_defects):
+        raise ValueError("--quality-gate requires the complete scenario corpus")
+    wanted: Optional[set[str]] = None
+    if args.tier:
+        wanted = set(gate["tiers"][f"tier{args.tier}"])
+    elif args.known_defects:
+        wanted = set(gate["tier1_dispositions"]["known_baseline_defect"])
+    if wanted is None:
+        return dict(corpus)
+    filtered = dict(corpus)
+    filtered["scenarios"] = [
+        scenario for scenario in corpus["scenarios"] if str(scenario["id"]) in wanted
+    ]
+    return filtered
 
 
 def _local_url(value: str) -> str:
@@ -109,7 +202,9 @@ class LocalApiClient:
 
     def create_thread(self, title: str) -> str:
         value = self._post("/conversations", {"title": title})
-        thread = value.get("thread") if isinstance(value.get("thread"), Mapping) else value
+        thread = (
+            value.get("thread") if isinstance(value.get("thread"), Mapping) else value
+        )
         thread_id = thread.get("id") if isinstance(thread, Mapping) else None
         if not thread_id:
             raise RuntimeError("Local API did not return a conversation ID")
@@ -192,7 +287,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("validate", help="Validate schema and coverage only")
+    validate = subparsers.add_parser(
+        "validate",
+        help="Validate schema, tiers, and gate configuration.",
+    )
+    _add_quality_options(validate)
 
     fixture = subparsers.add_parser("fixture", help="Replay local fixture responses")
     fixture.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
@@ -203,12 +302,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail when a scenario has no fixture response",
     )
+    _add_quality_options(fixture)
 
     report = subparsers.add_parser("report", help="Evaluate a captured response file")
     report.add_argument("--responses", type=Path, required=True)
     report.add_argument("--output-dir", type=Path, default=DEFAULT_REPORTS)
     report.add_argument("--stem", default="conversation-regression")
     report.add_argument("--require-all", action="store_true")
+    _add_quality_options(report)
 
     api = subparsers.add_parser(
         "api",
@@ -222,6 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("--scenario-id", action="append")
     api.add_argument("--output-dir", type=Path, default=DEFAULT_REPORTS)
     api.add_argument("--stem", default="local-api")
+    _add_quality_options(api)
     return parser
 
 
@@ -230,9 +332,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     command = args.command or "validate"
     try:
         corpus, summary = load_and_validate_corpus(args.scenarios)
+        if command == "validate" and not hasattr(args, "quality_gate_config"):
+            args.quality_gate_config = DEFAULT_QUALITY_GATE
+            args.tier = None
+            args.known_defects = False
+            args.quality_gate = False
+            args.calibrated = False
+            args.compare_baseline = None
+            args.engineer_review = None
+            args.compare_engineer_review = None
+
+        from calibration import (  # noqa: E402
+            evaluate_quality_gate,
+            load_quality_gate,
+            validate_quality_gate,
+        )
+
+        gate = load_quality_gate(args.quality_gate_config)
+        gate_summary = validate_quality_gate(
+            gate,
+            (str(item["id"]) for item in corpus["scenarios"]),
+        )
         if command == "validate":
             _print_validation(summary)
+            print(
+                "Quality tiers: "
+                + ", ".join(
+                    f"{name}={count}"
+                    for name, count in gate_summary["tier_counts"].items()
+                )
+            )
             return 0
+        selected_corpus = _filter_corpus(corpus, args, gate)
         if command == "fixture":
             responses = _load_responses(args.fixtures)
             mode = "fixture"
@@ -240,15 +371,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             responses = _load_responses(args.responses)
             mode = "captured_responses"
         elif command == "api":
-            responses = _run_local_api(corpus, args)
+            responses = _run_local_api(selected_corpus, args)
             mode = "local_api"
         else:
             raise RuntimeError(f"Unknown command: {command}")
-        reports, skipped = _evaluate_response_map(corpus, responses)
+        reports, skipped = _evaluate_response_map(
+            selected_corpus,
+            responses,
+            calibrated=args.calibrated or args.quality_gate,
+        )
         report = build_report(
             reports,
-            mode=mode,
-            baseline=corpus["baseline"],
+            mode=mode + ("_calibrated" if args.calibrated or args.quality_gate else ""),
+            baseline=selected_corpus["baseline"],
             skipped=skipped,
         )
         paths = write_report(report, args.output_dir, args.stem)
@@ -262,6 +397,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Markdown report: {paths['markdown']}")
         if getattr(args, "require_all", False) and skipped:
             return 1
+        if args.quality_gate or args.known_defects:
+            baseline_path = args.compare_baseline or DEFAULT_CALIBRATED_BASELINE
+            baseline_report = _load_evaluator_report(baseline_path)
+            gate_config = gate
+            if args.known_defects:
+                gate_config = json.loads(json.dumps(gate))
+                gate_config["tier1_dispositions"]["hard_gate_passing_baseline"] = []
+                gate_config["tier1_dispositions"][
+                    "blocked_by_fixture_or_environment"
+                ] = []
+                gate_config["require_engineer_review_comparison"] = False
+            candidate_engineer_review = (
+                json.loads(args.engineer_review.read_text(encoding="utf-8"))
+                if args.engineer_review
+                else None
+            )
+            baseline_engineer_review = (
+                json.loads(args.compare_engineer_review.read_text(encoding="utf-8"))
+                if args.compare_engineer_review
+                else None
+            )
+            gate_result = evaluate_quality_gate(
+                report,
+                baseline_report,
+                gate_config,
+                candidate_engineer_review=candidate_engineer_review,
+                baseline_engineer_review=baseline_engineer_review,
+            )
+            print("Quality gate: " + ("PASS" if gate_result["passed"] else "FAIL"))
+            for blocker in gate_result["blockers"]:
+                print(f"  BLOCKER: {blocker}")
+            return 0 if gate_result["passed"] else 1
         return 1 if totals["failed"] or totals["critical_failures"] else 0
     except (OSError, ValueError, ScenarioValidationError, RuntimeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
