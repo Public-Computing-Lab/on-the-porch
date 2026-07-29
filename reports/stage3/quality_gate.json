@@ -1,0 +1,39 @@
+{
+  "stage": "3",
+  "status": "pass",
+  "authoritative_calibrated_gate": {
+    "input": "frozen Stage 2 captured responses",
+    "scenarios": 84,
+    "multi_turn_scenarios": 43,
+    "passed": 27,
+    "failed_baseline_scenarios": 57,
+    "skipped": 0,
+    "tier1_hard_gates_preserved": 9,
+    "tier1_hard_gate_total": 9,
+    "new_protected_critical_failures": 0,
+    "known_tier1_defects_worsened": 0,
+    "result": "PASS"
+  },
+  "live_comparison": {
+    "environment": "loopback API, sentiment_demo, local Chroma, local embeddings",
+    "scenarios": 84,
+    "turns": 135,
+    "blocked": 0,
+    "stage2_raw_passed": 13,
+    "stage3_raw_passed": 14,
+    "stage2_raw_failed": 71,
+    "stage3_raw_failed": 70,
+    "stage2_critical_checks": 100,
+    "stage3_critical_checks": 99,
+    "limited_reruns": 2,
+    "remaining_advisory_scenarios": [
+      "event-006",
+      "uncertain-003"
+    ],
+    "engineer_review": "No Stage 3 causal regression. Both remaining scenarios are Tier 2 and live execution is advisory-only until controlled fixtures exist."
+  },
+  "protected_semantics_changed": false,
+  "prompts_changed": false,
+  "routing_changed": false,
+  "retrieval_ranking_changed": false
+}

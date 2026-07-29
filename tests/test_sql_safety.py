@@ -264,3 +264,10 @@ def test_trusted_prepared_execution_remains_available(monkeypatch) -> None:
         trusted=True,
     )
     assert result == {"columns": ["count"], "rows": [{"count": 3}]}
+
+
+def test_app4_imports_through_sql_chat_package() -> None:
+    import importlib
+
+    module = importlib.import_module("sql_chat.app4")
+    assert callable(module.validate_dynamic_sql)

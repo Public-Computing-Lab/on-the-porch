@@ -1,0 +1,51 @@
+{
+  "stage": "3",
+  "status": "pass",
+  "sql_validation_ms": {
+    "iterations": 2000,
+    "p50": 0.9488,
+    "p95": 1.2588,
+    "max": 5.668
+  },
+  "turn_reservation_ms": {
+    "iterations": 20,
+    "p50": 5.705,
+    "p95": 7.87,
+    "max": 9.242
+  },
+  "final_transaction_ms": {
+    "samples": 1,
+    "value": 8.146
+  },
+  "completed_json_replay_ms": {
+    "samples": 2,
+    "p50": 9.709,
+    "p95": 10.574,
+    "max": 10.67
+  },
+  "completed_sse_replay_ms": {
+    "samples": 1,
+    "value": 8.353
+  },
+  "status_lookup_ms": {
+    "samples": 3,
+    "p50": 7.199,
+    "p95": 7.63,
+    "max": 7.678
+  },
+  "overall_live_http": {
+    "stage2": {
+      "turns": 135,
+      "p50_ms": 1780.794,
+      "p95_ms": 3438.759,
+      "max_ms": 10978.447
+    },
+    "stage3": {
+      "turns": 135,
+      "p50_ms": 1678.141,
+      "p95_ms": 2604.253,
+      "max_ms": 8025.032
+    }
+  },
+  "conclusion": "No material latency regression. Replay is substantially faster than regeneration."
+}

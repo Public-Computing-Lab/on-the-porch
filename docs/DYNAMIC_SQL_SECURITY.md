@@ -109,4 +109,3 @@ diagnostics only.
 Residents receive a bounded civic-data-unavailable result through the existing
 fallback path. Parser details, model SQL, table names, database exceptions, and
 stack traces are not included.
-
