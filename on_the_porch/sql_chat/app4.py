@@ -12,9 +12,18 @@ from pocketflow import Flow, Node
 import google.generativeai as genai  # type: ignore
 from turn_observability import (
     model_call,
+    record_dynamic_sql_validation,
     record_retry as record_observability_retry,
     record_sql as record_observability_sql,
     stage as observability_stage,
+)
+from sql_safety import (
+    SQLSafetyError,
+    execute_validated_query,
+    read_only_connection_kwargs,
+    require_dynamic_sql_runtime,
+    safe_sql_observability_payload,
+    validate_dynamic_sql,
 )
 try:
     from langsmith.wrappers import wrap_openai  # type: ignore
@@ -272,6 +281,7 @@ def _call_gemini_with_logging(model_name: str, prompt: str, temperature: float =
 # that — during hybrid queries plus the nightly cron — could exhaust MySQL's
 # max_connections and turn into connect failures.
 _db_thread_local = threading.local()
+_dynamic_db_thread_local = threading.local()
 
 
 def _connect_mysql():
@@ -344,6 +354,42 @@ def _get_db_connection():
     conn = _connect_mysql()
     _db_thread_local.conn = conn
     return conn
+
+
+def _get_dynamic_db_connection():
+    """Return the dedicated civic read-only connection for generated SQL."""
+    require_dynamic_sql_runtime()
+    kwargs = read_only_connection_kwargs()
+    if kwargs is None:
+        return _get_db_connection()
+    conn = getattr(_dynamic_db_thread_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.ping(reconnect=True)
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _dynamic_db_thread_local.conn = None
+    conn = pymysql.connect(
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.Cursor,
+        **kwargs,
+    )
+    _dynamic_db_thread_local.conn = conn
+    return conn
+
+
+def _log_sql_debug(label: str, sql: str) -> None:
+    if os.getenv("DYNAMIC_SQL_LOG_RAW_SQL", "").strip().lower() in {"1", "true", "yes"}:
+        print(f"\n[{label}]\n{sql}\n")
+        return
+    import hashlib
+
+    fingerprint = hashlib.sha256((sql or "").encode("utf-8")).hexdigest()[:16]
+    print(f"[{label}] fingerprint={fingerprint}")
 
 
 def _fetch_schema_snapshot(database: str) -> str:
@@ -782,9 +828,9 @@ def run_generic_events_query(
     """Fetch upcoming events with a direct SQL query (no LLM SQL generation)."""
     days = _events_list_days_ahead(question)
     sql = _fast_weekly_events_sql(days)
-    print(f"\n[Fast events SQL — next {days} days]\n{sql}\n")
+    _log_sql_debug(f"Fast events SQL - next {days} days", sql)
     try:
-        result = _execute_sql(sql)
+        result = _execute_sql(sql, trusted=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Fast events SQL failed: {exc}")
         return {
@@ -913,10 +959,10 @@ def _llm_generate_sql(question: str, schema: str, default_model: str, metadata: 
                 temperature=0,
             )
         sql = _extract_sql_from_text(content)
-        print("\n[Generated SQL Before Dorchester Filter]\n" + sql + "\n")
+        _log_sql_debug("Generated SQL Before Dorchester Filter", sql)
         # Post-process to ensure Dorchester filter is present
         sql = _ensure_dorchester_filter(sql, schema)
-        print("\n[Generated SQL After Dorchester Filter]\n" + sql + "\n")
+        _log_sql_debug("Generated SQL After Dorchester Filter", sql)
         return sql
     except Exception as exc:
         print(f"  ⚠️ Gemini SQL generation failed: {exc}")
@@ -1009,15 +1055,83 @@ def _llm_refine_sql(
             temperature=0,
         )
     sql = _extract_sql_from_text(content)
-    print("\n[Refined SQL Before Dorchester Filter]\n" + sql + "\n")
+    _log_sql_debug("Refined SQL Before Dorchester Filter", sql)
     # Post-process to ensure Dorchester filter is present
     sql = _ensure_dorchester_filter(sql, schema)
-    print("\n[Refined SQL After Dorchester Filter]\n" + sql + "\n")
+    _log_sql_debug("Refined SQL After Dorchester Filter", sql)
     return sql
 
 
 @traceable(name="execute_sql")
-def _execute_sql(sql: str) -> Dict[str, Any]:
+def _execute_sql(sql: str, *, trusted: bool = False) -> Dict[str, Any]:
+    if not trusted:
+        validated = None
+        try:
+            validated = validate_dynamic_sql(
+                sql,
+                current_database=(
+                    os.getenv("DYNAMIC_SQL_RO_DB")
+                    or os.getenv("MYSQL_DB")
+                ),
+            )
+            record_dynamic_sql_validation(
+                safe_sql_observability_payload(validated=validated, accepted=True)
+            )
+            with observability_stage(
+                "sql_execution",
+                attributes={
+                    "dynamic": True,
+                    "fingerprint": validated.fingerprint,
+                    "tables": list(validated.tables),
+                },
+            ):
+                bounded, execution_ms = execute_validated_query(
+                    _get_dynamic_db_connection(),
+                    validated,
+                )
+            result = {
+                "columns": list(bounded.columns),
+                "rows": list(bounded.rows),
+                "truncated": bounded.truncated,
+                "payload_bytes": bounded.payload_bytes,
+            }
+            record_dynamic_sql_validation(
+                safe_sql_observability_payload(
+                    validated=validated,
+                    accepted=True,
+                    row_count=len(bounded.rows),
+                    truncated=bounded.truncated,
+                    execution_ms=execution_ms,
+                )
+            )
+            record_observability_sql(None, len(bounded.rows))
+            return result
+        except SQLSafetyError as exc:
+            record_dynamic_sql_validation(
+                safe_sql_observability_payload(
+                    validated=validated,
+                    accepted=False,
+                    rejection_category=exc.category,
+                )
+            )
+            raise
+        except Exception as exc:
+            error_code = getattr(exc, "args", [None])[0]
+            timed_out = error_code in {1969, 3024} or "timeout" in str(exc).lower()
+            record_dynamic_sql_validation(
+                safe_sql_observability_payload(
+                    validated=validated,
+                    accepted=False,
+                    rejection_category=(
+                        "execution_timeout" if timed_out else "execution_error"
+                    ),
+                    timed_out=timed_out,
+                )
+            )
+            if timed_out:
+                raise SQLSafetyError("execution_timeout") from exc
+            raise
+
     with observability_stage("sql_execution"):
         conn = _get_db_connection()
         # Connection is thread-owned and reused; do not close it here. A statement
@@ -1056,9 +1170,9 @@ def _execute_with_retries(
             if attempt_idx > 1:
                 record_observability_retry("dynamic_sql")
             if attempt_idx == 1:
-                print("\n[SQL]\n" + sql + "\n")
+                _log_sql_debug("SQL", sql)
             else:
-                print(f"\n[SQL Retry {attempt_idx - 1}]\n" + sql + "\n")
+                _log_sql_debug(f"SQL Retry {attempt_idx - 1}", sql)
             
             # Normalize SQL for comparison (remove extra whitespace)
             sql_normalized = " ".join(sql.split())

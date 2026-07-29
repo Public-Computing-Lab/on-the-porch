@@ -204,6 +204,20 @@ MYSQL_DB=rethink_ai_boston
 MYSQL_POOL_SIZE=10
 MYSQL_CONNECT_TIMEOUT=10
 
+# Model-generated civic SQL (dedicated SELECT-only account required in production)
+DYNAMIC_SQL_RO_HOST=
+DYNAMIC_SQL_RO_PORT=3306
+DYNAMIC_SQL_RO_USER=
+DYNAMIC_SQL_RO_PASSWORD=
+DYNAMIC_SQL_RO_DB=
+DYNAMIC_SQL_ALLOW_APP_CONNECTION=false
+DYNAMIC_SQL_ALLOWED_TABLES=weekly_events,events_materialized,service_requests_311,mv_311_weekly,crime_incident_reports,mv_crime_monthly,shootings
+DYNAMIC_SQL_TIMEOUT_MS=8000
+DYNAMIC_SQL_MAX_ROWS=500
+DYNAMIC_SQL_MAX_COLUMNS=40
+DYNAMIC_SQL_MAX_PAYLOAD_BYTES=1000000
+DYNAMIC_SQL_LOG_RAW_SQL=false
+
 # ============================================================================
 # LangChain / LangSmith tracing (optional)
 # ============================================================================

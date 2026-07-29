@@ -1,0 +1,46 @@
+{
+  "stage": "3A",
+  "status": "pass",
+  "parser": {
+    "name": "sqlglot",
+    "version": "27.20.0",
+    "dialect": "mysql"
+  },
+  "tests": {
+    "sql_and_observability": {
+      "passed": 83,
+      "failed": 0
+    },
+    "conversation_harness_and_calibration": {
+      "passed": 35,
+      "failed": 0
+    },
+    "scenario_validation": {
+      "validated": 84,
+      "multi_turn": 43
+    }
+  },
+  "quality_gate": {
+    "passed": true,
+    "evaluated": 84,
+    "baseline_passed": 27,
+    "baseline_failed": 57,
+    "skipped": 0,
+    "new_critical_failures": 0,
+    "known_defects_worsened": 0,
+    "note": "Stage 3A does not change prompts, routing, retrieval, or captured resident outputs."
+  },
+  "validation_benchmark_ms": {
+    "iterations": 2000,
+    "p50": 0.9488,
+    "p95": 1.2588,
+    "max": 5.668
+  },
+  "limits": {
+    "timeout_ms": 8000,
+    "rows": 500,
+    "columns": 40,
+    "payload_bytes": 1000000
+  },
+  "environment": "isolated local Python environment; no production access"
+}

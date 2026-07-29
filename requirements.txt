@@ -26,6 +26,7 @@ rank-bm25
 
 # SQL agent (pocketflow graph in sql_chat/app4.py)
 pocketflow
+sqlglot==27.20.0
 
 # Ingestion & document parsing
 requests
