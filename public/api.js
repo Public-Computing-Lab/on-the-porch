@@ -255,6 +255,7 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
   let buffer = '';
   let finalEvent = null;
   let errorEvent = null;
+  let inProgressEvent = null;
 
   const handleEvent = (rawEvent) => {
     const dataLine = rawEvent.split('\n').find((line) => line.startsWith('data:'));
@@ -275,6 +276,8 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
       finalEvent = evt;
     } else if (evt.type === 'error') {
       errorEvent = evt;
+    } else if (evt.type === 'in_progress') {
+      inProgressEvent = evt;
     }
   };
 
@@ -299,6 +302,14 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
 
   if (errorEvent) {
     return { success: false, status: 200, data: errorEvent, error: errorEvent.error || 'Generation failed.' };
+  }
+  if (inProgressEvent) {
+    return {
+      success: false,
+      status: 202,
+      data: inProgressEvent,
+      error: 'This message is still being completed.',
+    };
   }
   if (finalEvent) {
     return { success: true, status: 200, data: finalEvent, error: null };
@@ -343,6 +354,38 @@ window.ApiClient = {
     timeoutMs: ApiConfig.chatTimeoutMs,
   }),
   sendMessageStream,
+  fetchTurnStatus: (threadId, clientTurnId) => apiRequest(
+    `/conversations/${threadId}/turns/${encodeURIComponent(clientTurnId)}`,
+    { method: 'GET', timeoutMs: ApiConfig.chatTimeoutMs },
+  ),
+  waitForTurn: async (threadId, clientTurnId, { attempts = 60, intervalMs = 1000 } = {}) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const result = await apiRequest(
+        `/conversations/${threadId}/turns/${encodeURIComponent(clientTurnId)}`,
+        { method: 'GET', timeoutMs: ApiConfig.chatTimeoutMs },
+      );
+      if (!result.success) return result;
+      const status = result.data?.turn?.status;
+      if (status === 'completed') {
+        return { success: true, status: 200, data: result.data.result, error: null };
+      }
+      if (status === 'failed') {
+        return {
+          success: false,
+          status: 409,
+          data: result.data,
+          error: result.data.error || 'This message could not be completed.',
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return {
+      success: false,
+      status: 202,
+      data: { client_turn_id: clientTurnId },
+      error: 'This message is still being completed. Please try again shortly.',
+    };
+  },
   fetchEvents: (daysAhead = 14, limit = 10) => {
     const qs = new URLSearchParams({ days_ahead: String(daysAhead), limit: String(limit) });
     return apiRequest(`/events?${qs.toString()}`, { method: 'GET' });
