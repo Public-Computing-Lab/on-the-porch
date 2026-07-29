@@ -14,6 +14,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -26,6 +27,15 @@ import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
+from conversation_turn import (
+    build_sse_final_payload,
+    ConversationTurnService,
+    GeneratedTurn,
+    TurnContext,
+    TurnEvent,
+    TurnEventKind,
+    TurnRequest,
+)
 from mysql_cache import MySQLCacheStore
 from ops_health import check_ingestion_lag, check_311_feed_balance, validate_production_config
 from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
@@ -46,6 +56,18 @@ from security import (
     validate_password,
     validate_username,
     verify_password,
+)
+from turn_idempotency import (
+    InvalidClientTurnId,
+    build_request_fingerprint,
+    validate_or_generate_client_turn_id,
+)
+from turn_repository import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_RESERVED,
+    STATUS_RUNNING,
+    TurnRepository,
 )
 
 # Setup paths to import from on_the_porch
@@ -1661,6 +1683,21 @@ def _fetch_recent_history(conn, thread_id: str, limit: int = 20) -> List[Dict[st
     return _fetch_messages(conn, thread_id, limit=limit, before=None)
 
 
+def _fetch_message_by_id(conn, message_id: str) -> Dict[str, Any]:
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT * FROM conversation_messages WHERE id = %s LIMIT 1",
+            (message_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError("persisted message was not found")
+        return row
+    finally:
+        cursor.close()
+
+
 
 def _insert_message(
     conn,
@@ -1699,7 +1736,7 @@ def _insert_message(
         )
     finally:
         cursor.close()
-    return _fetch_messages(conn, thread_id, limit=1, before=None)[-1]
+    return _fetch_message_by_id(conn, message_id)
 
 
 
@@ -2792,6 +2829,448 @@ def get_conversation_messages(thread_id: str):
             conn.close()
 
 
+def _turn_trace_id() -> Optional[str]:
+    trace = get_current_trace()
+    if trace is None:
+        return None
+    return str(trace.data.get("trace_id") or "")[:64] or None
+
+
+def _build_turn_request(
+    *,
+    thread_id: str,
+    payload: Dict[str, Any],
+    message: str,
+    transport: str,
+) -> TurnRequest:
+    client_turn_id, client_idempotent = validate_or_generate_client_turn_id(
+        payload.get("client_turn_id")
+    )
+    user_id = g.current_user_row["id"]
+    fingerprint = build_request_fingerprint(
+        owner_id=user_id,
+        thread_id=thread_id,
+        message=message,
+        ui_context=(
+            payload.get("ui_context")
+            if isinstance(payload.get("ui_context"), dict)
+            else payload.get("event_context")
+        ),
+        options={
+            "response_format": payload.get("response_format"),
+        },
+    )
+    return TurnRequest(
+        thread_id=thread_id,
+        user_id=user_id,
+        session_id=g.session_row["session_id"],
+        client_turn_id=client_turn_id,
+        client_idempotent=client_idempotent,
+        request_fingerprint=fingerprint,
+        message=message,
+        transport=transport,
+        trace_id=_turn_trace_id(),
+    )
+
+
+def _load_conversation_turn_context(
+    turn_request: TurnRequest,
+    reservation,
+) -> TurnContext:
+    conn = get_db_connection()
+    try:
+        with observability_stage("ownership_verification"):
+            thread = _fetch_thread(
+                conn,
+                turn_request.user_id,
+                turn_request.thread_id,
+            )
+        if not thread or thread.get("active_turn_id") != reservation.turn_id:
+            raise RuntimeError("turn_thread_ownership_lost")
+        with observability_stage("history_loading"):
+            history_rows = _fetch_recent_history(
+                conn,
+                turn_request.thread_id,
+                limit=20,
+            )
+            conversation_history = _conversation_history_from_rows(history_rows)
+        with observability_stage("thread_state_loading"):
+            thread_state = json_loads(
+                thread.get("thread_state_json"),
+                create_empty_cache(),
+            )
+        record_observability_fields(
+            history_message_count=len(conversation_history),
+            conversation_id=turn_request.thread_id,
+        )
+        return TurnContext(
+            request=turn_request,
+            reservation=reservation,
+            thread=thread,
+            history_rows=history_rows,
+            conversation_history=conversation_history,
+            thread_state=thread_state,
+        )
+    finally:
+        conn.close()
+
+
+def _insert_interaction_log_on_connection(
+    conn,
+    *,
+    context: TurnContext,
+    generated: GeneratedTurn,
+    assistant_message_id: str,
+) -> Optional[int]:
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO interaction_log (
+                session_id, app_version, client_query, app_response,
+                data_selected, user_id, thread_id, message_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                context.request.session_id,
+                Config.API_VERSION,
+                context.request.message,
+                generated.answer,
+                generated.mode,
+                context.request.user_id,
+                context.request.thread_id,
+                assistant_message_id,
+            ),
+        )
+        return cursor.lastrowid
+    except Exception as exc:
+        _log_exception("Error logging interaction", exc)
+        return None
+    finally:
+        cursor.close()
+
+
+def _finalize_conversation_turn(
+    context: TurnContext,
+    generated: GeneratedTurn,
+) -> Dict[str, Any]:
+    transaction_started = time.perf_counter()
+    conn = get_db_connection()
+    try:
+        conn.start_transaction()
+        cursor = conn.cursor(dictionary=True)
+        try:
+            cursor.execute(
+                """
+                SELECT * FROM conversation_threads
+                WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+                LIMIT 1 FOR UPDATE
+                """,
+                (context.request.thread_id, context.request.user_id),
+            )
+            thread = cursor.fetchone()
+        finally:
+            cursor.close()
+        if not thread or thread.get("active_turn_id") != context.reservation.turn_id:
+            raise RuntimeError("active_turn_conflict")
+
+        with observability_stage("message_persistence"):
+            user_message_row = _insert_message(
+                conn,
+                thread_id=context.request.thread_id,
+                user_id=context.request.user_id,
+                role="user",
+                content=context.request.message,
+                message_meta={
+                    "client_turn_id": context.request.client_turn_id,
+                    "turn_id": context.reservation.turn_id,
+                },
+            )
+            assistant_message_row = _insert_message(
+                conn,
+                thread_id=context.request.thread_id,
+                user_id=context.request.user_id,
+                role="assistant",
+                content=generated.answer,
+                response_mode=generated.mode,
+                sources=generated.sources,
+                model_name=os.getenv("GEMINI_MODEL", ""),
+                message_meta={
+                    "client_turn_id": context.request.client_turn_id,
+                    "turn_id": context.reservation.turn_id,
+                },
+            )
+
+        if thread["title"] == "New conversation" and not context.history_rows:
+            _update_thread(
+                conn,
+                context.request.thread_id,
+                title=summarize_thread_title(context.request.message),
+            )
+
+        state_version = int(thread.get("thread_state_version") or 0)
+        version_conflict = state_version != context.reservation.state_version
+        cursor = conn.cursor()
+        try:
+            if version_conflict:
+                cursor.execute(
+                    """
+                    UPDATE conversation_threads SET last_message_at = %s
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (utcnow(), context.request.thread_id, context.request.user_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE conversation_threads
+                    SET thread_state_json = %s,
+                        thread_state_version = thread_state_version + 1,
+                        last_message_at = %s
+                    WHERE id = %s AND user_id = %s AND thread_state_version = %s
+                    """,
+                    (
+                        json_dumps(generated.next_thread_state),
+                        utcnow(),
+                        context.request.thread_id,
+                        context.request.user_id,
+                        context.reservation.state_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("thread_state_version_conflict")
+        finally:
+            cursor.close()
+        record_observability_fields(version_conflict=version_conflict)
+
+        with observability_stage("interaction_logging"):
+            log_id = _insert_interaction_log_on_connection(
+                conn,
+                context=context,
+                generated=generated,
+                assistant_message_id=assistant_message_row["id"],
+            )
+            assistant_meta = {
+                "client_turn_id": context.request.client_turn_id,
+                "turn_id": context.reservation.turn_id,
+                "log_id": log_id,
+            }
+            _update_message_meta(
+                conn,
+                assistant_message_row["id"],
+                assistant_meta,
+            )
+            assistant_message_row["message_meta_json"] = json_dumps(assistant_meta)
+
+        refreshed_thread = _fetch_thread(
+            conn,
+            context.request.user_id,
+            context.request.thread_id,
+        )
+        payload = {
+            "thread": _serialize_thread(refreshed_thread),
+            "user_message": _serialize_message(user_message_row),
+            "assistant_message": _serialize_message(assistant_message_row),
+        }
+        with observability_stage("turn_completion_transaction"):
+            if not _turn_repository.complete_on_connection(
+                conn,
+                reservation=context.reservation,
+                user_id=context.request.user_id,
+                user_message_id=user_message_row["id"],
+                assistant_message_id=assistant_message_row["id"],
+                response_payload=payload,
+            ):
+                raise RuntimeError("turn_completion_conflict")
+            conn.commit()
+        record_observability_fields(
+            persistence_transaction_ms=round(
+                (time.perf_counter() - transaction_started) * 1000.0,
+                3,
+            )
+        )
+        return payload
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _turn_producer(context: TurnContext):
+    full_answer = ""
+    streamed_text = ""
+    mode = "hybrid"
+    result_payload: Dict[str, Any] = {}
+    next_cache = context.thread_state
+    semantic_eligible = _semantic_cache_eligible(
+        context.request.message,
+        context.conversation_history,
+    )
+    cached = _semantic_cache.get(context.request.message) if semantic_eligible else None
+    cached_sources: List[Dict[str, Any]] = []
+    if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
+        full_answer = cached.get("answer", "")
+        mode = cached.get("mode", "semantic_cache")
+        result_payload = cached.get("agent_result", {"answer": full_answer})
+        cached_sources = cached.get("sources", [])
+        for index, word in enumerate(full_answer.split()):
+            yield TurnEvent(
+                TurnEventKind.DELTA,
+                word if index == 0 else f" {word}",
+            )
+    else:
+        with observability_stage("turn_execution"):
+            for item in _iter_stream_agent_with_keepalive(
+                context.request.message,
+                context.conversation_history,
+                context.thread_state,
+            ):
+                if item is None:
+                    continue
+                kind, data = item
+                if kind == "delta":
+                    streamed_text += data
+                    yield TurnEvent(TurnEventKind.DELTA, data)
+                elif kind == "final":
+                    full_answer = data.get("answer", streamed_text)
+                    mode = data.get("mode", "hybrid")
+                    result_payload = data.get("result", {})
+                    next_cache = data.get("retrieval_cache", context.thread_state)
+        if not full_answer and streamed_text:
+            full_answer = streamed_text
+    if not full_answer:
+        raise RuntimeError("empty_generation")
+
+    enriched = apply_post_stream_fallback(
+        context.request.message,
+        full_answer,
+        mode,
+        prepared_intent=result_payload.get("prepared_intent"),
+        conversation_history=context.conversation_history,
+    )
+    if (
+        enriched
+        and Config.BOSTON_GOV_ASYNC_ENABLED
+        and not Config.BOSTON_GOV_BLOCKING
+        and should_apply_boston_gov_fallback(
+            context.request.message,
+            enriched,
+            mode,
+        )
+    ):
+        enriched = try_boston_gov_enrichment(
+            context.request.message,
+            enriched,
+            timeout_seconds=Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS,
+        )
+    if enriched != full_answer:
+        yield TurnEvent(TurnEventKind.CORRECTION, enriched)
+        full_answer = enriched
+
+    sources = (
+        cached_sources
+        if cached_sources
+        else extract_sources(mode, result_payload)
+    )
+    if (
+        semantic_eligible
+        and mode != "semantic_cache"
+        and _is_cacheable_semantic_answer(full_answer)
+    ):
+        _semantic_cache.put(
+            context.request.message,
+            {
+                "answer": full_answer,
+                "mode": mode,
+                "sources": sources,
+                "agent_result": result_payload,
+            },
+        )
+    record_observability_fields(
+        mode=mode,
+        route=str(
+            result_payload.get("intent")
+            or result_payload.get("prepared_intent")
+            or mode
+        ),
+        source_count=len(sources or []),
+        response_char_count=len(full_answer or ""),
+    )
+    yield TurnEvent(
+        TurnEventKind.FINAL,
+        GeneratedTurn(
+            answer=full_answer,
+            mode=mode,
+            sources=sources,
+            next_thread_state=next_cache,
+            result_payload=result_payload,
+        ),
+    )
+
+
+def _iter_service_events_with_keepalive(
+    turn_request: TurnRequest,
+    producer,
+):
+    done = object()
+    event_queue: queue.Queue = queue.Queue()
+    trace = get_current_trace()
+
+    def _worker() -> None:
+        with bind_trace(trace):
+            try:
+                for event in _conversation_turn_service.execute(turn_request, producer):
+                    event_queue.put(event)
+            except BaseException as exc:
+                event_queue.put(exc)
+            finally:
+                event_queue.put(done)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        try:
+            item = event_queue.get(timeout=_SSE_KEEPALIVE_INTERVAL)
+        except queue.Empty:
+            yield None
+            continue
+        if item is done:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
+_turn_repository = TurnRepository(
+    get_db_connection,
+    lease_seconds=int(os.getenv("TURN_LEASE_SECONDS", "180")),
+)
+_conversation_turn_service = ConversationTurnService(
+    _turn_repository,
+    load_context=_load_conversation_turn_context,
+    finalize=_finalize_conversation_turn,
+    normalize_error=normalize_error_category,
+    observe=record_observability_fields,
+)
+
+
+def _turn_http_response(event: TurnEvent):
+    if event.kind is TurnEventKind.FINAL:
+        return jsonify(event.payload), 201
+    if event.kind is TurnEventKind.IN_PROGRESS:
+        response = jsonify(event.payload)
+        response.status_code = 202
+        response.headers["Retry-After"] = str(event.payload.get("retry_after", 2))
+        return response
+    if event.kind is TurnEventKind.CONFLICT:
+        return _json_error(event.payload["error"], 409, event.payload["code"])
+    if event.kind is TurnEventKind.NOT_FOUND:
+        return _json_error(event.payload["error"], 404, event.payload["code"])
+    if event.kind is TurnEventKind.FAILED:
+        return _json_error(event.payload["error"], 409, event.payload["code"])
+    return _json_error("Failed to send message.", 500, "conversation_message_failed")
+
+
 @app.route("/conversations/<thread_id>/messages", methods=["POST"])
 def post_conversation_message(thread_id: str):
     result = _require_user()
@@ -2815,118 +3294,33 @@ def post_conversation_message(thread_id: str):
     if message_error:
         return message_error
 
-    conn = None
     try:
-        conn = get_db_connection()
-        with observability_stage("ownership_verification"):
-            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        if not thread:
-            return _json_error("Conversation not found.", 404, "conversation_not_found")
-
-        with observability_stage("history_loading"):
-            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-            conversation_history = _conversation_history_from_rows(history_rows)
-        with observability_stage("thread_state_loading"):
-            thread_state = json_loads(
-                thread.get("thread_state_json"),
-                create_empty_cache(),
-            )
-        record_observability_fields(
-            history_message_count=len(conversation_history),
-            conversation_id=thread_id,
+        turn_request = _build_turn_request(
+            thread_id=thread_id,
+            payload=payload,
+            message=message,
+            transport="json",
         )
-        conn.close()
-        conn = None
-
-        # Run the expensive agent path outside any open DB transaction so
-        # long LLM/sql execution does not hold row locks on the conversation.
-        with observability_stage("turn_execution"):
-            agent_result = _execute_agent_response(
-                message,
-                conversation_history=conversation_history,
-                retrieval_cache=thread_state,
-                thread_id=thread_id,
-            )
-        answer = agent_result["answer"]
-        mode = agent_result["mode"]
-        sources = agent_result["sources"]
-        next_cache = agent_result["retrieval_cache"]
         record_observability_fields(
-            mode=mode,
-            source_count=len(sources or []),
-            response_char_count=len(answer or ""),
+            client_turn_id=turn_request.client_turn_id,
+            client_idempotent=turn_request.client_idempotent,
         )
-
-        conn = get_db_connection()
-        with observability_stage("ownership_verification"):
-            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        if not thread:
-            return _json_error("Conversation not found.", 404, "conversation_not_found")
-
-        with observability_stage("message_persistence"):
-            user_message_row = _insert_message(
-                conn,
-                thread_id=thread_id,
-                user_id=g.current_user_row["id"],
-                role="user",
-                content=message,
-            )
-
-            assistant_message_row = _insert_message(
-                conn,
-                thread_id=thread_id,
-                user_id=g.current_user_row["id"],
-                role="assistant",
-                content=answer,
-                response_mode=mode,
-                sources=sources,
-                model_name=os.getenv("GEMINI_MODEL", ""),
-            )
-
-        if thread["title"] == "New conversation" and len(history_rows) == 0:
-            _update_thread(conn, thread_id, title=summarize_thread_title(message))
-        with observability_stage("thread_state_persistence"):
-            _update_thread_state(conn, thread_id, next_cache)
-
-        with observability_stage("interaction_logging"):
-            log_id = log_interaction(
-                session_id=g.session_row["session_id"],
-                client_query=message,
-                app_response=answer,
-                mode=mode,
-                user_id=g.current_user_row["id"],
-                thread_id=thread_id,
-                message_id=assistant_message_row["id"],
-            )
-            _update_message_meta(
-                conn,
-                assistant_message_row["id"],
-                {"log_id": log_id},
-            )
-        with observability_stage("message_persistence"):
-            conn.commit()
-
-        refreshed_thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
-
-        return jsonify(
-            {
-                "thread": _serialize_thread(refreshed_thread),
-                "user_message": _serialize_message(user_message_row),
-                "assistant_message": _serialize_message(assistant_message_row),
-            }
-        ), 201
+        events = _conversation_turn_service.execute(
+            turn_request,
+            _turn_producer,
+        )
+        for event in events:
+            if event.kind not in {TurnEventKind.DELTA, TurnEventKind.CORRECTION}:
+                return _turn_http_response(event)
+        return _json_error("Failed to send message.", 500, "conversation_message_failed")
+    except InvalidClientTurnId:
+        return _json_error("Invalid message identifier.", 400, "invalid_client_turn_id")
     except Exception as exc:
-        if conn:
-            conn.rollback()
         _log_exception("Error posting conversation message", exc)
         record_observability_fields(
             error_category=normalize_error_category(exc),
         )
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
-    finally:
-        if conn:
-            conn.close()
 
 
 @app.route("/conversations/<thread_id>/messages/stream", methods=["POST"])
@@ -2961,269 +3355,74 @@ def post_conversation_message_stream(thread_id: str):
     if message_error:
         return message_error
 
-    # Load context up front, then release the DB before the long LLM work.
-    conn = None
     try:
-        conn = get_db_connection()
-        with observability_stage("ownership_verification"):
-            thread = _fetch_thread(conn, g.current_user_row["id"], thread_id)
-        if not thread:
-            return _json_error("Conversation not found.", 404, "conversation_not_found")
-        with observability_stage("history_loading"):
-            history_rows = _fetch_recent_history(conn, thread_id, limit=20)
-            conversation_history = _conversation_history_from_rows(history_rows)
-        with observability_stage("thread_state_loading"):
-            thread_state = json_loads(
-                thread.get("thread_state_json"),
-                create_empty_cache(),
-            )
-        record_observability_fields(
-            history_message_count=len(conversation_history),
-            conversation_id=thread_id,
+        turn_request = _build_turn_request(
+            thread_id=thread_id,
+            payload=payload,
+            message=message,
+            transport="sse",
         )
+        record_observability_fields(
+            client_turn_id=turn_request.client_turn_id,
+            client_idempotent=turn_request.client_idempotent,
+        )
+    except InvalidClientTurnId:
+        return _json_error("Invalid message identifier.", 400, "invalid_client_turn_id")
     except Exception as exc:
         _log_exception("Error preparing streamed message", exc)
         record_observability_fields(
             error_category=normalize_error_category(exc),
         )
         return _json_error("Failed to send message.", 500, "conversation_message_failed")
-    finally:
-        if conn:
-            conn.close()
 
-    # Capture request-scoped values so the generator does not depend on the
-    # request context once streaming begins.
-    user_id = g.current_user_row["id"]
-    session_id = g.session_row["session_id"]
-    is_first_message = len(history_rows) == 0
-    existing_title = thread["title"]
     turn_trace = get_current_trace()
 
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json_dumps(obj)}\n\n"
 
-    def _generate_body():
-        reset_request_metrics()
-        full_answer = ""
-        mode = "hybrid"
-        result_payload: Dict[str, Any] = {}
-        next_cache = thread_state
-        semantic_eligible = _semantic_cache_eligible(message, conversation_history)
-        cache_hit = False
-        cached_sources: List[Dict[str, str]] = []
-
-        try:
-            yield ": keepalive\n\n"
-            cached = _semantic_cache.get(message) if semantic_eligible else None
-            if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
-                cache_hit = True
-                full_answer = cached.get("answer", "")
-                mode = cached.get("mode", "semantic_cache")
-                result_payload = cached.get("agent_result", {"answer": full_answer})
-                cached_sources = cached.get("sources", [])
-                for i, word in enumerate(full_answer.split()):
-                    yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
-            else:
-                streamed_text = ""
-                with observability_stage("turn_execution"):
-                    for item in _iter_stream_agent_with_keepalive(
-                        message,
-                        conversation_history,
-                        thread_state,
-                    ):
-                        if item is None:
-                            yield ": keepalive\n\n"
-                            continue
-                        kind, data = item
-                        if kind == "delta":
-                            streamed_text += data
-                            yield _sse({"type": "delta", "text": data})
-                        elif kind == "final":
-                            full_answer = data.get("answer", streamed_text)
-                            mode = data.get("mode", "hybrid")
-                            result_payload = data.get("result", {})
-                            next_cache = data.get("retrieval_cache", thread_state)
-                if not full_answer and streamed_text:
-                    full_answer = streamed_text
-            if not full_answer and not cache_hit:
-                record_observability_fields(error_category="empty_generation")
-                yield _sse({"type": "error", "error": "Generation failed."})
-                return
-        except Exception as exc:  # noqa: BLE001
-            if full_answer.strip():
-                _log_exception("Stream ended with partial answer after error", exc)
-            else:
-                _log_exception("Error during streamed generation", exc)
-                record_observability_fields(
-                    error_category=normalize_error_category(exc),
-                )
-                yield _sse({"type": "error", "error": _stream_generation_error(exc)})
-                return
-
-        if full_answer:
-            enriched = apply_post_stream_fallback(
-                message,
-                full_answer,
-                mode,
-                prepared_intent=result_payload.get("prepared_intent"),
-                conversation_history=conversation_history,
-            )
-            if enriched != full_answer:
-                record_observability_fields(sse_fallback=True)
-                yield _sse({"type": "correction", "text": enriched})
-                full_answer = enriched
-            if (
-                semantic_eligible
-                and mode != "semantic_cache"
-                and _is_cacheable_semantic_answer(full_answer)
-            ):
-                sources_for_cache = extract_sources(mode, result_payload)
-                _semantic_cache.put(
-                    message,
-                    {
-                        "answer": full_answer,
-                        "mode": mode,
-                        "sources": sources_for_cache,
-                        "agent_result": result_payload,
-                    },
-                )
-
-        conn2 = None
-        try:
-            sources = (
-                cached_sources
-                if cache_hit and cached_sources
-                else extract_sources(mode, result_payload)
-            )
-            record_observability_fields(
-                mode=mode,
-                route=str(
-                    result_payload.get("intent")
-                    or result_payload.get("prepared_intent")
-                    or mode
-                ),
-                source_count=len(sources or []),
-                response_char_count=len(full_answer or ""),
-            )
-            conn2 = get_db_connection()
-            with observability_stage("ownership_verification"):
-                thread2 = _fetch_thread(conn2, user_id, thread_id)
-            if not thread2:
-                yield _sse({"type": "error", "error": "Conversation not found."})
-                return
-            with observability_stage("message_persistence"):
-                user_message_row = _insert_message(
-                    conn2,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    role="user",
-                    content=message,
-                )
-                assistant_message_row = _insert_message(
-                    conn2,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    role="assistant",
-                    content=full_answer,
-                    response_mode=mode,
-                    sources=sources,
-                    model_name=os.getenv("GEMINI_MODEL", ""),
-                )
-            if existing_title == "New conversation" and is_first_message:
-                _update_thread(conn2, thread_id, title=summarize_thread_title(message))
-            with observability_stage("thread_state_persistence"):
-                _update_thread_state(conn2, thread_id, next_cache)
-            with observability_stage("interaction_logging"):
-                log_id = log_interaction(
-                    session_id=session_id,
-                    client_query=message,
-                    app_response=full_answer,
-                    mode=mode,
-                    user_id=user_id,
-                    thread_id=thread_id,
-                    message_id=assistant_message_row["id"],
-                )
-                _update_message_meta(
-                    conn2,
-                    assistant_message_row["id"],
-                    {"log_id": log_id},
-                )
-            with observability_stage("message_persistence"):
-                conn2.commit()
-            refreshed_thread = _fetch_thread(conn2, user_id, thread_id)
-            assistant_message_row["message_meta_json"] = json_dumps({"log_id": log_id})
-            yield _sse({
-                "type": "final",
-                "answer": full_answer,
-                "mode": mode,
-                "sources": sources,
-                "thread": _serialize_thread(refreshed_thread),
-                "user_message": _serialize_message(user_message_row),
-                "assistant_message": _serialize_message(assistant_message_row),
-            })
-
-            # Post-final Boston.gov correction (bounded wait; does not block first token).
-            if (
-                full_answer
-                and Config.BOSTON_GOV_ASYNC_ENABLED
-                and not Config.BOSTON_GOV_BLOCKING
-                and should_apply_boston_gov_fallback(message, full_answer, mode)
-            ):
-                enriched = try_boston_gov_enrichment(
-                    message,
-                    full_answer,
-                    timeout_seconds=Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS,
-                )
-                if enriched != full_answer:
-                    record_observability_fields(sse_fallback=True)
-                    yield _sse({"type": "correction", "text": enriched})
-                    try:
-                        cursor = conn2.cursor()
-                        cursor.execute(
-                            "UPDATE conversation_messages SET content = %s WHERE id = %s",
-                            (enriched, assistant_message_row["id"]),
-                        )
-                        conn2.commit()
-                        cursor.close()
-                    except Exception as exc:  # noqa: BLE001
-                        _log_exception("Failed to persist Boston.gov correction", exc)
-                    full_answer = enriched
-            _log_agent_metrics(
-                mode=mode,
-                cache_hit=cache_hit,
-                thread_id=thread_id,
-                streaming=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if conn2:
-                try:
-                    conn2.rollback()
-                except Exception:
-                    pass
-            _log_exception("Error persisting streamed message", exc)
-            record_observability_fields(
-                error_category=normalize_error_category(exc),
-            )
-            yield _sse({"type": "error", "error": "Failed to save message."})
-        finally:
-            if conn2:
-                conn2.close()
-
     def _generate():
+        reset_request_metrics()
+        final_status = 200
         with bind_trace(turn_trace):
+            yield ": keepalive\n\n"
             try:
-                with observability_stage("streaming_duration"):
-                    yield from _generate_body()
+                for event in _iter_service_events_with_keepalive(
+                    turn_request,
+                    _turn_producer,
+                ):
+                    if event is None:
+                        yield ": keepalive\n\n"
+                    elif event.kind is TurnEventKind.DELTA:
+                        yield _sse({"type": "delta", "text": event.payload})
+                    elif event.kind is TurnEventKind.CORRECTION:
+                        yield _sse({"type": "correction", "text": event.payload})
+                    elif event.kind is TurnEventKind.FINAL:
+                        yield _sse(build_sse_final_payload(event.payload))
+                    elif event.kind is TurnEventKind.IN_PROGRESS:
+                        yield _sse({"type": "in_progress", **event.payload})
+                    elif event.kind in {
+                        TurnEventKind.CONFLICT,
+                        TurnEventKind.FAILED,
+                        TurnEventKind.NOT_FOUND,
+                    }:
+                        yield _sse({"type": "error", **event.payload})
+                _log_agent_metrics(
+                    mode="turn_service",
+                    cache_hit=False,
+                    thread_id=thread_id,
+                    streaming=True,
+                )
             except GeneratorExit:
                 record_observability_fields(sse_disconnect=True)
                 raise
             except BaseException as exc:
+                _log_exception("Error during streamed turn", exc)
                 record_observability_fields(
                     error_category=normalize_error_category(exc),
                 )
-                raise
+                yield _sse({"type": "error", "error": _stream_generation_error(exc)})
             finally:
-                finish_turn(turn_trace, status="auto", http_status=200)
+                finish_turn(turn_trace, status="auto", http_status=final_status)
 
     response = Response(
         stream_with_context(_generate()),
@@ -3234,6 +3433,7 @@ def post_conversation_message_stream(thread_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
     def _finish_unconsumed_stream_trace() -> None:
         if turn_trace is not None:
             turn_trace.update(sse_disconnect=True)
@@ -3241,6 +3441,47 @@ def post_conversation_message_stream(thread_id: str):
 
     response.call_on_close(_finish_unconsumed_stream_trace)
     return response
+
+
+@app.route(
+    "/conversations/<thread_id>/turns/<client_turn_id>",
+    methods=["GET"],
+)
+def get_conversation_turn_status(thread_id: str, client_turn_id: str):
+    result = _require_user()
+    if result:
+        return result
+    try:
+        normalized_id, _ = validate_or_generate_client_turn_id(client_turn_id)
+    except InvalidClientTurnId:
+        return _json_error("Invalid message identifier.", 400, "invalid_client_turn_id")
+    row = _turn_repository.load_owned(
+        thread_id=thread_id,
+        user_id=g.current_user_row["id"],
+        client_turn_id=normalized_id,
+    )
+    if row is None:
+        return _json_error("Message status not found.", 404, "turn_not_found")
+    status = str(row.get("status") or "").lower()
+    response: Dict[str, Any] = {
+        "turn": {
+            "client_turn_id": normalized_id,
+            "turn_id": row.get("id"),
+            "status": status,
+            "replayed": status == STATUS_COMPLETED.lower(),
+            "client_idempotent": bool(row.get("client_idempotent")),
+        }
+    }
+    if status == STATUS_COMPLETED.lower():
+        stored = _turn_repository._payload(row)
+        if stored:
+            response["result"] = stored
+    elif status == STATUS_FAILED.lower():
+        response["error"] = "This message could not be completed. Please try again."
+        response["code"] = "turn_failed"
+    else:
+        response["retry_after"] = 2
+    return jsonify(response)
 
 
 # =============================================================================

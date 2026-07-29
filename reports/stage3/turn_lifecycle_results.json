@@ -1,0 +1,65 @@
+{
+  "stage": "3B",
+  "status": "pass",
+  "environment": "loopback API and local sentiment_demo database",
+  "unit_tests": {
+    "repository_python_tests_passed": 144,
+    "frontend_lifecycle_assertions_passed": 8
+  },
+  "lifecycle_checks": {
+    "json_first_execution": true,
+    "json_completed_replay": true,
+    "sse_completed_replay_single_final": true,
+    "sse_disconnect_completion": true,
+    "json_fallback_same_id": true,
+    "fingerprint_conflict": true,
+    "status_ownership": true,
+    "legacy_missing_id": true,
+    "message_pair_inserted_once": true,
+    "active_turn_cleared": true,
+    "cross_worker_duplicate_suppression": true,
+    "same_thread_contention": true,
+    "different_thread_independence": true
+  },
+  "coordination": {
+    "duplicate_race": [
+      "new_execution_owner",
+      "running_existing"
+    ],
+    "same_thread_different_turn": "thread_busy",
+    "different_threads": [
+      "new_execution_owner",
+      "new_execution_owner"
+    ],
+    "reservation_latency_ms": {
+      "iterations": 20,
+      "p50": 5.705,
+      "p95": 7.87,
+      "max": 9.242
+    }
+  },
+  "persistence": {
+    "transaction_rollback_prevented_partial_pair": true,
+    "message_count_after_injected_failure": 0,
+    "stale_state_did_not_overwrite_newer_state": true,
+    "completed_message_count": 2,
+    "restart_replay_generation_callbacks": 0,
+    "restart_replay_persistence_callbacks": 0,
+    "final_transaction_ms": 8.146
+  },
+  "replay_latency_ms": {
+    "json_p50": 9.709,
+    "json_p95": 10.574,
+    "json_max": 10.67,
+    "sse": 8.353,
+    "status_p50": 7.199,
+    "status_p95": 7.63,
+    "status_max": 7.678
+  },
+  "migration": {
+    "clean_temporary_schema": "pass",
+    "second_run": "skipped_by_migration_registry",
+    "temporary_schema_removed": true,
+    "production_used": false
+  }
+}

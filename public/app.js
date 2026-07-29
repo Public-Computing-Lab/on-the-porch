@@ -1263,7 +1263,9 @@ async function sendChatMessage(event) {
 
   const threadId = state.activeThreadId;
   const requestVersion = ++state.messageVersion;
-  const optimisticMessageId = `pending-user-${Date.now()}-${requestVersion}`;
+  const clientTurnId = window.ChatMessageLifecycle.createClientTurnId();
+  const turnPayload = window.ChatMessageLifecycle.payload(message, clientTurnId);
+  const optimisticMessageId = `pending-user-${clientTurnId}`;
   const optimisticMessage = {
     id: optimisticMessageId,
     role: 'user',
@@ -1282,7 +1284,12 @@ async function sendChatMessage(event) {
   setChatLoading(true);
 
   const instant = window.InstantReplies?.isInstant(message);
-  const assistantPendingId = `pending-assistant-${Date.now()}-${requestVersion}`;
+  const assistantPendingId = `pending-assistant-${clientTurnId}`;
+
+  const resolvePendingTurn = async (result) => {
+    if (!window.ChatMessageLifecycle.isPending(result)) return result;
+    return ApiClient.waitForTurn(threadId, clientTurnId);
+  };
 
   if (instant) {
     const localReply = window.InstantReplies.reply(message);
@@ -1303,7 +1310,9 @@ async function sendChatMessage(event) {
 
   try {
     if (instant) {
-      const result = await ApiClient.sendMessage(threadId, { message });
+      const result = await resolvePendingTurn(
+        await ApiClient.sendMessage(threadId, turnPayload),
+      );
       removeTypingIndicator();
 
       if (!result.success) {
@@ -1359,7 +1368,7 @@ async function sendChatMessage(event) {
     }
 
     if (ApiClient.config.streamingEnabled) {
-      const assistantPendingIdStream = `pending-assistant-${Date.now()}-${requestVersion}`;
+      const assistantPendingIdStream = assistantPendingId;
       let assistantContent = '';
       let streamTextEl = null;
       let rafPending = false;
@@ -1399,7 +1408,7 @@ async function sendChatMessage(event) {
         elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
       };
 
-      const streamResult = await ApiClient.sendMessageStream(threadId, { message }, {
+      const streamResult = await ApiClient.sendMessageStream(threadId, turnPayload, {
         onDelta: (text) => {
           if (isStale() || !text) return;
           ensureAssistantBubble();
@@ -1423,7 +1432,9 @@ async function sendChatMessage(event) {
         }
         // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
         // Retry once via the JSON endpoint, which completes without a live stream.
-        const retryResult = await ApiClient.sendMessage(threadId, { message });
+        const retryResult = await resolvePendingTurn(
+          await ApiClient.sendMessage(threadId, turnPayload),
+        );
         if (retryResult.success) {
           const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
           if (threadIndex >= 0) {
@@ -1491,7 +1502,9 @@ async function sendChatMessage(event) {
       return;
     }
 
-    const result = await ApiClient.sendMessage(threadId, { message });
+    const result = await resolvePendingTurn(
+      await ApiClient.sendMessage(threadId, turnPayload),
+    );
     removeTypingIndicator();
 
     if (!result.success) {

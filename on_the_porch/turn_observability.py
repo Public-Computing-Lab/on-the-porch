@@ -153,6 +153,19 @@ class TurnTrace:
             "user_category": user_category or "unknown",
             "transport": transport or "unknown",
             "scenario_id": scenario_id,
+            "client_turn_id": None,
+            "internal_turn_id": None,
+            "client_idempotent": None,
+            "reservation_result": None,
+            "replayed": False,
+            "replay_source": None,
+            "fingerprint_conflict": False,
+            "turn_state": None,
+            "execution_owner": False,
+            "same_thread_contention": False,
+            "version_conflict": False,
+            "persistence_transaction_ms": None,
+            "duplicate_suppression_count": 0,
             "started_at": _utc_now(),
             "completed_at": None,
             "completion_status": "running",
@@ -163,6 +176,7 @@ class TurnTrace:
             "prompt_chars_approx": 0,
             "sql_query_count": 0,
             "sql_fingerprints": [],
+            "dynamic_sql_validations": [],
             "model_call_count": 0,
             "models": [],
             "retry_count": 0,
@@ -199,6 +213,19 @@ class TurnTrace:
             "timeout_category",
             "sse_disconnect",
             "sse_fallback",
+            "client_turn_id",
+            "internal_turn_id",
+            "client_idempotent",
+            "reservation_result",
+            "replayed",
+            "replay_source",
+            "fingerprint_conflict",
+            "turn_state",
+            "execution_owner",
+            "same_thread_contention",
+            "version_conflict",
+            "persistence_transaction_ms",
+            "duplicate_suppression_count",
         }
         with self._lock:
             if self._completed:
@@ -261,6 +288,15 @@ class TurnTrace:
                     self.data["sql_fingerprints"].append(fingerprint)
             if row_count is not None:
                 self.data["sql_row_count"] += max(0, int(row_count))
+
+    def add_dynamic_sql_validation(self, value: Mapping[str, Any]) -> None:
+        """Record bounded SQL-safety diagnostics without raw SQL or literals."""
+        with self._lock:
+            if self._completed:
+                return
+            items = self.data["dynamic_sql_validations"]
+            if len(items) < 8:
+                items.append(redact(dict(value)))
 
     def finish(
         self,
@@ -523,6 +559,12 @@ def record_sql(sql: Optional[str] = None, row_count: Optional[int] = None) -> No
         trace.add_sql(sql, row_count)
 
 
+def record_dynamic_sql_validation(value: Mapping[str, Any]) -> None:
+    trace = get_current_trace()
+    if trace is not None:
+        trace.add_dynamic_sql_validation(value)
+
+
 def record_retrieval(chunk_count: int) -> None:
     increment("retrieved_chunk_count", chunk_count)
 
@@ -587,6 +629,7 @@ __all__ = [
     "model_call",
     "normalize_error_category",
     "record_fields",
+    "record_dynamic_sql_validation",
     "record_retrieval",
     "record_retry",
     "record_sql",
