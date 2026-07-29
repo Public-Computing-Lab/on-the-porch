@@ -17,14 +17,24 @@ from turn_observability import (
     record_sql as record_observability_sql,
     stage as observability_stage,
 )
-from sql_safety import (
-    SQLSafetyError,
-    execute_validated_query,
-    read_only_connection_kwargs,
-    require_dynamic_sql_runtime,
-    safe_sql_observability_payload,
-    validate_dynamic_sql,
-)
+try:
+    from .sql_safety import (
+        SQLSafetyError,
+        execute_validated_query,
+        read_only_connection_kwargs,
+        require_dynamic_sql_runtime,
+        safe_sql_observability_payload,
+        validate_dynamic_sql,
+    )
+except ImportError:  # Direct script/test loading keeps the legacy import path.
+    from sql_safety import (
+        SQLSafetyError,
+        execute_validated_query,
+        read_only_connection_kwargs,
+        require_dynamic_sql_runtime,
+        safe_sql_observability_payload,
+        validate_dynamic_sql,
+    )
 try:
     from langsmith.wrappers import wrap_openai  # type: ignore
 except Exception:

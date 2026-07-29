@@ -218,6 +218,10 @@ DYNAMIC_SQL_MAX_COLUMNS=40
 DYNAMIC_SQL_MAX_PAYLOAD_BYTES=1000000
 DYNAMIC_SQL_LOG_RAW_SQL=false
 
+# Persistent conversation-turn reservation lease (crash recovery only).
+# This is not a global request deadline.
+TURN_LEASE_SECONDS=180
+
 # ============================================================================
 # LangChain / LangSmith tracing (optional)
 # ============================================================================
