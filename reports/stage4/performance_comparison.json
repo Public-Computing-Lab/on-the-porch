@@ -1,0 +1,111 @@
+{
+  "bounded": {
+    "completed": 96,
+    "concurrency": 40,
+    "duplicate_suppressions": 15,
+    "embedding_calls": 42,
+    "failed": 0,
+    "first_sse_token_p50_ms": 11.958,
+    "latency_ms": {
+      "max": 72.475,
+      "p50": 8.151,
+      "p90": 31.618,
+      "p95": 35.906,
+      "p99": 70.703
+    },
+    "logical_executions": 100,
+    "model_calls": 41,
+    "mysql_pool_wait_p95_ms": 0.0,
+    "overload": 16,
+    "permits_released": true,
+    "persistence_p95_ms": 1.64,
+    "provider_max_active": {
+      "dynamic_sql": 1,
+      "embedding": 2,
+      "enrichment": 1,
+      "heavy_rag": 3,
+      "llm": 2
+    },
+    "queue_ms": {
+      "max": 10.281,
+      "p50": 4.315,
+      "p95": 8.526,
+      "p99": 9.032
+    },
+    "rag_calls": 39,
+    "replay_latency_p50_ms": 0.002,
+    "requests": 115,
+    "retry_count": 1,
+    "rss_after_mb": 27.594,
+    "rss_before_mb": 27.594,
+    "rss_growth_mb": 0.0,
+    "sql_calls": 60,
+    "sql_validation_p95_ms": 3.224,
+    "threads_after": 1,
+    "threads_before": 1,
+    "threads_per_worker": 8,
+    "throughput_rps": 741.016,
+    "timed_out": 3,
+    "unfinished_provider_calls": 0,
+    "workers": 2
+  },
+  "conclusion": "Bounded mode exchanges excess work for controlled overload and caps provider-call growth.",
+  "intentionally_unbounded": {
+    "completed": 112,
+    "concurrency": 40,
+    "duplicate_suppressions": 15,
+    "embedding_calls": 44,
+    "failed": 0,
+    "first_sse_token_p50_ms": 9.534,
+    "latency_ms": {
+      "max": 73.087,
+      "p50": 6.217,
+      "p90": 18.324,
+      "p95": 19.412,
+      "p99": 72.366
+    },
+    "logical_executions": 100,
+    "model_calls": 57,
+    "mysql_pool_wait_p95_ms": 0.0,
+    "overload": 0,
+    "permits_released": true,
+    "persistence_p95_ms": 1.794,
+    "provider_max_active": {
+      "dynamic_sql": 2,
+      "embedding": 6,
+      "enrichment": 2,
+      "heavy_rag": 11,
+      "llm": 8
+    },
+    "queue_ms": {
+      "max": 0.37,
+      "p50": 0.018,
+      "p95": 0.155,
+      "p99": 0.286
+    },
+    "rag_calls": 44,
+    "replay_latency_p50_ms": 0.002,
+    "requests": 115,
+    "retry_count": 1,
+    "rss_after_mb": 27.594,
+    "rss_before_mb": 27.594,
+    "rss_growth_mb": 0.0,
+    "sql_calls": 60,
+    "sql_validation_p95_ms": 3.111,
+    "threads_after": 1,
+    "threads_before": 1,
+    "threads_per_worker": 8,
+    "throughput_rps": 865.594,
+    "timed_out": 3,
+    "unfinished_provider_calls": 0,
+    "workers": 2
+  },
+  "provider_call_reduction": {
+    "dynamic_sql": 1,
+    "embedding": 4,
+    "enrichment": 1,
+    "heavy_rag": 8,
+    "llm": 6
+  },
+  "status": "pass"
+}

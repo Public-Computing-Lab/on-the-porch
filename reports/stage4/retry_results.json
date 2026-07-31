@@ -1,0 +1,24 @@
+{
+  "budget_aware": true,
+  "load_retry_count": 1,
+  "max_attempts": 2,
+  "nonretryable": [
+    "authentication",
+    "ownership",
+    "request_conflict",
+    "sql_safety",
+    "invalid_input",
+    "permanent_4xx",
+    "deadline",
+    "capacity",
+    "parser"
+  ],
+  "retryable": [
+    "provider_429",
+    "provider_5xx",
+    "connection_reset",
+    "transient_network",
+    "short_timeout"
+  ],
+  "status": "pass"
+}

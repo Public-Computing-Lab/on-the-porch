@@ -1,0 +1,19 @@
+{
+  "clock": "monotonic",
+  "finalization_reserve_ms": 2000,
+  "focused_budget_tests": 14,
+  "load_fixture_budget_ms": 80,
+  "load_fixture_scheduler_grace_ms": 10,
+  "load_max_latency_ms": 72.978,
+  "stage_caps_ms": {
+    "dynamic_sql": 8000,
+    "embedding": 8000,
+    "enrichment": 3000,
+    "heavy_rag": 10000,
+    "model": 12000,
+    "prepared_sql": 8000
+  },
+  "status": "pass",
+  "timeout_grace_ms": 500,
+  "total_budget_ms": 25000
+}

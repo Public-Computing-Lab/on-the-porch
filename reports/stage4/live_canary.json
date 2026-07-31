@@ -1,0 +1,31 @@
+{
+  "budget_limit_ms": 25500,
+  "environment": {
+    "api": "http://127.0.0.1:8894",
+    "mysql_database": "sentiment_demo",
+    "mysql_host": "localhost",
+    "production_mode": false
+  },
+  "json": {
+    "answer_chars": 370,
+    "latency_ms": 908.825,
+    "mode": "sql",
+    "sources": 1,
+    "status": 201
+  },
+  "message_pairs_duplicated": false,
+  "replay": {
+    "expensive_work_bypassed": true,
+    "latency_ms": 22.235,
+    "replayed": true
+  },
+  "sse": {
+    "answer_chars": 665,
+    "first_delta_ms": 6626.567,
+    "latency_ms": 6663.139,
+    "mode": "rag",
+    "sources": 2,
+    "status": 200
+  },
+  "status": "pass"
+}

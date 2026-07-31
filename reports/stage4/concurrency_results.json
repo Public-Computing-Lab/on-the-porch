@@ -1,0 +1,28 @@
+{
+  "limits": {
+    "dynamic_sql": 2,
+    "embedding": 2,
+    "enrichment": 2,
+    "heavy_rag": 4,
+    "llm": 2
+  },
+  "load_fixture_limits": {
+    "dynamic_sql": 1,
+    "embedding": 2,
+    "enrichment": 1,
+    "heavy_rag": 3,
+    "llm": 2
+  },
+  "load_fixture_queue_wait_cap_ms": 8,
+  "max_observed": {
+    "dynamic_sql": 1,
+    "embedding": 2,
+    "enrichment": 1,
+    "heavy_rag": 3,
+    "llm": 2
+  },
+  "permits_released": true,
+  "queue_wait_cap_ms": 750,
+  "status": "pass",
+  "unfinished_provider_calls": 0
+}
