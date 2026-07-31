@@ -9,10 +9,15 @@ import chromadb
 import google.generativeai as genai  # type: ignore
 from turn_observability import (
     increment as increment_observability,
+    record_retry_decision,
     record_retrieval as record_observability_retrieval,
     record_retry as record_observability_retry,
     stage as observability_stage,
 )
+from external_call import run_bounded_call
+from request_budget import BudgetExhausted, current_budget
+from retry_policy import RetryDecision, RetryPolicy
+from concurrency import CapacityUnavailable
 
 try:
     from langchain_chroma import Chroma
@@ -42,7 +47,7 @@ VECTORDB_DIR = VECTORDB_BGE_DIR if EMBED_PROVIDER == "local" else VECTORDB_GEMIN
 _embeddings_provider: str | None = None
 # How many times to retry a vector-store read when SQLite is momentarily locked
 # (e.g. the nightly ingestion cron is writing to the same store).
-_CHROMA_MAX_ATTEMPTS = max(1, int(os.getenv("CHROMA_MAX_ATTEMPTS", "5")))
+_CHROMA_MAX_ATTEMPTS = max(1, min(int(os.getenv("CHROMA_MAX_ATTEMPTS", "2")), 2))
 # Tracks which vector-store paths have already had WAL mode enabled.
 _WAL_ENABLED_PATHS: set[str] = set()
 
@@ -82,11 +87,30 @@ class GeminiEmbeddings:
 
     def _embed(self, text: str):
         increment_observability("embedding_call_count")
-        with observability_stage(
-            "embedding",
-            attributes={"provider": "gemini", "model": self.model},
-        ):
+        def _call(call_timeout: float):
+            with observability_stage(
+                "embedding",
+                attributes={"provider": "gemini", "model": self.model},
+            ):
+                try:
+                    return genai.embed_content(
+                        model=self.model,
+                        content=text,
+                        request_options={"timeout": call_timeout},
+                    )
+                except TypeError:
+                    return genai.embed_content(model=self.model, content=text)
+
+        if current_budget() is None:
             res = genai.embed_content(model=self.model, content=text)
+        else:
+            res = run_bounded_call(
+                _call,
+                gate_name="embedding",
+                stage="query_embedding",
+                stage_cap_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "8")),
+                minimum_required_seconds=0.25,
+            )
         return res["embedding"]
 
     def embed_documents(self, texts):
@@ -119,15 +143,27 @@ class LocalBGEEmbeddings:
         if not texts:
             return []
         increment_observability("embedding_call_count")
-        with observability_stage(
-            "embedding",
-            attributes={"provider": "local", "model": self.model_name},
-        ):
-            model = self._load_model()
-            vectors = model.encode(
-                list(texts),
-                normalize_embeddings=True,
-                show_progress_bar=False,
+        def _call(_call_timeout: float):
+            with observability_stage(
+                "embedding",
+                attributes={"provider": "local", "model": self.model_name},
+            ):
+                model = self._load_model()
+                return model.encode(
+                    list(texts),
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+
+        if current_budget() is None:
+            vectors = _call(float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "8")))
+        else:
+            vectors = run_bounded_call(
+                _call,
+                gate_name="embedding",
+                stage="query_embedding",
+                stage_cap_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "8")),
+                minimum_required_seconds=0.25,
             )
         return vectors.tolist()
 
@@ -628,10 +664,16 @@ def retrieve(
             "query": query,
         }
 
-    # The nightly ingestion cron writes to the same SQLite-backed store. A
-    # concurrent write can momentarily lock the DB; rather than immediately
-    # degrading to keyword search, wait out a transient lock and retry.
-    for attempt in range(1, _CHROMA_MAX_ATTEMPTS + 1):
+    # The nightly ingestion cron can momentarily lock Chroma. Use the same
+    # bounded retry policy as other request dependencies, then degrade to BM25.
+    policy = RetryPolicy(
+        max_attempts=_CHROMA_MAX_ATTEMPTS,
+        base_backoff_seconds=0.25,
+        max_backoff_seconds=0.25,
+        minimum_attempt_seconds=0.25,
+    )
+
+    def _attempt(_attempt_number: int):
         try:
             with _vectordb_lock:
                 db = vectordb if vectordb is not None else load_vectordb()
@@ -649,30 +691,46 @@ def retrieve(
             record_observability_retrieval(len(result.get("chunks") or []))
             return result
         except Exception as exc:
-            if _is_transient_chroma_error(exc) and attempt < _CHROMA_MAX_ATTEMPTS:
-                record_observability_retry("vector_store")
-                print(
-                    f"  ⏳ Vector store transient error "
-                    f"(attempt {attempt}/{_CHROMA_MAX_ATTEMPTS}): {exc}; retrying"
-                )
+            if _is_transient_chroma_error(exc):
                 _reset_vectordb_singleton()
-                time.sleep(min(2 ** (attempt - 1), 4) * 0.25)
-                continue
-            print(f"  ⚠️ Semantic retrieval failed, falling back to keyword search: {exc}")
-            try:
-                with observability_stage("bm25_retrieval"):
-                    fallback = _keyword_retrieve(
-                        query,
-                        k=k,
-                        doc_type=doc_type,
-                        tags=tags,
-                        source=source,
-                    )
-                record_observability_retrieval(len(fallback.get("chunks") or []))
-                return fallback
-            except Exception as kw_exc:
-                print(f"  ⚠️ Keyword retrieval failed: {kw_exc}")
-                return {"chunks": [], "metadata": [], "scores": None, "query": query}
+                raise ConnectionError("transient_vector_store") from exc
+            raise
+
+    def _observe(decision: RetryDecision) -> None:
+        record_retry_decision(
+            scope="vector_store",
+            retry=decision.retry,
+            category=decision.category,
+            attempt=decision.attempt,
+            backoff_ms=round(decision.backoff_seconds * 1000.0, 3),
+            reason=decision.reason,
+        )
+        if decision.retry:
+            record_observability_retry("vector_store")
+
+    try:
+        return policy.run(_attempt, stage="vector_store", observe=_observe)
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
+    except Exception as exc:
+        print(
+            "  ⚠️ Semantic retrieval unavailable; falling back to keyword search: "
+            f"{exc.__class__.__name__}"
+        )
+        try:
+            with observability_stage("bm25_retrieval"):
+                fallback = _keyword_retrieve(
+                    query,
+                    k=k,
+                    doc_type=doc_type,
+                    tags=tags,
+                    source=source,
+                )
+            record_observability_retrieval(len(fallback.get("chunks") or []))
+            return fallback
+        except Exception as kw_exc:
+            print(f"  ⚠️ Keyword retrieval failed: {kw_exc.__class__.__name__}")
+            return {"chunks": [], "metadata": [], "scores": None, "query": query}
 
 
 def retrieve_transcripts(query, tags=None, k=5, query_embedding=None):

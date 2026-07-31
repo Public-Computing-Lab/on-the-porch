@@ -50,7 +50,6 @@ MYSQL_CONFIG = {
     "charset": "utf8mb4",
     "cursorclass": pymysql.cursors.DictCursor,
 }
-print(MYSQL_CONFIG)
 
 
 def _connect() -> pymysql.connections.Connection:

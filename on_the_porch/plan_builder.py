@@ -19,6 +19,8 @@ from execution_plan import (
 )
 
 from sql_chat import prepared_sql
+from request_budget import BudgetExhausted
+from concurrency import CapacityUnavailable
 
 
 def is_execution_pipeline_enabled() -> bool:
@@ -303,6 +305,8 @@ def build_execution_plan_llm(
             generation_config={"temperature": 0},
         )
         return _parse_llm_plan_json(resp.text or "", question)
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ LLM planner failed: {exc}")
         return None

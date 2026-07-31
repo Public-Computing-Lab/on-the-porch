@@ -8,6 +8,7 @@ to the full LLM SQL pipeline.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from dataclasses import dataclass
@@ -19,6 +20,11 @@ from query_plan import resolve_period as _resolve_period
 from query_plan import PeriodWindow
 
 from civic_decompose import CivicPart, decompose_civic_question
+
+
+def _log_prepared_sql(intent: str, sql: str) -> None:
+    fingerprint = hashlib.sha256((sql or "").encode("utf-8")).hexdigest()[:16]
+    print(f"[Prepared SQL — {intent}] fingerprint={fingerprint}")
 
 # Dorchester scope (matches app4 post-processing conventions).
 _DORCHESTER_311 = (
@@ -732,10 +738,7 @@ def _execute_sql_with_mv_311_fallback(
     fallback_sql = _maybe_fallback_mv_311_sql(sql, question)
     if not fallback_sql or fallback_sql == sql:
         return result, sql
-    print(
-        "\n[Prepared SQL — mv_311_weekly empty, falling back to service_requests_311]\n"
-        f"{fallback_sql}\n"
-    )
+    _log_prepared_sql("mv_311_weekly_fallback", fallback_sql)
     return execute_sql(fallback_sql), fallback_sql
 
 
@@ -2033,7 +2036,7 @@ def execute_prepared_facts(
     supplemental_sql: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run prepared SQL and return canonical facts only (no LLM synthesis)."""
-    print(f"\n[Prepared SQL — {hit.intent}]\n{hit.sql}\n")
+    _log_prepared_sql(hit.intent, hit.sql)
     result, supplemental_result = _execute_prepared_hit(
         hit, question, execute_sql, supplemental_sql=supplemental_sql,
     )
@@ -2182,13 +2185,16 @@ def _try_run_compound_prepared_sql(
         if part.topic == "311" and should_include_311_breakdown(question, hit.intent):
             supplemental_sql = supplemental_sql or _sql_311_top_types(window)
 
-        print(f"\n[Prepared SQL — compound/{part.topic}: {hit.intent}]\n{hit.sql}\n")
+        _log_prepared_sql(f"compound/{part.topic}:{hit.intent}", hit.sql)
         try:
             result, supplemental_result = _execute_prepared_hit(
                 hit, sub_q, execute_sql, supplemental_sql=supplemental_sql,
             )
         except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Compound prepared SQL failed ({part.topic}): {exc}")
+            print(
+                f"Prepared SQL failed (compound/{part.topic}): "
+                f"{exc.__class__.__name__}"
+            )
             continue
 
         canonical = hit.answer_fn(sub_q, result)
@@ -2291,7 +2297,7 @@ def run_prepared_sql(
     if hit is None:
         return None
 
-    print(f"\n[Prepared SQL — {hit.intent}]\n{hit.sql}\n")
+    _log_prepared_sql(hit.intent, hit.sql)
     supplemental_sql = hit.supplemental_sql
     if supplemental_sql is None and should_include_311_breakdown(question, hit.intent):
         supplemental_sql = _sql_311_top_types(_resolve_period(question, 7))
@@ -2300,7 +2306,7 @@ def run_prepared_sql(
             hit, question, execute_sql, supplemental_sql=supplemental_sql,
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠️ Prepared SQL failed ({hit.intent}): {exc}")
+        print(f"Prepared SQL failed ({hit.intent}): {exc.__class__.__name__}")
         return None
 
     use_llm = _prepared_should_use_llm(hit, question)
@@ -2326,7 +2332,10 @@ def run_prepared_sql(
                     conversation_history=conversation_history,
                 )
         except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Prepared SQL LLM summary failed: {exc}")
+            print(
+                "Prepared SQL LLM summary failed: "
+                f"{exc.__class__.__name__}"
+            )
 
     if not (answer or "").strip():
         window = _resolve_period(question, 7)

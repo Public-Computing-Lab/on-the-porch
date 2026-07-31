@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional
 
 from execution_plan import (
@@ -15,7 +15,14 @@ from execution_plan import (
     log_fact_bundle,
 )
 from query_plan import resolve_period
-from turn_observability import submit_with_trace
+from request_budget import raise_if_exhausted, timeout_for
+from concurrency import CapacityUnavailable
+from request_budget import BudgetExhausted
+from turn_observability import (
+    increment as increment_observability,
+    record_fields as record_observability_fields,
+    submit_with_trace,
+)
 
 from sql_chat import prepared_sql
 
@@ -75,6 +82,8 @@ def _execute_sql_part(
             execute_sql,
             supplemental_sql=supplemental_sql,
         )
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ SQL part failed ({part.intent}): {exc}")
         return FactPart(
@@ -133,6 +142,8 @@ def _execute_rag_part(
     }
     try:
         chunks, metadata = retrieve_fn(question, plan_stub)
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ RAG part failed: {exc}")
         return FactPart(
@@ -179,6 +190,7 @@ def execute_plan(
 ) -> FactBundle:
     """Execute all plan parts without LLM calls."""
     started = time.perf_counter()
+    raise_if_exhausted("plan_execution")
 
     def _run(part: PlanPart) -> FactPart:
         if part.path == "sql":
@@ -200,9 +212,72 @@ def execute_plan(
         fact_parts = [_run(plan.parts[0])]
     else:
         workers = min(_MAX_WORKERS, len(plan.parts))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
             futures = [submit_with_trace(executor, _run, part) for part in plan.parts]
-            fact_parts = [future.result() for future in futures]
+            collection_timeout = timeout_for(
+                "plan_parallel_collection",
+                float(os.getenv("PLAN_COLLECTION_TIMEOUT_SECONDS", "12")),
+                minimum_required=0.1,
+            )
+            done, pending = wait(set(futures), timeout=collection_timeout)
+            canceled = sum(1 for future in pending if future.cancel())
+            if canceled:
+                increment_observability("canceled_future_count", canceled)
+            if pending:
+                record_observability_fields(partial_path_completion=bool(done))
+            fact_parts = []
+            for part, future in zip(plan.parts, futures):
+                if future not in done:
+                    fact_parts.append(
+                        FactPart(
+                            path=part.path,
+                            intent=part.intent,
+                            topic=part.topic,
+                            sub_question=part.sub_question,
+                            canonical_facts="",
+                            error=f"{part.path}_timeout",
+                        )
+                    )
+                    continue
+                try:
+                    fact_parts.append(future.result())
+                except BudgetExhausted:
+                    fact_parts.append(
+                        FactPart(
+                            path=part.path,
+                            intent=part.intent,
+                            topic=part.topic,
+                            sub_question=part.sub_question,
+                            canonical_facts="",
+                            error=f"{part.path}_timeout",
+                        )
+                    )
+                except CapacityUnavailable:
+                    fact_parts.append(
+                        FactPart(
+                            path=part.path,
+                            intent=part.intent,
+                            topic=part.topic,
+                            sub_question=part.sub_question,
+                            canonical_facts="",
+                            error="capacity_unavailable",
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    fact_parts.append(
+                        FactPart(
+                            path=part.path,
+                            intent=part.intent,
+                            topic=part.topic,
+                            sub_question=part.sub_question,
+                            canonical_facts="",
+                            error=f"{part.path}_unavailable",
+                        )
+                    )
+                    print(f"  ⚠️ Plan part failed ({part.path}): {exc.__class__.__name__}")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     execute_ms = int((time.perf_counter() - started) * 1000)
     bundle = FactBundle(

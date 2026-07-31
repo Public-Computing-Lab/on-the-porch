@@ -1,0 +1,28 @@
+{
+  "authoritative_input": "frozen_stage2_captured_responses",
+  "calibrated_passed": 27,
+  "known_defects_worsened": 0,
+  "multi_turn_scenarios": 43,
+  "new_critical_failures": 0,
+  "prompts_changed": false,
+  "retrieval_ranking_changed": false,
+  "routing_semantics_changed": false,
+  "scenarios": 84,
+  "stage": "4",
+  "stage3_reference": {
+    "failed_baseline_scenarios": 57,
+    "input": "frozen Stage 2 captured responses",
+    "known_tier1_defects_worsened": 0,
+    "multi_turn_scenarios": 43,
+    "new_protected_critical_failures": 0,
+    "passed": 27,
+    "result": "PASS",
+    "scenarios": 84,
+    "skipped": 0,
+    "tier1_hard_gate_total": 9,
+    "tier1_hard_gates_preserved": 9
+  },
+  "status": "pass",
+  "tier1_hard_gate_total": 9,
+  "tier1_hard_gates_preserved": 9
+}
