@@ -14,12 +14,18 @@ from turn_observability import (
     model_call,
     record_dynamic_sql_validation,
     record_retry as record_observability_retry,
+    record_retry_decision,
     record_sql as record_observability_sql,
     stage as observability_stage,
 )
+from concurrency import gate
+from external_call import run_bounded_call
+from request_budget import current_budget, timeout_for
+from retry_policy import RetryDecision, RetryPolicy
 try:
     from .sql_safety import (
         SQLSafetyError,
+        dynamic_sql_timeout_ms,
         execute_validated_query,
         read_only_connection_kwargs,
         require_dynamic_sql_runtime,
@@ -29,6 +35,7 @@ try:
 except ImportError:  # Direct script/test loading keeps the legacy import path.
     from sql_safety import (
         SQLSafetyError,
+        dynamic_sql_timeout_ms,
         execute_validated_query,
         read_only_connection_kwargs,
         require_dynamic_sql_runtime,
@@ -181,33 +188,43 @@ def _generate_content(model, prompt, generation_config, *, attempt: int = 1):
         or getattr(model, "_model_name", None)
         or GEMINI_MODEL
     )
-    with model_call(
-        "sql_chat_generation",
-        model_name,
-        attempt=attempt,
-        input_size=len(prompt or ""),
-    ) as call:
-        if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
-            try:
-                response = model.generate_content(
-                    prompt,
-                    generation_config=generation_config,
-                    request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
-                )
-            except TypeError:
-                _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
-            else:
+    def _provider_call(call_timeout: float):
+        global _GEMINI_SUPPORTS_REQUEST_OPTIONS
+        with model_call(
+            "sql_chat_generation",
+            model_name,
+            attempt=attempt,
+            input_size=len(prompt or ""),
+        ) as call:
+            if _GEMINI_SUPPORTS_REQUEST_OPTIONS:
                 try:
-                    call.set_output_size(len(response.text or ""))
-                except Exception:
-                    pass
-                return response
-        response = model.generate_content(prompt, generation_config=generation_config)
-        try:
-            call.set_output_size(len(response.text or ""))
-        except Exception:
-            pass
-        return response
+                    response = model.generate_content(
+                        prompt,
+                        generation_config=generation_config,
+                        request_options={"timeout": call_timeout},
+                    )
+                except TypeError:
+                    _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
+                else:
+                    try:
+                        call.set_output_size(len(response.text or ""))
+                    except Exception:
+                        pass
+                    return response
+            response = model.generate_content(prompt, generation_config=generation_config)
+            try:
+                call.set_output_size(len(response.text or ""))
+            except Exception:
+                pass
+            return response
+
+    return run_bounded_call(
+        _provider_call,
+        gate_name="llm",
+        stage="gemini_sql_chat",
+        stage_cap_seconds=GEMINI_REQUEST_TIMEOUT,
+        minimum_required_seconds=0.75,
+    )
 
 
 @traceable(name="gemini_chat")
@@ -223,31 +240,30 @@ def _chat_with_model(user_message: str, model_name: str = GEMINI_MODEL, temperat
     client = _get_gemini_client()
     model = client.GenerativeModel(model_name)
 
-    response = None
-    last_exc: Exception | None = None
-    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
-        try:
-            response = _generate_content(
-                model,
-                user_message,
-                {"temperature": temperature},
-                attempt=attempt,
-            )
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
-                record_observability_retry("gemini_sql_chat")
-                backoff = min(2 ** (attempt - 1), 8) * 0.5
-                print(
-                    f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
-                    f"{exc}; retrying in {backoff:.1f}s"
-                )
-                time.sleep(backoff)
-                continue
-            raise
-    if response is None:  # pragma: no cover - defensive; loop either breaks or raises
-        raise RuntimeError(f"Gemini call failed: {last_exc}")
+    policy = RetryPolicy(max_attempts=min(GEMINI_MAX_ATTEMPTS, 2))
+
+    def _observe(decision: RetryDecision) -> None:
+        record_retry_decision(
+            scope="gemini_sql_chat",
+            retry=decision.retry,
+            category=decision.category,
+            attempt=decision.attempt,
+            backoff_ms=round(decision.backoff_seconds * 1000.0, 3),
+            reason=decision.reason,
+        )
+        if decision.retry:
+            record_observability_retry("gemini_sql_chat")
+
+    response = policy.run(
+        lambda attempt: _generate_content(
+            model,
+            user_message,
+            {"temperature": temperature},
+            attempt=attempt,
+        ),
+        stage="gemini_sql_chat",
+        observe=_observe,
+    )
 
     # Extract token usage and attach to current trace (if any)
     try:
@@ -302,10 +318,17 @@ def _connect_mysql():
     password = os.environ.get("MYSQL_PASSWORD", "")
     db_name = os.environ.get("MYSQL_DB", "rethink_ai_boston")
 
-    last_exc: Exception | None = None
-    for attempt in range(1, DB_MAX_ATTEMPTS + 1):
-        try:
-            return pymysql.connect(
+    policy = RetryPolicy(max_attempts=min(DB_MAX_ATTEMPTS, 2))
+
+    def _connect(_attempt: int):
+        connect_timeout = timeout_for(
+            "mysql_connection",
+            float(os.getenv("MYSQL_CONNECT_TIMEOUT", "10")),
+            # PyMySQL rounds these socket timeouts to whole seconds. Do not
+            # start a connection attempt when less than that minimum remains.
+            minimum_required=1.0,
+        )
+        return pymysql.connect(
                 host=host,
                 port=port,
                 user=user,
@@ -314,23 +337,27 @@ def _connect_mysql():
                 charset="utf8mb4",
                 cursorclass=pymysql.cursors.Cursor,
                 autocommit=True,
+                connect_timeout=max(1, int(connect_timeout)),
+                read_timeout=max(1, int(connect_timeout)),
+                write_timeout=max(1, int(connect_timeout)),
             )
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            print(
-                f"MySQL connection failed (attempt {attempt}/{DB_MAX_ATTEMPTS}): {exc}",
-                file=sys.stderr,
-            )
-            if attempt < DB_MAX_ATTEMPTS:
-                record_observability_retry("mysql_connection")
-                time.sleep(min(2 ** (attempt - 1), 4) * 0.5)
 
-    # Do NOT sys.exit here: that raises SystemExit (a BaseException), which the
-    # API's `except Exception` handlers cannot catch, killing the worker on a
-    # transient DB blip. Raise a normal exception so the request fails cleanly
-    # with a 500 JSON response while the worker stays alive.
-    raise RuntimeError(
-        f"MySQL connection failed after {DB_MAX_ATTEMPTS} attempts: {last_exc}"
+    def _observe(decision: RetryDecision) -> None:
+        record_retry_decision(
+            scope="mysql_connection",
+            retry=decision.retry,
+            category=decision.category,
+            attempt=decision.attempt,
+            backoff_ms=round(decision.backoff_seconds * 1000.0, 3),
+            reason=decision.reason,
+        )
+        if decision.retry:
+            record_observability_retry("mysql_connection")
+
+    return policy.run(
+        _connect,
+        stage="mysql_connection",
+        observe=_observe,
     )
 
 
@@ -1083,6 +1110,14 @@ def _execute_sql(sql: str, *, trusted: bool = False) -> Dict[str, Any]:
                     os.getenv("DYNAMIC_SQL_RO_DB")
                     or os.getenv("MYSQL_DB")
                 ),
+                timeout_ms=int(
+                    timeout_for(
+                        "dynamic_sql_execution",
+                        dynamic_sql_timeout_ms() / 1000.0,
+                        minimum_required=0.1,
+                    )
+                    * 1000
+                ),
             )
             record_dynamic_sql_validation(
                 safe_sql_observability_payload(validated=validated, accepted=True)
@@ -1095,10 +1130,14 @@ def _execute_sql(sql: str, *, trusted: bool = False) -> Dict[str, Any]:
                     "tables": list(validated.tables),
                 },
             ):
-                bounded, execution_ms = execute_validated_query(
-                    _get_dynamic_db_connection(),
-                    validated,
-                )
+                with gate("dynamic_sql").lease(
+                    budget=current_budget(),
+                    minimum_execution_seconds=0.1,
+                ):
+                    bounded, execution_ms = execute_validated_query(
+                        _get_dynamic_db_connection(),
+                        validated,
+                    )
             result = {
                 "columns": list(bounded.columns),
                 "rows": list(bounded.rows),
@@ -1148,6 +1187,15 @@ def _execute_sql(sql: str, *, trusted: bool = False) -> Dict[str, Any]:
         # error leaves the connection usable (autocommit, no open transaction); the
         # next borrow re-pings and reconnects if the socket was dropped.
         with conn.cursor() as cur:
+            statement_timeout_ms = int(
+                timeout_for(
+                    "prepared_sql_execution",
+                    float(os.getenv("PREPARED_SQL_TIMEOUT_MS", "8000")) / 1000.0,
+                    minimum_required=0.1,
+                )
+                * 1000
+            )
+            cur.execute(f"SET SESSION MAX_EXECUTION_TIME = {statement_timeout_ms}")
             cur.execute(sql)
             rows = cur.fetchall()
             cols = [d[0] for d in cur.description] if cur.description else []
@@ -1168,14 +1216,19 @@ def _execute_with_retries(
     metadata: str,
     max_attempts: int = SQL_MAX_RETRIES,
 ) -> Dict[str, Any]:
-    # Clamp max attempts to prevent infinite loops
-    max_attempts = max(1, min(int(max_attempts or 1), 5))
+    # One initial query plus at most one budget-aware semantic repair.
+    max_attempts = max(1, min(int(max_attempts or 1), 2))
     sql = initial_sql
     last_err: Exception | None = None
     previous_sqls = []  # Track previous SQL attempts to avoid infinite loops
     error_count = {}  # Track how many times we've seen the same error
     
     for attempt_idx in range(1, max_attempts + 1):
+        timeout_for(
+            "dynamic_sql_attempt",
+            dynamic_sql_timeout_ms() / 1000.0,
+            minimum_required=0.25,
+        )
         try:
             if attempt_idx > 1:
                 record_observability_retry("dynamic_sql")
@@ -1331,6 +1384,8 @@ def _execute_with_retries(
                     metadata=current_metadata,
                 )
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, SQLSafetyError):
+                raise
             last_err = exc
             err_text = str(exc)
             if attempt_idx == max_attempts:

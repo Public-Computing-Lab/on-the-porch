@@ -219,10 +219,48 @@ def pipeline_logging_enabled() -> bool:
 def log_execution_plan(plan: ExecutionPlan) -> None:
     if not pipeline_logging_enabled():
         return
-    print(f"  📋 ExecutionPlan (tier {plan.tier}): {json.dumps(plan.to_dict(), ensure_ascii=False)}")
+    safe_plan = {
+        "tier": plan.tier,
+        "routing_mode": plan.routing_mode,
+        "routing_intent": plan.routing_intent,
+        "part_count": len(plan.parts),
+        "parts": [
+            {
+                "path": part.path,
+                "intent": part.intent,
+                "topic": part.topic,
+                "has_rag_hints": part.rag_hints is not None,
+            }
+            for part in plan.parts
+        ],
+    }
+    print(
+        f"  📋 ExecutionPlan (tier {plan.tier}): "
+        f"{json.dumps(safe_plan, ensure_ascii=False)}"
+    )
 
 
 def log_fact_bundle(bundle: FactBundle) -> None:
     if not pipeline_logging_enabled():
         return
-    print(f"  📦 FactBundle ({bundle.execute_ms}ms): {json.dumps(bundle.to_dict(), ensure_ascii=False, default=str)}")
+    safe_bundle = {
+        "tier": bundle.tier,
+        "execute_ms": bundle.execute_ms,
+        "prepared_intent": bundle.prepared_intent,
+        "part_count": len(bundle.parts),
+        "parts": [
+            {
+                "path": part.path,
+                "intent": part.intent,
+                "topic": part.topic,
+                "row_count": len((part.result or {}).get("rows") or []),
+                "rag_chunk_count": len(part.rag_chunks or []),
+                "has_error": bool(part.error),
+            }
+            for part in bundle.parts
+        ],
+    }
+    print(
+        f"  📦 FactBundle ({bundle.execute_ms}ms): "
+        f"{json.dumps(safe_bundle, ensure_ascii=False)}"
+    )

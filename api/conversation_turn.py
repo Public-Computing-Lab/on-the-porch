@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -13,6 +13,13 @@ from turn_repository import (
     STATUS_RUNNING,
     TurnRepository,
     TurnReservation,
+)
+from concurrency_control import CapacityUnavailable, OVERLOAD_RETRY_AFTER_SECONDS
+from on_the_porch.request_budget import (
+    BudgetExhausted,
+    TurnBudget,
+    create_turn_budget,
+    use_turn_budget,
 )
 
 
@@ -47,6 +54,7 @@ class TurnContext:
     history_rows: list[dict[str, Any]]
     conversation_history: list[dict[str, str]]
     thread_state: dict[str, Any]
+    budget: Optional[TurnBudget] = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +151,7 @@ class ConversationTurnService:
                 replayed=True,
                 replay_source="mysql_turn_payload",
                 duplicate_suppression_count=1,
+                replay_bypassed_expensive_work=True,
             )
             yield TurnEvent(
                 TurnEventKind.FINAL,
@@ -179,12 +188,11 @@ class ConversationTurnService:
             )
             yield TurnEvent(
                 TurnEventKind.FAILED,
-                {
-                    "code": "turn_failed",
-                    "client_turn_id": request.client_turn_id,
-                    "status": STATUS_FAILED.lower(),
-                    "error": "This message could not be completed. Please try again.",
-                },
+                self._failure_payload(
+                    request.client_turn_id,
+                    reservation.error_category or "turn_failed",
+                    replayed=True,
+                ),
             )
             return
         if reservation.kind is ReservationKind.FINGERPRINT_CONFLICT:
@@ -210,41 +218,128 @@ class ConversationTurnService:
             )
             return
 
+        budget = create_turn_budget(reservation.turn_id)
+        self.observe(
+            total_budget_ms=int(budget.total_seconds * 1000),
+            initial_remaining_budget_ms=budget.remaining_ms(),
+            finalization_reserve_ms=int(budget.finalization_reserve_seconds * 1000),
+        )
         context: Optional[TurnContext] = None
-        try:
-            context = self.load_context(request, reservation)
-            if not self.repository.mark_running(reservation, user_id=request.user_id):
-                raise RuntimeError("turn_execution_ownership_lost")
-            self.observe(turn_state=STATUS_RUNNING.lower())
-            generated: Optional[GeneratedTurn] = None
-            for event in producer(context):
-                if event.kind is TurnEventKind.FINAL:
-                    if not isinstance(event.payload, GeneratedTurn):
-                        raise TypeError("producer final payload must be GeneratedTurn")
-                    generated = event.payload
-                else:
-                    yield event
-            if generated is None:
-                raise RuntimeError("turn_generation_empty")
-            final_payload = self.finalize(context, generated)
-            self.observe(turn_state=STATUS_COMPLETED.lower())
-            yield TurnEvent(
-                TurnEventKind.FINAL,
-                self._with_replay_metadata(
-                    final_payload,
+        with use_turn_budget(budget):
+            try:
+                budget.raise_if_exhausted("context_load")
+                context = replace(
+                    self.load_context(request, reservation),
+                    budget=budget,
+                )
+                if not self.repository.mark_running(reservation, user_id=request.user_id):
+                    raise RuntimeError("turn_execution_ownership_lost")
+                self.observe(turn_state=STATUS_RUNNING.lower())
+                generated: Optional[GeneratedTurn] = None
+                for event in producer(context):
+                    if event.kind is TurnEventKind.FINAL:
+                        if not isinstance(event.payload, GeneratedTurn):
+                            raise TypeError("producer final payload must be GeneratedTurn")
+                        generated = event.payload
+                    else:
+                        yield event
+                if generated is None:
+                    raise RuntimeError("turn_generation_empty")
+                budget.raise_if_exhausted(
+                    "final_persistence",
+                    reserve_finalization=False,
+                )
+                final_payload = self.finalize(context, generated)
+                self.observe(
+                    turn_state=STATUS_COMPLETED.lower(),
+                    remaining_budget_ms=budget.remaining_ms(
+                        reserve_finalization=False
+                    ),
+                    completion_within_budget=not budget.is_exhausted(
+                        reserve_finalization=False
+                    ),
+                )
+                yield TurnEvent(
+                    TurnEventKind.FINAL,
+                    self._with_replay_metadata(
+                        final_payload,
+                        reservation,
+                        replayed=False,
+                        status=STATUS_COMPLETED,
+                    ),
+                )
+            except BaseException as exc:
+                category = self.normalize_error(exc)
+                if isinstance(exc, BudgetExhausted):
+                    category = "turn_timeout"
+                    budget.record_timeout(exc.stage)
+                elif isinstance(exc, CapacityUnavailable):
+                    category = "capacity_unavailable"
+                self.repository.mark_failed(
                     reservation,
-                    replayed=False,
-                    status=STATUS_COMPLETED,
-                ),
+                    user_id=request.user_id,
+                    error_category=category,
+                )
+                self.observe(
+                    turn_state=STATUS_FAILED.lower(),
+                    error_category=category,
+                    timeout_category=(
+                        "turn_budget" if isinstance(exc, BudgetExhausted) else None
+                    ),
+                    budget_exhaustion_stage=budget.timeout_stage,
+                    remaining_budget_ms=budget.remaining_ms(
+                        reserve_finalization=False
+                    ),
+                    completion_within_budget=not budget.is_exhausted(
+                        reserve_finalization=False
+                    ),
+                    overload_result=(
+                        "capacity_unavailable"
+                        if isinstance(exc, CapacityUnavailable)
+                        else None
+                    ),
+                )
+                if isinstance(exc, (BudgetExhausted, CapacityUnavailable)):
+                    yield TurnEvent(
+                        TurnEventKind.FAILED,
+                        self._failure_payload(
+                            request.client_turn_id,
+                            category,
+                            replayed=False,
+                        ),
+                    )
+                    return
+                raise
+
+    @staticmethod
+    def _failure_payload(
+        client_turn_id: str,
+        category: str,
+        *,
+        replayed: bool,
+    ) -> dict[str, Any]:
+        if category in {"turn_timeout", "timeout", "turn_budget"}:
+            code = "turn_timed_out"
+            error = (
+                "I couldn't complete that within the available time. "
+                "Please try again."
             )
-        except BaseException as exc:
-            self.repository.mark_failed(
-                reservation,
-                user_id=request.user_id,
-                error_category=self.normalize_error(exc),
+        elif category == "capacity_unavailable":
+            code = "capacity_unavailable"
+            error = (
+                "The service is handling a lot of requests right now. "
+                "Please try again shortly."
             )
-            self.observe(
-                turn_state=STATUS_FAILED.lower(),
-                error_category=self.normalize_error(exc),
-            )
-            raise
+        else:
+            code = "turn_failed"
+            error = "This message could not be completed. Please try again."
+        payload: dict[str, Any] = {
+            "code": code,
+            "client_turn_id": client_turn_id,
+            "status": STATUS_FAILED.lower(),
+            "error": error,
+            "replayed": replayed,
+        }
+        if code == "capacity_unavailable":
+            payload["retry_after"] = OVERLOAD_RETRY_AFTER_SECONDS
+        return payload

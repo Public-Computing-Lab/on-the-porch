@@ -189,6 +189,20 @@ class TurnTrace:
             "duration_ms": None,
             "error_category": None,
             "timeout_category": None,
+            "total_budget_ms": None,
+            "initial_remaining_budget_ms": None,
+            "finalization_reserve_ms": None,
+            "remaining_budget_ms": None,
+            "budget_exhaustion_stage": None,
+            "completion_within_budget": None,
+            "external_timeout_ms": None,
+            "partial_path_completion": False,
+            "canceled_future_count": 0,
+            "noncancelable_call_running": False,
+            "overload_result": None,
+            "replay_bypassed_expensive_work": False,
+            "retry_decisions": [],
+            "gate_events": [],
             "sse_disconnect": False,
             "sse_fallback": False,
             "stages": [],
@@ -211,6 +225,17 @@ class TurnTrace:
             "response_char_count",
             "error_category",
             "timeout_category",
+            "total_budget_ms",
+            "initial_remaining_budget_ms",
+            "finalization_reserve_ms",
+            "remaining_budget_ms",
+            "budget_exhaustion_stage",
+            "completion_within_budget",
+            "external_timeout_ms",
+            "partial_path_completion",
+            "noncancelable_call_running",
+            "overload_result",
+            "replay_bypassed_expensive_work",
             "sse_disconnect",
             "sse_fallback",
             "client_turn_id",
@@ -245,6 +270,7 @@ class TurnTrace:
             "source_count",
             "prompt_chars_approx",
             "response_char_count",
+            "canceled_future_count",
         }
         if field not in allowed:
             return
@@ -276,6 +302,18 @@ class TurnTrace:
             self.data["retry_count"] += amount
             retries = self.data["retries_by_scope"]
             retries[safe_scope] = int(retries.get(safe_scope) or 0) + amount
+
+    def add_retry_decision(self, value: Mapping[str, Any]) -> None:
+        with self._lock:
+            if not self._completed:
+                self.data["retry_decisions"].append(redact(dict(value)))
+
+    def add_gate_event(self, value: Mapping[str, Any]) -> None:
+        with self._lock:
+            if not self._completed:
+                events = self.data["gate_events"]
+                if len(events) < 100:
+                    events.append(redact(dict(value)))
 
     def add_sql(self, sql: Optional[str], row_count: Optional[int]) -> None:
         with self._lock:
@@ -553,6 +591,18 @@ def record_retry(scope: str, count: int = 1) -> None:
         trace.add_retry(scope, count)
 
 
+def record_retry_decision(**fields: Any) -> None:
+    trace = get_current_trace()
+    if trace is not None:
+        trace.add_retry_decision(fields)
+
+
+def record_gate_event(**fields: Any) -> None:
+    trace = get_current_trace()
+    if trace is not None:
+        trace.add_gate_event(fields)
+
+
 def record_sql(sql: Optional[str] = None, row_count: Optional[int] = None) -> None:
     trace = get_current_trace()
     if trace is not None:
@@ -632,6 +682,8 @@ __all__ = [
     "record_dynamic_sql_validation",
     "record_retrieval",
     "record_retry",
+    "record_retry_decision",
+    "record_gate_event",
     "record_sql",
     "record_timeout",
     "redact",

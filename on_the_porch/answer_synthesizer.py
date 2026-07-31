@@ -16,6 +16,9 @@ from answer_voice import (
 )
 from execution_plan import FactBundle, FactPart
 from turn_observability import stage as observability_stage
+from turn_observability import record_fields as record_observability_fields
+from request_budget import BudgetExhausted
+from concurrency import CapacityUnavailable
 
 from sql_chat import prepared_sql
 
@@ -106,6 +109,12 @@ def synthesize_answer(
     display_question: Optional[str] = None,
 ) -> str:
     """Single LLM call to turn structured facts into a conversational reply."""
+    if not _fallback_answer(bundle):
+        errors = [str(part.error or "") for part in bundle.parts]
+        if errors and any(error == "capacity_unavailable" for error in errors):
+            raise CapacityUnavailable("evidence", 0)
+        if errors and any(error.endswith("_timeout") for error in errors):
+            raise BudgetExhausted("evidence_retrieval")
     if not is_answer_synthesis_enabled():
         return _fallback_answer(bundle)
 
@@ -131,6 +140,12 @@ def synthesize_answer(
             return app4._call_gemini_with_logging(
                 model, full_prompt, temperature=temp,
             ).strip()
+    except (BudgetExhausted, CapacityUnavailable):
+        fallback = _fallback_answer(bundle)
+        if fallback:
+            record_observability_fields(partial_path_completion=True)
+            return fallback
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer synthesis failed: {exc}")
         return _fallback_answer(bundle)

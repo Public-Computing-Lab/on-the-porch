@@ -271,3 +271,62 @@ def test_app4_imports_through_sql_chat_package() -> None:
 
     module = importlib.import_module("sql_chat.app4")
     assert callable(module.validate_dynamic_sql)
+
+
+def test_prepared_sql_logging_uses_fingerprint(capsys) -> None:
+    from sql_chat import prepared_sql
+
+    private_literal = "resident-private-literal"
+    prepared_sql._log_prepared_sql(
+        "event_lookup",
+        f"SELECT * FROM weekly_events WHERE event_name = '{private_literal}'",
+    )
+    output = capsys.readouterr().out
+    assert "fingerprint=" in output
+    assert private_literal not in output
+    assert "SELECT" not in output
+
+
+def test_execution_pipeline_logs_omit_questions_sql_and_evidence(capsys) -> None:
+    from execution_plan import (
+        ExecutionPlan,
+        FactBundle,
+        FactPart,
+        PlanPart,
+        log_execution_plan,
+        log_fact_bundle,
+    )
+
+    private_question = "What happened at resident-private-address?"
+    private_evidence = "A resident described private circumstances."
+    private_sql = "SELECT * FROM weekly_events WHERE event_name = 'private-event'"
+    plan = ExecutionPlan(
+        question=private_question,
+        routing_mode="sql",
+        routing_intent="events",
+        parts=[PlanPart(path="sql", intent="events_list", sub_question=private_question)],
+    )
+    bundle = FactBundle(
+        question=private_question,
+        parts=[
+            FactPart(
+                path="sql",
+                intent="events_list",
+                topic="events",
+                sub_question=private_question,
+                canonical_facts=private_evidence,
+                sql=private_sql,
+                result={"rows": [{"event": "private-event"}]},
+            )
+        ],
+        prepared_intent="events_list",
+    )
+
+    log_execution_plan(plan)
+    log_fact_bundle(bundle)
+    output = capsys.readouterr().out
+    assert "events_list" in output
+    assert private_question not in output
+    assert private_evidence not in output
+    assert private_sql not in output
+    assert "private-event" not in output

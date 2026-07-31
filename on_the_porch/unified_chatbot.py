@@ -4,7 +4,7 @@ import sys
 import json
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,13 +31,26 @@ from query_plan import build_query_plan  # noqa: E402
 from turn_observability import (  # noqa: E402
     bind_trace,
     get_current_trace,
+    increment as increment_observability,
     model_call,
     record_fields as record_observability_fields,
     record_retry as record_observability_retry,
+    record_retry_decision,
     record_retrieval as record_observability_retrieval,
     stage as observability_stage,
     submit_with_trace,
 )
+from external_call import run_bounded_call, stream_bounded_call  # noqa: E402
+from request_budget import (  # noqa: E402
+    BudgetExhausted,
+    TURN_MIN_RETRIEVAL_BUDGET_MS,
+    TURN_MIN_SYNTHESIS_BUDGET_MS,
+    current_budget,
+    raise_if_exhausted,
+    timeout_for,
+)
+from retry_policy import RetryDecision, RetryPolicy  # noqa: E402
+from concurrency import CapacityUnavailable  # noqa: E402
 
 # Gemini client is configured locally (sql_chat uses app4, not legacy app3).
 try:
@@ -224,17 +237,36 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 
 def _generate_content(model, prompt, generation_config):
-    """Call Gemini with a per-request timeout and transient retries."""
+    """Call Gemini through one deadline-aware gate and retry policy."""
     global _GEMINI_SUPPORTS_REQUEST_OPTIONS
-    last_exc: Optional[Exception] = None
-    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+
+    policy = RetryPolicy(
+        max_attempts=min(GEMINI_MAX_ATTEMPTS, 2),
+        minimum_attempt_seconds=0.75,
+    )
+
+    def _observe(decision: RetryDecision) -> None:
+        record_retry_decision(
+            scope="gemini_generation",
+            retry=decision.retry,
+            category=decision.category,
+            attempt=decision.attempt,
+            backoff_ms=round(decision.backoff_seconds * 1000.0, 3),
+            reason=decision.reason,
+        )
+        if decision.retry:
+            record_observability_retry("gemini_generation")
+
+    def _attempt(attempt: int):
         increment_llm_call_counter()
-        try:
-            model_name = str(
-                getattr(model, "model_name", None)
-                or getattr(model, "_model_name", None)
-                or GEMINI_MODEL
-            )
+        model_name = str(
+            getattr(model, "model_name", None)
+            or getattr(model, "_model_name", None)
+            or GEMINI_MODEL
+        )
+
+        def _provider_call(call_timeout: float):
+            global _GEMINI_SUPPORTS_REQUEST_OPTIONS
             with model_call(
                 "chat_generation",
                 model_name,
@@ -246,7 +278,7 @@ def _generate_content(model, prompt, generation_config):
                         response = model.generate_content(
                             prompt,
                             generation_config=generation_config,
-                            request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                            request_options={"timeout": call_timeout},
                         )
                     except TypeError:
                         _GEMINI_SUPPORTS_REQUEST_OPTIONS = False
@@ -265,19 +297,20 @@ def _generate_content(model, prompt, generation_config):
                 except Exception:
                     pass
                 return response
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
-                record_observability_retry("gemini_generation")
-                backoff = min(2 ** (attempt - 1), 8) * 0.5
-                print(
-                    f"  ⚠️ Gemini transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
-                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
-                )
-                time.sleep(backoff)
-                continue
-            raise
-    raise RuntimeError(f"Gemini call failed: {last_exc}")
+
+        return run_bounded_call(
+            _provider_call,
+            gate_name="llm",
+            stage="gemini_generation",
+            stage_cap_seconds=GEMINI_REQUEST_TIMEOUT,
+            minimum_required_seconds=0.75,
+        )
+
+    return policy.run(
+        _attempt,
+        stage="gemini_generation",
+        observe=_observe,
+    )
 
 
 def _should_trigger_boston_gov_fallback(answer: str) -> bool:
@@ -474,6 +507,9 @@ def should_apply_boston_gov_fallback(question: str, answer: str, mode: str) -> b
 
 def _schedule_boston_gov_enrichment(question: str, original_answer: str) -> None:
     """Warm Boston.gov cache in the background without blocking the user."""
+    if current_budget() is not None:
+        # The authoritative turn path performs one bounded correction attempt below.
+        return
 
     def _job() -> None:
         try:
@@ -493,24 +529,25 @@ def try_boston_gov_enrichment(
     """Attempt Boston.gov enrichment with a bounded wait (post-stream correction)."""
     if not _should_trigger_boston_gov_fallback(original_answer):
         return original_answer
-    result: Dict[str, Any] = {"answer": original_answer}
-    turn_trace = get_current_trace()
+    def _job(_call_timeout: float) -> str:
+        with observability_stage("boston_gov_enrichment"):
+            return _build_boston_gov_fallback_answer(question, original_answer)
 
-    def _job() -> None:
-        with bind_trace(turn_trace):
-            try:
-                with observability_stage("boston_gov_enrichment"):
-                    result["answer"] = _build_boston_gov_fallback_answer(
-                        question,
-                        original_answer,
-                    )
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ⚠️ Boston.gov enrichment failed: {exc}")
-
-    worker = threading.Thread(target=_job, daemon=True)
-    worker.start()
-    worker.join(timeout=max(0.5, timeout_seconds))
-    return str(result.get("answer") or original_answer)
+    try:
+        return str(
+            run_bounded_call(
+                _job,
+                gate_name="enrichment",
+                stage="boston_gov_enrichment",
+                stage_cap_seconds=max(0.25, timeout_seconds),
+                minimum_required_seconds=0.25,
+            )
+            or original_answer
+        )
+    except Exception as exc:  # noqa: BLE001
+        record_observability_fields(partial_path_completion=True)
+        print(f"  ⚠️ Boston.gov enrichment unavailable: {exc.__class__.__name__}")
+        return original_answer
 
 
 def _apply_default_fallback_if_needed(question: str, answer: str) -> str:
@@ -1484,6 +1521,8 @@ def run_execution_pipeline(
             "metric": (routing.get("query_plan") or {}).get("metric"),
         }
         return mode, result, metrics
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Execution pipeline failed: {exc.__class__.__name__}: {exc}")
         return None
@@ -1932,7 +1971,7 @@ def _should_include_rss(question: str, folder_categories: Optional[List[str]]) -
     return "newsletters" in normalized or _looks_like_rss_query(question)
 
 
-def _retrieve_rag(
+def _retrieve_rag_inner(
     question: str,
     plan: Dict[str, Any],
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
@@ -2011,23 +2050,75 @@ def _retrieve_rag(
     def _safe_run(fn):
         try:
             return fn()
+        except (BudgetExhausted, CapacityUnavailable):
+            raise
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠️ Retrieval task error: {e}")
             return ("(failed)", [], [])
 
     if _PARALLEL_RETRIEVAL and len(tasks) > 1:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        executor = ThreadPoolExecutor(max_workers=len(tasks))
+        shell_errors = []
+        try:
             futures = [submit_with_trace(executor, _safe_run, task) for task in tasks]
-            results = [future.result() for future in futures]
+            collection_timeout = timeout_for(
+                "rag_source_collection",
+                float(os.getenv("HEAVY_RAG_TIMEOUT_SECONDS", "10")),
+                minimum_required=0.25,
+            )
+            done, pending = wait(set(futures), timeout=collection_timeout)
+            canceled = sum(1 for future in pending if future.cancel())
+            if canceled:
+                increment_observability("canceled_future_count", canceled)
+            results = []
+            for future in futures:
+                if future not in done:
+                    shell_errors.append(BudgetExhausted("rag_source_collection"))
+                    continue
+                try:
+                    results.append(future.result())
+                except (BudgetExhausted, CapacityUnavailable) as exc:
+                    shell_errors.append(exc)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     else:
-        results = [_safe_run(fn) for fn in tasks]
+        shell_errors = []
+        results = []
+        for fn in tasks:
+            try:
+                results.append(_safe_run(fn))
+            except (BudgetExhausted, CapacityUnavailable) as exc:
+                shell_errors.append(exc)
 
     for label, chunks, meta in results:
         print(f"  {label}: {len(chunks)} chunks found")
         combined_chunks.extend(chunks)
         combined_meta.extend(meta)
 
+    if not combined_chunks and shell_errors:
+        capacity = next(
+            (error for error in shell_errors if isinstance(error, CapacityUnavailable)),
+            None,
+        )
+        if capacity is not None:
+            raise capacity
+        raise shell_errors[0]
+
     return combined_chunks, combined_meta
+
+
+def _retrieve_rag(
+    question: str,
+    plan: Dict[str, Any],
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Bound one complete RAG retrieval while preserving its existing semantics."""
+    return run_bounded_call(
+        lambda _call_timeout: _retrieve_rag_inner(question, plan),
+        gate_name="heavy_rag",
+        stage="heavy_rag_retrieval",
+        stage_cap_seconds=float(os.getenv("HEAVY_RAG_TIMEOUT_SECONDS", "10")),
+        minimum_required_seconds=TURN_MIN_RETRIEVAL_BUDGET_MS / 1000.0,
+    )
 
 
 def _run_rag(
@@ -2037,6 +2128,12 @@ def _run_rag(
     apply_fallback: bool = True,
 ) -> Dict[str, Any]:
     combined_chunks, combined_meta = _retrieve_rag(question, plan)
+    budget = current_budget()
+    if budget is not None and not budget.can_start(
+        "rag_synthesis",
+        minimum_required=TURN_MIN_SYNTHESIS_BUDGET_MS / 1000.0,
+    ):
+        raise BudgetExhausted("rag_synthesis")
     with observability_stage("rag_synthesis"):
         answer = _compose_rag_answer(
             question,
@@ -2138,6 +2235,8 @@ def _run_sql(
             metadata,
             conversation_history,
         )
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ SQL generation failed: {exc}")
         if app4.is_generic_events_list_question(question):
@@ -2169,6 +2268,8 @@ def _run_sql(
             os.getenv("GEMINI_SUMMARY_MODEL", getattr(app4, "GEMINI_SUMMARY_MODEL", GEMINI_SUMMARY_MODEL)),
             conversation_history,
         )
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer generation failed: {exc}")
         if app4.is_generic_events_list_question(question):
@@ -2193,7 +2294,8 @@ def _run_hybrid_parts(
     # SQL and RAG are independent. SQL uses its own thread-local DB connection
     # and RAG uses the shared (read-only) vector store, so this is safe.
     if _PARALLEL_RETRIEVAL:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        executor = ThreadPoolExecutor(max_workers=2)
+        try:
             sql_future = submit_with_trace(
                 executor,
                 _run_sql,
@@ -2209,7 +2311,64 @@ def _run_hybrid_parts(
                 conversation_history,
                 False,
             )
-            return sql_future.result(), rag_future.result()
+            collection_timeout = timeout_for(
+                "hybrid_parallel_collection",
+                float(os.getenv("HYBRID_COLLECTION_TIMEOUT_SECONDS", "12")),
+                minimum_required=0.25,
+            )
+            done, pending = wait(
+                {sql_future, rag_future},
+                timeout=collection_timeout,
+            )
+            canceled = 0
+            for future in pending:
+                if future.cancel():
+                    canceled += 1
+            if canceled:
+                increment_observability("canceled_future_count", canceled)
+            if pending:
+                record_observability_fields(partial_path_completion=bool(done))
+
+            def _result(future, path: str) -> Dict[str, Any]:
+                if future not in done:
+                    return {
+                        "answer": "",
+                        "result": {"columns": [], "rows": []},
+                        "chunks": [],
+                        "metadata": [],
+                        "error": f"{path}_timeout",
+                    }
+                try:
+                    return future.result()
+                except BudgetExhausted:
+                    return {
+                        "answer": "",
+                        "result": {"columns": [], "rows": []},
+                        "chunks": [],
+                        "metadata": [],
+                        "error": f"{path}_timeout",
+                    }
+                except CapacityUnavailable:
+                    return {
+                        "answer": "",
+                        "result": {"columns": [], "rows": []},
+                        "chunks": [],
+                        "metadata": [],
+                        "error": "capacity_unavailable",
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ⚠️ Hybrid {path} branch failed: {exc.__class__.__name__}")
+                    return {
+                        "answer": "",
+                        "result": {"columns": [], "rows": []},
+                        "chunks": [],
+                        "metadata": [],
+                        "error": f"{path}_unavailable",
+                    }
+
+            return _result(sql_future, "sql"), _result(rag_future, "rag")
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     sql_part = _run_sql(question, conversation_history, apply_fallback=False)
     rag_part = _run_rag(question, plan, conversation_history, apply_fallback=False)
     return sql_part, rag_part
@@ -2244,10 +2403,43 @@ def _build_hybrid_merge_prompt(
 def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     sql_part, rag_part = _run_hybrid_parts(question, plan, conversation_history)
     sql_part = _finalize_prepared_sql_out(dict(sql_part))
+    branch_parts = (sql_part, rag_part)
+    has_grounded_evidence = any(
+        str(part.get("answer") or "").strip()
+        or bool((part.get("result") or {}).get("rows"))
+        or bool(part.get("chunks"))
+        for part in branch_parts
+    )
+    if not has_grounded_evidence:
+        errors = [str(part.get("error") or "") for part in branch_parts]
+        if errors and any(error == "capacity_unavailable" for error in errors):
+            raise CapacityUnavailable("hybrid", 0)
+        if errors and any(error.endswith("_timeout") for error in errors):
+            raise BudgetExhausted("hybrid_retrieval")
     fast = _try_fast_hybrid_stitch(sql_part, rag_part)
     if fast:
         answer = _apply_default_fallback_if_needed(question, fast)
         return {"answer": answer, "sql": sql_part, "rag": rag_part}
+
+    budget = current_budget()
+    if budget is not None and not budget.can_start(
+        "hybrid_synthesis",
+        minimum_required=TURN_MIN_SYNTHESIS_BUDGET_MS / 1000.0,
+    ):
+        grounded = [
+            str(part.get("answer") or "").strip()
+            for part in (sql_part, rag_part)
+            if str(part.get("answer") or "").strip()
+        ]
+        if grounded:
+            record_observability_fields(partial_path_completion=True)
+            return {
+                "answer": "\n\n".join(grounded),
+                "sql": sql_part,
+                "rag": rag_part,
+                "prepared_intent": sql_part.get("prepared_intent"),
+            }
+        raise BudgetExhausted("hybrid_synthesis")
 
     full_prompt = _build_hybrid_merge_prompt(question, sql_part, rag_part, conversation_history)
 
@@ -2261,6 +2453,8 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
                 generation_config={"temperature": 0},
             )
         answer = (resp.text or "").strip()
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception:
         answer = (sql_part.get("answer") or "") + "\n\n" + (rag_part.get("answer") or "")
 
@@ -2281,9 +2475,10 @@ def _generate_text_non_stream(model_name: str, prompt: str, temperature: float) 
 
 
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
-    """Yield text deltas from a streaming Gemini generation with retries."""
+    """Yield Gemini deltas with one centralized, budget-aware transient retry."""
+    policy = RetryPolicy(max_attempts=min(GEMINI_MAX_ATTEMPTS, 2))
     last_exc: Optional[Exception] = None
-    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
+    for attempt in range(1, policy.max_attempts + 1):
         yielded = False
         try:
             for piece in _stream_model_text_once(
@@ -2298,26 +2493,31 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
                 return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt < GEMINI_MAX_ATTEMPTS and _is_transient_error(exc):
-                record_observability_retry("gemini_stream")
-                backoff = min(2 ** (attempt - 1), 8) * 0.5
-                print(
-                    f"  ⚠️ Stream transient error (attempt {attempt}/{GEMINI_MAX_ATTEMPTS}): "
-                    f"{exc.__class__.__name__}; retrying in {backoff:.1f}s"
+            decision = policy.decision(
+                exc,
+                attempt=attempt,
+                stage="gemini_stream",
+            )
+            if yielded:
+                decision = RetryDecision(
+                    False,
+                    decision.category,
+                    attempt,
+                    reason="partial_stream_emitted",
                 )
-                time.sleep(backoff)
+            record_retry_decision(
+                scope="gemini_stream",
+                retry=decision.retry,
+                category=decision.category,
+                attempt=decision.attempt,
+                backoff_ms=round(decision.backoff_seconds * 1000.0, 3),
+                reason=decision.reason,
+            )
+            if decision.retry:
+                record_observability_retry("gemini_stream")
+                time.sleep(decision.backoff_seconds)
                 continue
             break
-    if last_exc is not None and _is_timeout_error(last_exc):
-        try:
-            text = _generate_text_non_stream(model_name, prompt, temperature)
-            if text:
-                print("  ↪ Stream deadline hit; using non-streaming Gemini fallback")
-                for piece in _pseudo_stream(text):
-                    yield piece
-                return
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Non-streaming fallback failed: {exc.__class__.__name__}")
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("Gemini stream returned no content")
@@ -2331,42 +2531,51 @@ def _stream_model_text_once(
     attempt: int = 1,
 ):
     """Single streaming attempt (no retry)."""
-    client = _get_llm_client()
-    model = client.GenerativeModel(model_name)
-    increment_llm_call_counter()
-    with model_call(
-        "stream_generation",
-        model_name,
-        attempt=attempt,
-        input_size=len(prompt or ""),
-    ) as call:
-        try:
+    def _provider_stream(call_timeout: float, emit) -> None:
+        client = _get_llm_client()
+        model = client.GenerativeModel(model_name)
+        increment_llm_call_counter()
+        with model_call(
+            "stream_generation",
+            model_name,
+            attempt=attempt,
+            input_size=len(prompt or ""),
+        ) as call:
             try:
-                stream = model.generate_content(
-                    prompt,
-                    generation_config={"temperature": temperature},
-                    stream=True,
-                    request_options={"timeout": GEMINI_STREAM_TIMEOUT},
-                )
-            except TypeError:
-                stream = model.generate_content(
-                    prompt,
-                    generation_config={"temperature": temperature},
-                    stream=True,
-                )
-        except Exception as exc:  # noqa: BLE001
-            print(f"  ⚠️ Streaming generation failed to start: {exc}")
-            raise
-        output_chars = 0
-        for chunk in stream:
-            try:
-                piece = getattr(chunk, "text", "") or ""
-            except Exception:  # noqa: BLE001
-                piece = ""
-            if piece:
-                output_chars += len(piece)
-                call.set_output_size(output_chars)
-                yield piece
+                try:
+                    stream = model.generate_content(
+                        prompt,
+                        generation_config={"temperature": temperature},
+                        stream=True,
+                        request_options={"timeout": call_timeout},
+                    )
+                except TypeError:
+                    stream = model.generate_content(
+                        prompt,
+                        generation_config={"temperature": temperature},
+                        stream=True,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ⚠️ Streaming generation failed to start: {exc.__class__.__name__}")
+                raise
+            output_chars = 0
+            for chunk in stream:
+                try:
+                    piece = getattr(chunk, "text", "") or ""
+                except Exception:  # noqa: BLE001
+                    piece = ""
+                if piece:
+                    output_chars += len(piece)
+                    call.set_output_size(output_chars)
+                    emit(piece)
+
+    yield from stream_bounded_call(
+        _provider_stream,
+        gate_name="llm",
+        stage="gemini_stream",
+        stage_cap_seconds=GEMINI_STREAM_TIMEOUT,
+        minimum_required_seconds=0.75,
+    )
 
 
 def _pseudo_stream(text: str):
@@ -2461,11 +2670,20 @@ def stream_agent_response(
             answer = "I don't have any previous conversation or data to reference. Could you ask your question again?"
             yield ("delta", answer)
         else:
+            budget = current_budget()
+            if budget is not None and not budget.can_start(
+                "history_synthesis",
+                minimum_required=TURN_MIN_SYNTHESIS_BUDGET_MS / 1000.0,
+            ):
+                raise BudgetExhausted("history_synthesis")
             acc: List[str] = []
             try:
                 for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
                     acc.append(piece)
                     yield ("delta", piece)
+            except (BudgetExhausted, CapacityUnavailable):
+                if not acc:
+                    raise
             except Exception as exc:  # noqa: BLE001
                 if not acc:
                     print(f"  ⚠️ History stream failed: {exc.__class__.__name__}")
@@ -2491,6 +2709,8 @@ def stream_agent_response(
         pipeline_out = run_execution_pipeline(
             effective_message, conversation_history, routing_plan=plan,
         )
+    except (BudgetExhausted, CapacityUnavailable):
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Execution pipeline raised: {exc.__class__.__name__}")
         pipeline_out = None
@@ -2514,6 +2734,8 @@ def stream_agent_response(
     if mode == "sql":
         try:
             out = _run_sql(message, conversation_history)
+        except (BudgetExhausted, CapacityUnavailable):
+            raise
         except Exception as exc:  # noqa: BLE001
             print(f"  ⚠️ SQL pipeline failed: {exc}")
             answer = (
@@ -2552,6 +2774,12 @@ def stream_agent_response(
             answer = "No relevant information found."
             yield ("delta", answer)
         else:
+            budget = current_budget()
+            if budget is not None and not budget.can_start(
+                "rag_synthesis",
+                minimum_required=TURN_MIN_SYNTHESIS_BUDGET_MS / 1000.0,
+            ):
+                raise BudgetExhausted("rag_synthesis")
             acc = []
             try:
                 for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):

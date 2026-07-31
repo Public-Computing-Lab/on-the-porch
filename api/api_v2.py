@@ -124,6 +124,17 @@ from turn_observability import (  # noqa: E402
     stage as observability_stage,
     start_stage as start_observability_stage,
 )
+from request_budget import (  # noqa: E402
+    BudgetExhausted,
+    TURN_MIN_SYNTHESIS_BUDGET_MS,
+    create_turn_budget,
+    current_budget,
+    raise_if_exhausted,
+    use_turn_budget,
+)
+from external_call import run_bounded_call  # noqa: E402
+from retry_policy import RetryPolicy  # noqa: E402
+from concurrency_control import CapacityUnavailable, OVERLOAD_RETRY_AFTER_SECONDS  # noqa: E402
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
     build_semantic_cache_backend,
@@ -298,7 +309,7 @@ CORS(
 )
 
 
-def get_db_connection():
+def get_db_connection(*, use_finalization_reserve: bool = False):
     """Check out a *live* connection from the pool.
 
     MySQL closes idle connections after ``wait_timeout``. A pooled connection
@@ -310,19 +321,51 @@ def get_db_connection():
     transparently revived. If that slot cannot be revived, we discard it and
     take another from the pool.
     """
+    budget = current_budget()
+    reserve_finalization = not use_finalization_reserve
+    if budget is not None:
+        budget.raise_if_exhausted(
+            "mysql_pool_checkout",
+            reserve_finalization=reserve_finalization,
+        )
+
     conn = db_pool.get_connection()
     try:
-        conn.ping(reconnect=True, attempts=2, delay=1)
-        return conn
+        conn.ping(reconnect=True, attempts=1, delay=0)
     except Exception:
         # Could not revive this pooled connection; return it and get a fresh one.
         try:
             conn.close()
         except Exception:
             pass
+        if budget is not None:
+            budget.raise_if_exhausted(
+                "mysql_reconnect",
+                reserve_finalization=reserve_finalization,
+            )
         conn = db_pool.get_connection()
-        conn.ping(reconnect=True, attempts=2, delay=1)
-        return conn
+        conn.ping(reconnect=True, attempts=1, delay=0)
+
+    if budget is not None:
+        budget.raise_if_exhausted(
+            "mysql_connection",
+            reserve_finalization=reserve_finalization,
+        )
+        # MySQL's server-side SELECT limit is the final backstop for statement
+        # execution. It is derived from the same absolute turn deadline and is
+        # reset when the pooled connection is returned.
+        statement_timeout_ms = max(
+            1,
+            budget.remaining_ms(reserve_finalization=reserve_finalization),
+        )
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                f"SET SESSION MAX_EXECUTION_TIME = {statement_timeout_ms}"
+            )
+        finally:
+            cursor.close()
+    return conn
 
 
 _mysql_cache_store: Optional[MySQLCacheStore] = None
@@ -2954,8 +2997,9 @@ def _finalize_conversation_turn(
     context: TurnContext,
     generated: GeneratedTurn,
 ) -> Dict[str, Any]:
+    raise_if_exhausted("final_persistence", reserve_finalization=False)
     transaction_started = time.perf_counter()
-    conn = get_db_connection()
+    conn = get_db_connection(use_finalization_reserve=True)
     try:
         conn.start_transaction()
         cursor = conn.cursor(dictionary=True)
@@ -3073,6 +3117,7 @@ def _finalize_conversation_turn(
             "assistant_message": _serialize_message(assistant_message_row),
         }
         with observability_stage("turn_completion_transaction"):
+            raise_if_exhausted("turn_completion", reserve_finalization=False)
             if not _turn_repository.complete_on_connection(
                 conn,
                 reservation=context.reservation,
@@ -3098,6 +3143,7 @@ def _finalize_conversation_turn(
 
 
 def _turn_producer(context: TurnContext):
+    raise_if_exhausted("turn_producer")
     full_answer = ""
     streamed_text = ""
     mode = "hybrid"
@@ -3142,13 +3188,20 @@ def _turn_producer(context: TurnContext):
     if not full_answer:
         raise RuntimeError("empty_generation")
 
-    enriched = apply_post_stream_fallback(
-        context.request.message,
-        full_answer,
-        mode,
-        prepared_intent=result_payload.get("prepared_intent"),
-        conversation_history=context.conversation_history,
+    budget = context.budget or current_budget()
+    can_finalize_answer = budget is None or budget.can_start(
+        "answer_finalization",
+        minimum_required=TURN_MIN_SYNTHESIS_BUDGET_MS / 1000.0,
     )
+    enriched = full_answer
+    if can_finalize_answer:
+        enriched = apply_post_stream_fallback(
+            context.request.message,
+            full_answer,
+            mode,
+            prepared_intent=result_payload.get("prepared_intent"),
+            conversation_history=context.conversation_history,
+        )
     if (
         enriched
         and Config.BOSTON_GOV_ASYNC_ENABLED
@@ -3159,11 +3212,22 @@ def _turn_producer(context: TurnContext):
             mode,
         )
     ):
-        enriched = try_boston_gov_enrichment(
-            context.request.message,
-            enriched,
-            timeout_seconds=Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS,
-        )
+        if budget is None or budget.can_start(
+            "boston_gov_enrichment",
+            minimum_required=0.25,
+        ):
+            timeout_seconds = Config.BOSTON_GOV_ASYNC_TIMEOUT_SECONDS
+            if budget is not None:
+                timeout_seconds = budget.timeout_for(
+                    "boston_gov_enrichment",
+                    timeout_seconds,
+                    minimum_required=0.25,
+                )
+            enriched = try_boston_gov_enrichment(
+                context.request.message,
+                enriched,
+                timeout_seconds=timeout_seconds,
+            )
     if enriched != full_answer:
         yield TurnEvent(TurnEventKind.CORRECTION, enriched)
         full_answer = enriched
@@ -3267,7 +3331,13 @@ def _turn_http_response(event: TurnEvent):
     if event.kind is TurnEventKind.NOT_FOUND:
         return _json_error(event.payload["error"], 404, event.payload["code"])
     if event.kind is TurnEventKind.FAILED:
-        return _json_error(event.payload["error"], 409, event.payload["code"])
+        code = event.payload["code"]
+        status = 504 if code == "turn_timed_out" else 503 if code == "capacity_unavailable" else 409
+        response = _json_error(event.payload["error"], status, code)
+        if code == "capacity_unavailable":
+            flask_response = response[0] if isinstance(response, tuple) else response
+            flask_response.headers["Retry-After"] = str(event.payload.get("retry_after", 2))
+        return response
     return _json_error("Failed to send message.", 500, "conversation_message_failed")
 
 
@@ -3477,8 +3547,16 @@ def get_conversation_turn_status(thread_id: str, client_turn_id: str):
         if stored:
             response["result"] = stored
     elif status == STATUS_FAILED.lower():
-        response["error"] = "This message could not be completed. Please try again."
-        response["code"] = "turn_failed"
+        category = str(row.get("normalized_error_category") or "turn_failed")
+        failure = ConversationTurnService._failure_payload(
+            normalized_id,
+            category,
+            replayed=True,
+        )
+        response["error"] = failure["error"]
+        response["code"] = failure["code"]
+        if "retry_after" in failure:
+            response["retry_after"] = failure["retry_after"]
     else:
         response["retry_after"] = 2
     return jsonify(response)
@@ -4155,33 +4233,60 @@ def community_notes_chat():
     messages = data.get("messages", [])
     if not messages:
         return _json_error("messages required", 400, "missing_messages")
+    budget = create_turn_budget(f"community-note:{uuid.uuid4().hex}")
     try:
-        client = _get_llm_client()
-        model = client.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
-        system = (
-            "You are helping a Dorchester community member report a local issue or share "
-            "neighborhood information for a community chatbot.\n\n"
-            "Ask short friendly follow-up questions ONE AT A TIME to gather useful details. "
-            "Focus on: exact location (street, intersection, landmark), time/date, severity, "
-            "who is affected, and any safety considerations.\n\n"
-            "After 3-5 exchanges when you have enough detail, respond with EXACTLY this format "
-            "and nothing else:\n"
-            "READY:\n"
-            "What: <one sentence describing the issue>\n"
-            "Where: <specific location>\n"
-            "When: <time or date>\n"
-            "Details: <any extra context>\n\n"
-            "Do not ask more than 5 questions. Keep questions short and friendly. "
-            "Never mention AI, databases, or that you are compiling a note."
-        )
-        history = "\n".join([
-            f"{'Community member' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
-            for m in messages
-        ])
-        resp = model.generate_content(
-            system + "\n\nConversation:\n" + history + "\n\nAssistant:",
-            generation_config={"temperature": 0.4}
-        )
+        with use_turn_budget(budget):
+            client = _get_llm_client()
+            model = client.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"))
+            system = (
+                "You are helping a Dorchester community member report a local issue or share "
+                "neighborhood information for a community chatbot.\n\n"
+                "Ask short friendly follow-up questions ONE AT A TIME to gather useful details. "
+                "Focus on: exact location (street, intersection, landmark), time/date, severity, "
+                "who is affected, and any safety considerations.\n\n"
+                "After 3-5 exchanges when you have enough detail, respond with EXACTLY this format "
+                "and nothing else:\n"
+                "READY:\n"
+                "What: <one sentence describing the issue>\n"
+                "Where: <specific location>\n"
+                "When: <time or date>\n"
+                "Details: <any extra context>\n\n"
+                "Do not ask more than 5 questions. Keep questions short and friendly. "
+                "Never mention AI, databases, or that you are compiling a note."
+            )
+            history = "\n".join([
+                f"{'Community member' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                for m in messages
+            ])
+            prompt = system + "\n\nConversation:\n" + history + "\n\nAssistant:"
+
+            def _attempt(_attempt_number: int):
+                def _provider(call_timeout: float):
+                    try:
+                        return model.generate_content(
+                            prompt,
+                            generation_config={"temperature": 0.4},
+                            request_options={"timeout": call_timeout},
+                        )
+                    except TypeError:
+                        return model.generate_content(
+                            prompt,
+                            generation_config={"temperature": 0.4},
+                        )
+
+                return run_bounded_call(
+                    _provider,
+                    gate_name="llm",
+                    stage="community_note_chat",
+                    stage_cap_seconds=float(os.getenv("GEMINI_REQUEST_TIMEOUT", "12")),
+                    minimum_required_seconds=0.75,
+                )
+
+            resp = RetryPolicy(max_attempts=2).run(
+                _attempt,
+                stage="community_note_chat",
+                budget=budget,
+            )
         try:
             text = (resp.text or "").strip()
         except (ValueError, AttributeError):
@@ -4193,8 +4298,28 @@ def community_notes_chat():
         is_ready = text.startswith("READY:")
         compiled = text[6:].strip() if is_ready else None
         return jsonify({"reply": text if not is_ready else None, "compiled": compiled, "ready": is_ready})
-    except Exception as e:
-        return _json_error(str(e), 500, "community_chat_failed")
+    except BudgetExhausted:
+        return _json_error(
+            "I couldn't complete that within the available time. Please try again.",
+            504,
+            "community_chat_timed_out",
+        )
+    except CapacityUnavailable:
+        response = _json_error(
+            "The service is handling a lot of requests right now. Please try again shortly.",
+            503,
+            "capacity_unavailable",
+        )
+        flask_response = response[0] if isinstance(response, tuple) else response
+        flask_response.headers["Retry-After"] = str(OVERLOAD_RETRY_AFTER_SECONDS)
+        return response
+    except Exception as exc:
+        _log_exception("Community note chat failed", exc)
+        return _json_error(
+            "This message could not be completed. Please try again.",
+            500,
+            "community_chat_failed",
+        )
 
 
 @app.route("/community/notes", methods=["POST"])
