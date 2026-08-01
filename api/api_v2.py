@@ -26,7 +26,18 @@ from werkzeug.exceptions import HTTPException
 import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
 
-from db_migrations import run_migrations
+# Path setup must precede the local imports below: they transitively import
+# modules that resolve against the repo root and on_the_porch/.
+_THIS_FILE = Path(__file__).resolve()
+_API_DIR = _THIS_FILE.parent
+_ROOT_DIR = _API_DIR.parent
+_ON_THE_PORCH_DIR = _ROOT_DIR / "on_the_porch"
+_RAG_DIR = _ON_THE_PORCH_DIR / "rag stuff"
+for _import_dir in (_API_DIR, _ROOT_DIR, _ON_THE_PORCH_DIR, _RAG_DIR):
+    if str(_import_dir) not in sys.path:
+        sys.path.insert(0, str(_import_dir))
+
+from db_migrations import run_migrations  # noqa: E402
 from conversation_turn import (
     build_sse_final_payload,
     ConversationTurnService,
@@ -70,22 +81,7 @@ from turn_repository import (
     TurnRepository,
 )
 
-# Setup paths to import from on_the_porch
-_THIS_FILE = Path(__file__).resolve()
-_API_DIR = _THIS_FILE.parent
-_ROOT_DIR = _API_DIR.parent
-if str(_ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(_ROOT_DIR))
 from config import Config  # noqa: E402
-
-_ON_THE_PORCH_DIR = _ROOT_DIR / "on_the_porch"
-
-if str(_ON_THE_PORCH_DIR) not in sys.path:
-    sys.path.insert(0, str(_ON_THE_PORCH_DIR))
-
-_RAG_DIR = _ON_THE_PORCH_DIR / "rag stuff"
-if str(_RAG_DIR) not in sys.path:
-    sys.path.insert(0, str(_RAG_DIR))
 
 from unified_chatbot import (  # noqa: E402
     _answer_from_history,
