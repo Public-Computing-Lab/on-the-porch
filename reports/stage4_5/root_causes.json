@@ -1,0 +1,82 @@
+{
+  "causes": [
+    {
+      "category": "LOCAL_DATA_COVERAGE_FAILURE",
+      "confidence": "high",
+      "evidence": "Zero identifiable City Council minute records and zero transportation civic records in the local demo database.",
+      "explains_311_response": false,
+      "explains_production_divergence": true,
+      "fix_location": "local fixture and documented ingestion workflow"
+    },
+    {
+      "category": "LOCAL_VECTOR_INDEX_FAILURE",
+      "confidence": "high",
+      "evidence": "The active collection has 35 chunks, no City Council minute chunks, and only two transcript documents relevant to the broad source type.",
+      "explains_311_response": false,
+      "explains_production_divergence": true,
+      "fix_location": "configuration checker and future public-source indexing"
+    },
+    {
+      "category": "LOCAL_ENVIRONMENT_MISMATCH",
+      "confidence": "high",
+      "evidence": "Startup hardcoded worktree vector paths and ignored configured isolated vector paths.",
+      "explains_311_response": false,
+      "explains_production_divergence": true,
+      "fix_location": "code/configuration"
+    },
+    {
+      "category": "ROUTING_DEFECT",
+      "confidence": "high",
+      "evidence": "The exact phrase missed the deterministic transcript rule and depended on model routing; explicit 'meeting minutes' wording hit the rule.",
+      "explains_311_response": true,
+      "explains_production_divergence": true,
+      "fix_location": "narrow rule-first source-domain hint"
+    },
+    {
+      "category": "FAILURE_MESSAGE_MAPPING_DEFECT",
+      "confidence": "high",
+      "evidence": "SQL executor failures rendered part.topic or part.intent directly, allowing a stale or erroneous 311 part to become resident-facing wording.",
+      "explains_311_response": true,
+      "explains_production_divergence": false,
+      "fix_location": "current-turn resident limitation mapping"
+    },
+    {
+      "category": "MODEL_NONDETERMINISM",
+      "confidence": "medium",
+      "evidence": "The target wording previously used model-led routing, so an erroneous SQL plan was possible but did not recur in controlled local runs.",
+      "explains_311_response": true,
+      "explains_production_divergence": false,
+      "fix_location": "deterministic high-confidence source hint"
+    },
+    {
+      "category": "PRODUCTION_DATA_ADVANTAGE",
+      "confidence": "medium",
+      "evidence": "Production displayed five passages from two source categories while local had only 35 vector chunks and no council minutes.",
+      "explains_311_response": false,
+      "explains_production_divergence": true,
+      "fix_location": "deployment data, not changed in Stage 4.5"
+    },
+    {
+      "category": "PRODUCTION_RESPONSE_GROUNDING_DEFECT",
+      "confidence": "high",
+      "evidence": "Production substituted housing projects and inferred transportation impact after admitting no specific minutes were found.",
+      "explains_311_response": false,
+      "explains_production_divergence": false,
+      "fix_location": "future production corpus and evidence validation"
+    },
+    {
+      "category": "PRODUCTION_CODE_UNKNOWN",
+      "confidence": "high",
+      "evidence": "Public browser behavior cannot establish deployed commit, environment, or corpus identity.",
+      "explains_311_response": false,
+      "explains_production_divergence": true,
+      "fix_location": "production verification when access is available"
+    }
+  ],
+  "not_confirmed": [
+    "CODE_REVERT_MISMATCH",
+    "STALE_THREAD_STATE_DEFECT",
+    "STAGE_3_INTEGRATION_REGRESSION",
+    "STAGE_4_INTEGRATION_REGRESSION"
+  ]
+}

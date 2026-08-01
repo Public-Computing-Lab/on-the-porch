@@ -1,0 +1,44 @@
+{
+  "comparison_contract": {
+    "database_category": "disposable clones of sentiment_demo",
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_provider": "local",
+    "fallback_model": "gemini-2.5-pro",
+    "model": "gemini-2.5-flash-lite",
+    "python": "3.14.2",
+    "vector_chunk_count": 35,
+    "vector_collection": "langchain",
+    "vector_provider": "chroma"
+  },
+  "main": {
+    "git_sha": "840ec54dd1265b4f2f42cc18b66b54cbf2a99b89",
+    "database": "stage45_main",
+    "module_hashes": {
+      "answer_synthesizer": "a8e3842a8969d502c2ddb54901e8817f4c140976972c21612cb4916860adef43",
+      "config": "3ea593a9c1804647e45f1549fcb8a801bf2cc8b9a23a418a1b72a804b3dad12c",
+      "intent_router": "c50109e0ee5e8efaa4ec5447f1e24e677fbffc42f668103f2c4de4b04c0701ae",
+      "package_lock": "7ccd00c8c2b771f83068ea31f1eb69d9cbe61e0db92226e5e5448c08b5a39d60",
+      "plan_builder": "58cb047d76c630edefa2246e840213e4f9f250d98b7a54b601e8e4ec9f5c0011",
+      "requirements": "c670e5f4ac450f00a96334a614ae16afaef766dddce88518700d1fdbbac6789d",
+      "retrieval": "854373c865c6e081621aec75622651719e0a1d901b17bdafc175cc880cb12a50",
+      "unified_chatbot": "cc69b27859c452d14e5d36aeabd056842624300f7f21218ea10464cb3cde9607"
+    }
+  },
+  "dev_before": {
+    "git_sha": "8cd6524316861fc8fb6f437144eebc2c453c14a4",
+    "database": "stage45_dev",
+    "same_civic_and_vector_snapshot_as_main": true
+  },
+  "dev_after": {
+    "branch": "stage4.5/local-production-parity",
+    "database": "stage45_dev",
+    "same_civic_and_vector_snapshot_as_main": true,
+    "feature_flags": {
+      "admin_knowledge_auto_ingest_enabled": false,
+      "chat_vector_writes_enabled": false,
+      "dynamic_sql_enabled": false,
+      "semantic_cache_enabled": false
+    }
+  },
+  "secrets_included": false
+}

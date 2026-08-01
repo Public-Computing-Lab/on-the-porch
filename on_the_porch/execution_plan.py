@@ -42,6 +42,8 @@ class RagHints:
     transcript_tags: Optional[List[str]] = None
     policy_sources: Optional[List[str]] = None
     folder_categories: Optional[List[str]] = None
+    evidence_domain: Optional[str] = None
+    required_concepts: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}

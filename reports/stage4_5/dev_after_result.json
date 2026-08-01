@@ -1,0 +1,32 @@
+{
+  "branch": "stage4.5/local-production-parity",
+  "fresh_exact": {
+    "mode": "rag",
+    "latency_ms": 5630,
+    "retrieved_chunks_after_domain_filter": 0,
+    "sources": [],
+    "answer": "I couldn't find relevant official Boston City Council minutes about Dorchester transportation projects in the available sources.",
+    "wrong_311_message": false
+  },
+  "prior_311": {
+    "turn_1_mode": "sql",
+    "turn_1_latency_ms": 791,
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 67,
+    "turn_2_answer": "I couldn't find relevant official Boston City Council minutes about Dorchester transportation projects in the available sources.",
+    "contaminated_by_311": false
+  },
+  "explicit_switch": {
+    "turn_1_mode": "sql",
+    "turn_1_latency_ms": 883,
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 81,
+    "contaminated_by_311": false
+  },
+  "controlled_fixture": {
+    "official_council_chunk_kept": 1,
+    "unrelated_housing_chunk_kept": 0,
+    "stable_source_id_preserved": true,
+    "source_date_preserved": true
+  }
+}

@@ -120,6 +120,8 @@ def _base_plan(
     transcript_tags: Optional[List[str]] = None,
     policy_sources: Optional[List[str]] = None,
     folder_categories: Optional[List[str]] = None,
+    evidence_domain: Optional[str] = None,
+    required_concepts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     plan = {
         **_DEFAULT_PLAN,
@@ -135,6 +137,10 @@ def _base_plan(
         plan["policy_sources"] = policy_sources
     if folder_categories is not None:
         plan["folder_categories"] = folder_categories
+    if evidence_domain is not None:
+        plan["evidence_domain"] = evidence_domain
+    if required_concepts is not None:
+        plan["required_concepts"] = required_concepts
     return plan
 
 
@@ -199,6 +205,23 @@ def _looks_like_transcript_query(q: str) -> bool:
         return True
     return "meeting" in q and any(
         h in q for h in ("say", "said", "residents", "displacement", "community", "discuss")
+    )
+
+
+def _looks_like_official_meeting_document_query(q: str) -> bool:
+    """Recognize explicit requests for official meeting records."""
+    council_record = any(
+        phrase in q
+        for phrase in (
+            "city council minutes",
+            "council meeting minutes",
+            "city council meeting minutes",
+            "council transcript",
+            "city council transcript",
+        )
+    )
+    return council_record or (
+        "city council" in q and any(term in q for term in ("minutes", "transcript", "hearing"))
     )
 
 
@@ -305,6 +328,20 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
             confidence=0.8,
             k=5,
             transcript_tags=["safety"],
+        )
+
+    # Explicit official meeting records → RAG before generic meeting/event rules.
+    if _looks_like_official_meeting_document_query(q):
+        required_concepts = ["dorchester"] if "dorchester" in q else []
+        if any(term in q for term in ("transportation", "transit", "traffic", "mobility")):
+            required_concepts.append("transportation")
+        return _base_plan(
+            mode="rag",
+            intent="official_meeting_documents",
+            confidence=0.98,
+            k=8,
+            evidence_domain="official_council_minutes",
+            required_concepts=required_concepts,
         )
 
     # Meeting transcripts / community voice → rag (before events — "meeting" is an event hint)

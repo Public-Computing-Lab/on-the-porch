@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "stage": "4.5",
+  "repository_tests": {"passed": 233, "failed": 0},
+  "routing_dialogue_scripts": {"passed": 67, "failed": 0},
+  "frontend_lifecycle_assertions": {"passed": 8, "failed": 0},
+  "stage4_5_regressions": {"passed": 10, "failed": 0},
+  "calibrated_tier1": {
+    "hard_gates_preserved": 9,
+    "hard_gate_total": 9,
+    "fixture_scenarios_passed": 3,
+    "fixture_scenarios_failed": 0
+  },
+  "new_wrong_domain_invariant": "pass",
+  "new_critical_failures": 0,
+  "known_defects_worsened": 0,
+  "stage3_guarantees": "pass",
+  "stage4_guarantees": "pass",
+  "non_gate_discovery_note": "Repository-wide pytest discovery also passed 300 tests but collected standalone API/manual ingestion scripts, producing 2 localhost failures and 12 fixture errors. The supported tests/ suite is authoritative."
+}

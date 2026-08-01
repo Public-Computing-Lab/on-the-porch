@@ -75,6 +75,12 @@ CORE_VOICE = (
     "name the real categories from the data and weave counts in when helpful\n"
     "- Do not mention SQL, queries, RAG, templates, Boston Open Data sync, or "
     "internal tools\n"
+    "- Distinguish official government records from community discussion; never present "
+    "community notes as official minutes\n"
+    "- When the resident asks for the latest material, use source dates when available and "
+    "say when dates are missing\n"
+    "- Do not infer that a project belongs to a requested topic unless the supplied evidence "
+    "makes that connection\n"
     "- Dorchester only; ignore data from other neighborhoods\n"
 )
 
