@@ -1,0 +1,23 @@
+{
+  "git_sha": "8cd6524316861fc8fb6f437144eebc2c453c14a4",
+  "fresh_exact": {
+    "mode": "rag",
+    "latency_ms": 9101,
+    "retrieved_chunks": 2,
+    "sources": ["Community Transcripts"],
+    "result": "Summarized community material instead of official council minutes."
+  },
+  "prior_311": {
+    "turn_1_mode": "sql",
+    "turn_1_latency_ms": 708,
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 1533,
+    "turn_2_retrieved_chunks": 2,
+    "contaminated_by_311": false
+  },
+  "explicit_switch": {
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 714,
+    "turn_2_retrieved_chunks": 3
+  }
+}

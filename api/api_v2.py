@@ -1844,7 +1844,7 @@ def _build_rag_source_path(meta: Dict[str, Any], source_label: str) -> Optional[
     link = (meta.get("link") or "").strip()
 
     if doc_type == "transcript":
-        return None
+        return (meta.get("source_url") or link or None)
     if doc_type == "boston_gov_answer":
         return link or _BOSTON_GOV_HOME
     if doc_type == "policy":
@@ -1872,10 +1872,22 @@ def _append_rag_sources_from_metadata(
     other_entries = [m for m in metadata if m.get("doc_type") != "boston_gov_answer"]
     prioritized = boston_entries + other_entries
 
+    def _official_transcript(meta: Dict[str, Any]) -> bool:
+        if meta.get("doc_type") != "transcript":
+            return False
+        source_type = str(meta.get("source_type") or "").lower()
+        provenance = str(meta.get("provenance_class") or "").lower()
+        publisher = str(meta.get("publisher") or "").lower()
+        return (
+            source_type.startswith("official")
+            or provenance.startswith("official")
+            or "boston city council" in publisher
+        )
+
     has_transcripts = False
     for meta in prioritized:
         doc_type = meta.get("doc_type", "unknown")
-        if doc_type == "transcript":
+        if doc_type == "transcript" and not _official_transcript(meta):
             has_transcripts = True
 
     added = 0
@@ -1883,10 +1895,10 @@ def _append_rag_sources_from_metadata(
         if added >= limit:
             break
         doc_type = meta.get("doc_type", "unknown")
-        if doc_type == "transcript":
+        if doc_type == "transcript" and not _official_transcript(meta):
             continue
 
-        source = meta.get("source", "Unknown")
+        source = meta.get("publisher") or meta.get("source", "Unknown")
         dedupe_key, source_label = _canonicalize_source_label(source)
         if doc_type == "policy":
             source_label = _friendly_policy_label(source_label)

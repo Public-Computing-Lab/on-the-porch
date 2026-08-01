@@ -53,7 +53,18 @@ def _blocks_from_bundle(
     for_validation: bool = False,
 ) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
+    has_successful_evidence = any(
+        not part.error
+        and bool(
+            part.rag_chunks
+            or (part.result is not None)
+            or (part.canonical_facts or "").strip()
+        )
+        for part in bundle.parts
+    )
     for part in bundle.parts:
+        if has_successful_evidence and part.error:
+            continue
         block: Dict[str, Any] = {
             "path": part.path,
             "topic": part.topic,
@@ -78,11 +89,40 @@ def _blocks_from_bundle(
             block["result"] = part.result
         if part.rag_chunks:
             context_parts: List[str] = []
+            rag_sources: List[Dict[str, Any]] = []
             meta_list = part.rag_metadata or []
             for chunk, meta in zip(part.rag_chunks[:12], meta_list[:12]):
-                source = (meta or {}).get("source", "Unknown")
-                context_parts.append(f"[{source}]\n{chunk}")
+                safe_meta = meta or {}
+                source = safe_meta.get("publisher") or safe_meta.get("source", "Unknown")
+                source_details = {
+                    key: safe_meta.get(key)
+                    for key in (
+                        "document_id",
+                        "source_id",
+                        "title",
+                        "publisher",
+                        "source_type",
+                        "provenance_class",
+                        "published_at",
+                        "source_date",
+                        "start_date",
+                        "source_url",
+                        "link",
+                    )
+                    if safe_meta.get(key) is not None
+                }
+                rag_sources.append(source_details)
+                date_label = (
+                    safe_meta.get("published_at")
+                    or safe_meta.get("source_date")
+                    or safe_meta.get("start_date")
+                )
+                label = str(source)
+                if date_label:
+                    label += f", {date_label}"
+                context_parts.append(f"[{label}]\n{chunk}")
             block["rag_context"] = "\n\n".join(context_parts)
+            block["rag_sources"] = rag_sources
         if (
             part.path == "guardrail"
             or part.intent in UNAVAILABLE_DATA_INTENTS
@@ -94,7 +134,18 @@ def _blocks_from_bundle(
 
 def _fallback_answer(bundle: FactBundle) -> str:
     parts: List[str] = []
+    has_successful_evidence = any(
+        not part.error
+        and bool(
+            part.rag_chunks
+            or (part.result is not None)
+            or (part.canonical_facts or "").strip()
+        )
+        for part in bundle.parts
+    )
     for p in bundle.parts:
+        if has_successful_evidence and p.error:
+            continue
         if not p.canonical_facts or not p.canonical_facts.strip():
             continue
         parts.append(p.canonical_facts.strip())
@@ -109,6 +160,11 @@ def synthesize_answer(
     display_question: Optional[str] = None,
 ) -> str:
     """Single LLM call to turn structured facts into a conversational reply."""
+    if bundle.parts and all(
+        part.path == "rag" and not part.rag_chunks
+        for part in bundle.parts
+    ):
+        return _fallback_answer(bundle)
     if not _fallback_answer(bundle):
         errors = [str(part.error or "") for part in bundle.parts]
         if errors and any(error == "capacity_unavailable" for error in errors):

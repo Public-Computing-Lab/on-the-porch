@@ -1,0 +1,26 @@
+{
+  "documents": [
+    {
+      "id": "boston-city-council-transport-2026-06-18",
+      "source_id": "boston-city-council-transport-2026-06-18",
+      "title": "Boston City Council Committee on City Services and Innovation Technology Meeting Minutes",
+      "published_at": "2026-06-18",
+      "source_type": "official",
+      "publisher": "Boston City Council",
+      "source_url": "https://www.boston.gov/departments/city-council",
+      "doc_type": "transcript",
+      "text": "Boston City Council meeting minutes dated June 18, 2026 record discussion of Dorchester transportation projects. The committee discussed safer pedestrian crossings on Dorchester Avenue and bus-stop accessibility improvements near Fields Corner."
+    },
+    {
+      "id": "unrelated-housing-2026-06-20",
+      "source_id": "unrelated-housing-2026-06-20",
+      "title": "Dorchester housing development update",
+      "published_at": "2026-06-20",
+      "source_type": "community",
+      "publisher": "Community newsletter",
+      "source_url": "https://example.invalid/housing",
+      "doc_type": "newsletter",
+      "text": "A housing proposal includes new apartments in Dorchester. The update does not describe a transportation project or City Council minutes."
+    }
+  ]
+}

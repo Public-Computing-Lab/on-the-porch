@@ -1,0 +1,24 @@
+{
+  "git_sha": "840ec54dd1265b4f2f42cc18b66b54cbf2a99b89",
+  "fresh_exact": {
+    "mode": "rag",
+    "latency_ms": 8697,
+    "retrieved_chunks": 2,
+    "sources": ["Community Transcripts"],
+    "result": "Summarized Codman Square community discussion instead of official council minutes."
+  },
+  "prior_311": {
+    "turn_1_mode": "sql",
+    "turn_1_latency_ms": 613,
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 1426,
+    "turn_2_retrieved_chunks": 2,
+    "contaminated_by_311": false
+  },
+  "explicit_switch": {
+    "turn_2_mode": "rag",
+    "turn_2_latency_ms": 1021,
+    "turn_2_retrieved_chunks": 3,
+    "sources": ["boston_zoning_resident_pointer", "Community Transcripts"]
+  }
+}

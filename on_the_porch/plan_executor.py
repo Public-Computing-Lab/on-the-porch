@@ -15,6 +15,7 @@ from execution_plan import (
     log_fact_bundle,
 )
 from query_plan import resolve_period
+from evidence_domains import filter_evidence_for_domain, resident_evidence_limitation
 from request_budget import raise_if_exhausted, timeout_for
 from concurrency import CapacityUnavailable
 from request_budget import BudgetExhausted
@@ -43,6 +44,25 @@ def _sanitize_rows(rows: List[Dict[str, Any]], *, limit: int = 10) -> List[Dict[
 _MAX_WORKERS = max(1, min(4, int(os.getenv("EXECUTION_PIPELINE_MAX_WORKERS", "4"))))
 
 
+def _part_evidence_domain(part: PlanPart) -> Optional[str]:
+    return part.rag_hints.evidence_domain if part.rag_hints else None
+
+
+def _unavailable_part(part: PlanPart, question: str, error: str) -> FactPart:
+    return FactPart(
+        path=part.path,
+        intent=part.intent,
+        topic=part.topic,
+        sub_question=part.sub_question,
+        canonical_facts=resident_evidence_limitation(
+            question,
+            evidence_domain=_part_evidence_domain(part),
+            unavailable=True,
+        ),
+        error=error,
+    )
+
+
 def _supplemental_sql_for_part(
     part: PlanPart,
     question: str,
@@ -67,9 +87,9 @@ def _execute_sql_part(
             intent=part.intent,
             topic=part.topic,
             sub_question=sub_q,
-            canonical_facts=(
-                f"I couldn't run a prepared query for the **{part.topic or part.intent}** "
-                "part of your question."
+            canonical_facts=resident_evidence_limitation(
+                question,
+                unavailable=True,
             ),
             error="no_prepared_match",
         )
@@ -91,7 +111,10 @@ def _execute_sql_part(
             intent=part.intent,
             topic=part.topic,
             sub_question=sub_q,
-            canonical_facts=f"I couldn't load **{part.topic or part.intent}** data right now.",
+            canonical_facts=resident_evidence_limitation(
+                question,
+                unavailable=True,
+            ),
             error=str(exc),
         )
 
@@ -138,6 +161,8 @@ def _execute_rag_part(
         "transcript_tags": hints.transcript_tags if hints else None,
         "policy_sources": hints.policy_sources if hints else None,
         "folder_categories": hints.folder_categories if hints else None,
+        "evidence_domain": hints.evidence_domain if hints else None,
+        "required_concepts": hints.required_concepts if hints else None,
         "intent": part.intent,
     }
     try:
@@ -151,12 +176,27 @@ def _execute_rag_part(
             intent=part.intent,
             topic=part.topic,
             sub_question=part.sub_question,
-            canonical_facts="",
+            canonical_facts=resident_evidence_limitation(
+                question,
+                evidence_domain=hints.evidence_domain if hints else None,
+                unavailable=True,
+            ),
             error=str(exc),
         )
 
+    chunks, metadata = filter_evidence_for_domain(
+        chunks,
+        metadata,
+        evidence_domain=hints.evidence_domain if hints else None,
+        required_concepts=hints.required_concepts if hints else None,
+    )
+
     if not chunks:
-        canonical = "No relevant information found."
+        canonical = resident_evidence_limitation(
+            question,
+            evidence_domain=hints.evidence_domain if hints else None,
+            unavailable=False,
+        )
     else:
         canonical = f"Retrieved {len(chunks)} source passages for context."
 
@@ -229,52 +269,16 @@ def execute_plan(
             fact_parts = []
             for part, future in zip(plan.parts, futures):
                 if future not in done:
-                    fact_parts.append(
-                        FactPart(
-                            path=part.path,
-                            intent=part.intent,
-                            topic=part.topic,
-                            sub_question=part.sub_question,
-                            canonical_facts="",
-                            error=f"{part.path}_timeout",
-                        )
-                    )
+                    fact_parts.append(_unavailable_part(part, question, f"{part.path}_timeout"))
                     continue
                 try:
                     fact_parts.append(future.result())
                 except BudgetExhausted:
-                    fact_parts.append(
-                        FactPart(
-                            path=part.path,
-                            intent=part.intent,
-                            topic=part.topic,
-                            sub_question=part.sub_question,
-                            canonical_facts="",
-                            error=f"{part.path}_timeout",
-                        )
-                    )
+                    fact_parts.append(_unavailable_part(part, question, f"{part.path}_timeout"))
                 except CapacityUnavailable:
-                    fact_parts.append(
-                        FactPart(
-                            path=part.path,
-                            intent=part.intent,
-                            topic=part.topic,
-                            sub_question=part.sub_question,
-                            canonical_facts="",
-                            error="capacity_unavailable",
-                        )
-                    )
+                    fact_parts.append(_unavailable_part(part, question, "capacity_unavailable"))
                 except Exception as exc:  # noqa: BLE001
-                    fact_parts.append(
-                        FactPart(
-                            path=part.path,
-                            intent=part.intent,
-                            topic=part.topic,
-                            sub_question=part.sub_question,
-                            canonical_facts="",
-                            error=f"{part.path}_unavailable",
-                        )
-                    )
+                    fact_parts.append(_unavailable_part(part, question, f"{part.path}_unavailable"))
                     print(f"  ⚠️ Plan part failed ({part.path}): {exc.__class__.__name__}")
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

@@ -187,11 +187,13 @@ def _bootstrap_env() -> None:
 
 
 def _fix_retrieval_vectordb_path() -> None:
-    # Point retrieval at the active store (gemini or BGE) under on_the_porch/.
+    # Honor configured paths so isolated local/prod-like runs can use independent stores.
     try:
+        import config as app_config  # noqa: WPS433
+
         retrieval.configure_vectordb_paths(
-            gemini_dir=_REAL_DIR / "vectordb_new",
-            bge_dir=_REAL_DIR / "vectordb_bge_v1",
+            gemini_dir=app_config.VECTORDB_DIR,
+            bge_dir=app_config.VECTORDB_BGE_DIR,
         )
     except Exception:
         pass
@@ -1305,6 +1307,8 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
     tags = plan.get("transcript_tags")
     sources = plan.get("policy_sources")
     folders = plan.get("folder_categories")
+    evidence_domain = plan.get("evidence_domain")
+    required_concepts = plan.get("required_concepts")
     k = plan.get("k", 5)
 
     try:
@@ -1348,6 +1352,10 @@ def _normalize_routing_plan(question: str, plan: Dict[str, Any]) -> Dict[str, An
         "transcript_tags": tags if isinstance(tags, list) or tags is None else None,
         "policy_sources": sources if isinstance(sources, list) or sources is None else None,
         "folder_categories": folders if isinstance(folders, list) or folders is None else None,
+        "evidence_domain": evidence_domain if isinstance(evidence_domain, str) else None,
+        "required_concepts": (
+            required_concepts if isinstance(required_concepts, list) else None
+        ),
         "k": k,
         "intent": plan.get("intent"),
         "router": plan.get("router", "llm"),

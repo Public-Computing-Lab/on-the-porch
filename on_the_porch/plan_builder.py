@@ -41,6 +41,8 @@ def _rag_hints_from_routing(routing: Dict[str, Any]) -> RagHints:
         transcript_tags=routing.get("transcript_tags"),
         policy_sources=routing.get("policy_sources"),
         folder_categories=routing.get("folder_categories"),
+        evidence_domain=routing.get("evidence_domain"),
+        required_concepts=routing.get("required_concepts"),
     )
 
 
@@ -244,6 +246,8 @@ def _parse_llm_plan_json(content: str, question: str) -> Optional[ExecutionPlan]
                 transcript_tags=hints_raw.get("transcript_tags"),
                 policy_sources=hints_raw.get("policy_sources"),
                 folder_categories=hints_raw.get("folder_categories"),
+                evidence_domain=hints_raw.get("evidence_domain"),
+                required_concepts=hints_raw.get("required_concepts"),
             )
         plan_parts.append(PlanPart(
             path=path,  # type: ignore[arg-type]

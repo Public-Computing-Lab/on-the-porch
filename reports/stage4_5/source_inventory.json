@@ -1,0 +1,291 @@
+{
+  "council_minutes_ready": false,
+  "database": {
+    "categories": {
+      "311": {
+        "database_record_count": 101894
+      },
+      "boston_gov": {
+        "database_record_count": 3,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [
+          "On the Porch curated corpus",
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "budget filtered",
+          "boston zoning resident pointer",
+          "codman square neighborhood meeting discussion"
+        ],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "city_council_minutes": {
+        "database_record_count": 0,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [],
+        "sample_titles": [],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "city_council_transcripts": {
+        "database_record_count": 0,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [],
+        "sample_titles": [],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "community_transcripts": {
+        "database_record_count": 3,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [
+          "Indexed corpus",
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "codman square neighborhood meeting discussion",
+          "codman_square_ndc_public_overview.txt",
+          "dorchester civic meeting notes template"
+        ],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "crime": {
+        "database_record_count": 196872
+      },
+      "events": {
+        "database_record_count": 484
+      },
+      "news": {
+        "database_record_count": 2,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [
+          "Indexed corpus"
+        ],
+        "sample_titles": [
+          "dorchester_public_safety_reporting_note.txt",
+          "dorchester public safety reporting note"
+        ],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "newsletters": {
+        "database_record_count": 0,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [],
+        "sample_titles": [],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "other_meeting_transcripts": {
+        "database_record_count": 146,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [
+          "Indexed corpus",
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "10_31 Faith Based Meeting.txt",
+          "FNC_4_6_24_MP_meeting.txt",
+          "10_31 Faith Based Meeting.txt"
+        ],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "planning_development": {
+        "database_record_count": 3,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [
+          "Indexed corpus",
+          "On the Porch curated corpus"
+        ],
+        "sample_titles": [
+          "boston_zoning_reference_overview.txt",
+          "boston zoning reference overview",
+          "boston zoning resident pointer"
+        ],
+        "source_labels": [],
+        "stable_ids_present": false
+      },
+      "transportation": {
+        "database_record_count": 0,
+        "date_range": null,
+        "latest_source_date": null,
+        "publisher_labels": [],
+        "sample_titles": [],
+        "source_labels": [],
+        "stable_ids_present": false
+      }
+    },
+    "database_category": "local_demo",
+    "database_name": "stage45_dev",
+    "schema_table_count": 27,
+    "tables": {
+      "admin_knowledge": 0,
+      "civic_document_chunks": 268,
+      "civic_documents": 268,
+      "crime_incident_reports": 196872,
+      "service_requests_311": 101894,
+      "weekly_events": 484
+    }
+  },
+  "generated_at": "2026-08-01T10:44:20.056635-04:00",
+  "runtime": {
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_provider": "local",
+    "fallback_model": "gemini-2.5-pro",
+    "feature_flags": {
+      "bm25_hybrid_enabled": true,
+      "parallel_retrieval": true
+    },
+    "model": "gemini-2.5-flash-lite",
+    "module_hashes": {
+      "answer_synthesizer": "96f2a9eef46ab700d53b7f1f974fdadf236eb37c8d85643449594a4fc7397d7c",
+      "config": "3ea593a9c1804647e45f1549fcb8a801bf2cc8b9a23a418a1b72a804b3dad12c",
+      "dependency_lock": "d7b1b30c4c4378cb3a1b3116704b588b4ee8b533e65bd5556d5225d2a3ab489c",
+      "intent_router": "94edfa384f8e9516b36860d81a09d1de1ba96fd72aeac654a98439cf526a5761",
+      "plan_builder": "9a26986017ae18f5d55f325b2a3ea008b6e2bc02cd401a33b140562a24f0b00d",
+      "plan_executor": "1c89bf31f8f58d0b83d088c062fafc49b6b8e9fe78d6f315053d256eb4ee5d94",
+      "retrieval": "8e3e6d67fe387ea0088fcd7325a66dd04eec0d0fbe177d3ef8c3bbda3a57de50"
+    },
+    "python": "3.14.2",
+    "summary_model": "gemini-2.5-flash-lite",
+    "vector_provider": "chroma"
+  },
+  "vector": {
+    "categories": {
+      "boston_gov": {
+        "publisher_labels": [
+          "On the Porch curated corpus"
+        ],
+        "sample_titles": [
+          "boston_zoning_resident_pointer.txt"
+        ],
+        "source_labels": [
+          "policy"
+        ],
+        "vector_chunk_count": 1,
+        "vector_document_count": 1
+      },
+      "community_transcripts": {
+        "publisher_labels": [
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "codman_square_ndc_public_overview.txt",
+          "codman_square_neighborhood_meeting_discussion.txt"
+        ],
+        "source_labels": [
+          "transcript"
+        ],
+        "vector_chunk_count": 2,
+        "vector_document_count": 2
+      },
+      "news": {
+        "publisher_labels": [],
+        "sample_titles": [
+          "Codman Square Health Center",
+          "Codman Square Health Center",
+          "Codman Square Health Center"
+        ],
+        "source_labels": [
+          "calendar_event"
+        ],
+        "vector_chunk_count": 6,
+        "vector_document_count": 2
+      },
+      "other_meeting_transcripts": {
+        "publisher_labels": [
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "codman_square_neighborhood_meeting_discussion.txt"
+        ],
+        "source_labels": [
+          "transcript"
+        ],
+        "vector_chunk_count": 1,
+        "vector_document_count": 1
+      },
+      "planning_development": {
+        "publisher_labels": [
+          "NDCs / civic groups",
+          "On the Porch curated corpus",
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "codman_square_ndc_public_overview.txt",
+          "boston_zoning_resident_pointer.txt",
+          "codman_square_neighborhood_meeting_discussion.txt"
+        ],
+        "source_labels": [
+          "calendar_event",
+          "community",
+          "policy",
+          "transcript"
+        ],
+        "vector_chunk_count": 15,
+        "vector_document_count": 5
+      },
+      "transportation": {
+        "publisher_labels": [
+          "Various civic bodies"
+        ],
+        "sample_titles": [
+          "codman_square_neighborhood_meeting_discussion.txt",
+          "Codman Square Neighborhood Development Corporation"
+        ],
+        "source_labels": [
+          "calendar_event",
+          "transcript"
+        ],
+        "vector_chunk_count": 2,
+        "vector_document_count": 2
+      }
+    },
+    "chunk_count": 35,
+    "collection": "langchain",
+    "doc_type_counts": {
+      "calendar_event": 30,
+      "community": 2,
+      "policy": 1,
+      "transcript": 2
+    },
+    "document_count": 7,
+    "metadata_fields": [
+      "authority",
+      "chunk_ordinal",
+      "doc_type",
+      "document_id",
+      "feed_url",
+      "index_version",
+      "link",
+      "provenance_class",
+      "publisher",
+      "source",
+      "source_id",
+      "start_date",
+      "tags"
+    ],
+    "path_fingerprint": {
+      "exists": true,
+      "file_count": 7,
+      "structure_sha256": "5c50547d8c9c6ee0a38a0ffec77c6ee12bd2748b46e1b81ec46125e0513ca96a",
+      "total_bytes": 1075516
+    },
+    "provider": "chroma"
+  },
+  "warnings": [
+    "Local civic data contains no identifiable Boston City Council minutes.",
+    "The active vector collection contains no identifiable Boston City Council minute chunks."
+  ]
+}
