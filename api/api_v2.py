@@ -3026,48 +3026,48 @@ def health():
         "gemini_model": os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite"),
         "gemini_fast_model": os.getenv("GEMINI_FAST_MODEL", "gemini-2.5-flash-lite"),
     }
+    reasons = []
+    
+    def degrade(reason):
+        status["status"] = "degraded"
+        reasons.append(reason)
     try:
         conn = get_db_connection()
         conn.close()
         status["database"] = "connected"
-    except Exception:
+    except Exception as e:
         status["database"] = "disconnected"
-        status["status"] = "degraded"
-
+        degrade(f"database: {type(e).__name__}: {e}")
+    
     status["redis"] = _check_redis_health()
     if status["redis"] == "disconnected" and Config.CACHE_BACKEND == "redis":
-        status["status"] = "degraded"
+        degrade("redis disconnected and CACHE_BACKEND=redis")
     if Config.PRODUCTION_MODE and status["redis"] != "connected":
-        status["status"] = "degraded"
-
+        degrade(f"PRODUCTION_MODE requires redis, got {status['redis']!r}")
+    
     status["chroma"] = _check_chroma_health()
     status["qdrant"] = _check_qdrant_health()
     if Config.VECTOR_DB_PROVIDER == "qdrant":
         if status["qdrant"] in {"missing", "unavailable", "degraded", "empty"}:
-            status["status"] = "degraded"
+            degrade(f"qdrant: {status['qdrant']}")
     elif status["chroma"] in {"missing", "unavailable", "degraded"}:
-        status["status"] = "degraded"
-
-    ingest = check_ingestion_lag(
-        repo_root=_ROOT_DIR,
-        stale_hours=Config.INGEST_STALE_HOURS,
-    )
+        degrade(f"chroma: {status['chroma']}")
+    
+    ingest = check_ingestion_lag(repo_root=_ROOT_DIR, stale_hours=Config.INGEST_STALE_HOURS)
     status["ingestion"] = ingest
     if ingest.get("status") in {"stale", "degraded"}:
-        status["status"] = "degraded"
-
+        degrade(f"ingestion: {ingest.get('status')}")
+    
     try:
         from ingest_queue import check_311_freshness, get_ingest_job_status
-
         status["ingest_jobs"] = get_ingest_job_status()
         status["boston_311_freshness"] = check_311_freshness(
-            get_db_connection,
-            stale_hours=Config.BOSTON_311_STALE_HOURS,
+            get_db_connection, stale_hours=Config.BOSTON_311_STALE_HOURS,
         )
         if status["boston_311_freshness"].get("status") == "stale":
-            status["status"] = "degraded"
-    except Exception:
-        pass
+            degrade("boston_311 data stale")
+    except Exception as e:
+        status["ingest_jobs_error"] = f"{type(e).__name__}: {e}"
 
     status["materialized_views_enabled"] = Config.MATERIALIZED_VIEWS_ENABLED
 
@@ -3084,6 +3084,8 @@ def health():
     if prod_issues:
         status["config_warnings"] = prod_issues
 
+    if reasons:
+        status["degraded_reasons"] = reasons
     return jsonify(status)
 
 
