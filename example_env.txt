@@ -5,7 +5,7 @@
 #   cp example_env.txt .env
 #
 # Production overrides (see README § Deployment):
-#   PRODUCTION_MODE=true, CACHE_BACKEND=redis, SEMANTIC_CACHE_ENABLED=true,
+#   PRODUCTION_MODE=true, CACHE_BACKEND=mysql (or redis), SEMANTIC_CACHE_ENABLED=true,
 #   GUEST_CLEANUP_ENABLED=true, FLASK_SESSION_COOKIE_SECURE=true,
 #   ALLOWED_ORIGINS=https://your-frontend-domain
 
@@ -17,7 +17,8 @@ GEMINI_SUMMARY_MODEL=gemini-2.5-flash-lite
 GEMINI_FAST_MODEL=gemini-2.5-flash-lite
 GEMINI_FALLBACK_MODEL=gemini-2.5-pro
 GEMINI_EMBED_MODEL=models/gemini-embedding-001
-GEMINI_REQUEST_TIMEOUT=20
+GEMINI_REQUEST_TIMEOUT=60
+GEMINI_STREAM_TIMEOUT=90
 GEMINI_MAX_ATTEMPTS=3
 
 # ============================================================================
@@ -80,7 +81,9 @@ RETHINKAI_API_KEYS=legacy-api-key-1,legacy-api-key-2
 GUNICORN_BIND=127.0.0.1:8888
 GUNICORN_WORKERS=3
 GUNICORN_THREADS=8
-GUNICORN_TIMEOUT=120
+GUNICORN_TIMEOUT=180
+# SSE keepalive interval (seconds) while waiting on LLM/SQL during /messages/stream
+SSE_KEEPALIVE_INTERVAL=12
 GUNICORN_WORKER_CLASS=gthread
 # Optional tuning (defaults shown in api/gunicorn_conf.py):
 # GUNICORN_GRACEFUL_TIMEOUT=30
@@ -94,7 +97,9 @@ GUNICORN_WORKER_CLASS=gthread
 # ============================================================================
 # Shared cache (required for multi-worker gunicorn deployments)
 # ============================================================================
-# Local dev: memory is fine for a single Flask/gunicorn worker. Production: redis.
+# Local dev: memory is fine for a single Flask/gunicorn worker.
+# Production without Redis (e.g. DreamHost): CACHE_BACKEND=mysql
+# Production with Redis: CACHE_BACKEND=redis
 CACHE_BACKEND=memory
 REDIS_URL=redis://127.0.0.1:6379/0
 CACHE_TTL_MINUTES=60
@@ -103,7 +108,8 @@ CACHE_KEY_PREFIX=rethinkai:chatcache:
 
 # Semantic response cache (near-duplicate first-turn questions)
 SEMANTIC_CACHE_ENABLED=false
-SEMANTIC_CACHE_BACKEND=redis
+# Defaults to match CACHE_BACKEND (memory / redis / mysql) when unset.
+# SEMANTIC_CACHE_BACKEND=mysql
 SEMANTIC_CACHE_KEY=rethinkai:semantic_cache:entries
 SEMANTIC_CACHE_THRESHOLD=0.95
 SEMANTIC_CACHE_TTL_SECONDS=900
@@ -201,8 +207,7 @@ LANGSMITH_PROJECT=rethinkai-community-sentiment
 # ============================================================================
 # RSS ingestion
 # ============================================================================
-# Dorchester Reporter (dotnews.com) RSS — disabled until feed issues are resolved.
-RSS_DOT_REPORTER_ENABLED=false
+# Dorchester Reporter feed is commented out in on_the_porch/rag stuff/ingest_rss.py
 # DOTNEWS_CUTOFF_DATE=2024-01-01
 
 # ============================================================================

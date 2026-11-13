@@ -29,7 +29,7 @@ import boston_gov  # type: ignore  # noqa: E402
 import intent_router  # noqa: E402
 from query_plan import build_query_plan  # noqa: E402
 
-# Local Gemini client config (avoid importing app3 at module load)
+# Gemini client is configured locally (sql_chat uses app4, not legacy app3).
 try:
     import google.generativeai as genai  # type: ignore
 except Exception:  # pragma: no cover
@@ -44,8 +44,11 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)
 # Escalation model for low-confidence synthesis (Iteration 0+); wired in later iterations.
 GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
-GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "20"))
-GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
+GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "60"))
+GEMINI_STREAM_TIMEOUT = int(
+    os.getenv("GEMINI_STREAM_TIMEOUT", str(max(GEMINI_REQUEST_TIMEOUT, 90)))
+)
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 _GEMINI_SUPPORTS_REQUEST_OPTIONS = True
 _llm_calls_local = threading.local()
 # Run independent retrievals (and hybrid SQL+RAG) concurrently for lower latency.
@@ -203,6 +206,11 @@ _TRANSIENT_ERROR_MARKERS = (
 def _is_transient_error(exc: Exception) -> bool:
     message = f"{exc.__class__.__name__} {exc}".lower()
     return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    return any(marker in message for marker in ("deadline", "timeout", "timed out"))
 
 
 def _generate_content(model, prompt, generation_config):
@@ -676,9 +684,13 @@ def _cache_has_311_data(cache: Dict[str, Any]) -> bool:
 
 def _cache_has_crime_data(cache: Dict[str, Any]) -> bool:
     sql = _sql_query_text(cache)
-    if "crime_incident_reports" in sql:
+    if "crime_incident_reports" in sql or "mv_crime" in sql:
         return True
-    return False
+    result = cache.get("sql_result") or {}
+    rows = result.get("rows") or []
+    if not rows or not isinstance(rows[0], dict):
+        return False
+    return any(k in rows[0] for k in ("offense_group", "offense_description"))
 
 
 def _followup_topic_requires_fresh_data(
@@ -686,6 +698,10 @@ def _followup_topic_requires_fresh_data(
     cache: Dict[str, Any],
 ) -> Optional[str]:
     """Return a reason when the cache topic cannot answer the new question."""
+    if intent_router.topics_conflict(question, cache):
+        q_topic = intent_router.detect_civic_topic(question)
+        c_topic = intent_router.detect_cache_topic(cache)
+        return f"rule: topic switch ({c_topic} -> {q_topic})"
     if _looks_like_events_question(question) and not _cache_has_events_data(cache):
         return "rule: events question but cache has no events data"
     if _looks_like_311_stats_question(question) and not _cache_has_311_data(cache):
@@ -693,6 +709,97 @@ def _followup_topic_requires_fresh_data(
     if _looks_like_crime_stats_question(question) and not _cache_has_crime_data(cache):
         return "rule: crime stats question but cache has no crime data"
     return None
+
+
+def _is_self_contained_civic_lookup(question: str) -> bool:
+    """Standalone civic question that must run a fresh lookup, not history mode."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.match_prepared_sql(question) or _ps.decompose_civic_question(question):
+            return True
+    except Exception:
+        pass
+    q = (question or "").lower()
+    topic = intent_router.detect_civic_topic(question)
+    if topic and any(h in q for h in _STATS_QUESTION_HINTS):
+        return True
+    if _looks_like_events_question(question):
+        return True
+    if topic in {"policy", "transcript", "news", "community_note", "opinion"} and len(q) >= 12:
+        return True
+    plan = intent_router.route_with_rules(question)
+    if plan and float(plan.get("confidence") or 0) >= 0.85:
+        return True
+    return False
+
+
+def _question_looks_referential(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return False
+    if q in {"tell me more", "more detail", "go on", "continue", "explain more"}:
+        return True
+    if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
+        return True
+    if re.match(r"^(what about|how about|and what about)\b", q):
+        return True
+    words = q.split()
+    return len(words) <= 12 and any(
+        word in words for word in ("that", "those", "it", "them", "this", "there")
+    )
+
+
+def _is_count_only_sql_cache(cache: Dict[str, Any]) -> bool:
+    rows = (cache.get("sql_result") or {}).get("rows") or []
+    if len(rows) != 1 or not isinstance(rows[0], dict):
+        return False
+    keys = {str(k).lower() for k in rows[0].keys()}
+    return keys <= {"cnt", "count"}
+
+
+def _history_mode_allowed(question: str, cache: Dict[str, Any]) -> bool:
+    """History-only answers are allowed only for same-topic, referential follow-ups."""
+    if intent_router.topics_conflict(question, cache):
+        return False
+    if _is_self_contained_civic_lookup(question):
+        return False
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.match_prepared_sql(question):
+            return False
+        if _ps.is_crime_data_clarification_question(question):
+            return True
+        if _ps.is_311_advisory_question(question):
+            return True
+    except Exception:
+        pass
+    if not _question_looks_referential(question):
+        return False
+    mode = str(cache.get("mode") or "").lower()
+    if mode == "sql" and _is_count_only_sql_cache(cache):
+        ql = (question or "").lower()
+        if any(
+            phrase in ql
+            for phrase in (
+                "tell me more", "break down", "breakdown", "what types",
+                "what kinds", "top ", "most common",
+            )
+        ):
+            return False
+    return True
+
+
+def _can_answer_from_cache_without_fresh_lookup(
+    question: str,
+    cache: Dict[str, Any],
+) -> bool:
+    if intent_router.topics_conflict(question, cache):
+        return False
+    if _is_self_contained_civic_lookup(question):
+        return False
+    return _question_looks_referential(question)
 
 _REFERENTIAL_PATTERNS = (
     r"^(the\s+)?(first|second|third|fourth|fifth|last)\s+one\b",
@@ -712,6 +819,48 @@ _311_EXPANSION_PATTERNS = (
     r"go deeper",
     r"expand on",
 )
+
+
+def _period_from_followup_message(message: str) -> Optional[str]:
+    ql = (message or "").lower()
+    if "last month" in ql:
+        return "last month"
+    if "this month" in ql:
+        return "this month"
+    if "last week" in ql:
+        return "last week"
+    if "this week" in ql:
+        return "this week"
+    if "this year" in ql:
+        return "this year"
+    if "last year" in ql:
+        return "last year"
+    if "last 30 days" in ql or "past 30 days" in ql:
+        return "in the last 30 days"
+    if "last 7 days" in ql or "past week" in ql:
+        return "in the last 7 days"
+    return None
+
+
+def _prior_user_asked_about_crimes(
+    retrieval_cache: Optional[Dict[str, Any]],
+    conversation_history: Optional[List[Dict[str, str]]],
+) -> bool:
+    crime_hints = (
+        "crime", "crimes", "offense", "assault", "robbery", "larceny",
+        "911 report", "safety stat", "shooting", "vandalism",
+    )
+    prior = (retrieval_cache or {}).get("question") or ""
+    if any(h in prior.lower() for h in crime_hints):
+        return True
+    if conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") != "user":
+                continue
+            content = (msg.get("content") or "").lower()
+            if any(h in content for h in crime_hints):
+                return True
+    return False
 
 
 def _period_from_conversation_context(
@@ -747,6 +896,23 @@ def resolve_effective_question(
     if not ql:
         return q, False
 
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if (
+            re.search(r"\bwhat (kind|kinds|type|types)\b", ql)
+            and any(h in ql for h in ("311", "service request"))
+            and not _ps.is_311_advisory_question(q)
+        ):
+            period = _period_from_conversation_context(retrieval_cache, conversation_history)
+            rewritten = (
+                f"What are the top 311 issue types reported in Dorchester {period}, "
+                "with counts?"
+            )
+            return rewritten, True
+    except Exception:
+        pass
+
     if any(re.search(pat, ql) for pat in _311_EXPANSION_PATTERNS):
         if any(h in ql for h in ("311", "service request", "those requests", "these requests")):
             period = _period_from_conversation_context(retrieval_cache, conversation_history)
@@ -755,6 +921,40 @@ def resolve_effective_question(
                 "with counts?"
             )
             return rewritten, True
+
+    if any(h in ql for h in _311_QUESTION_HINTS):
+        return q, False
+
+    if _looks_like_events_question(q):
+        return q, False
+
+    if intent_router.detect_civic_topic(q) in {"policy", "transcript", "news", "safety"}:
+        return q, False
+
+    if _looks_like_crime_stats_question(q) or _looks_like_311_stats_question(q):
+        return q, False
+
+    crime_followup = (
+        _prior_user_asked_about_crimes(retrieval_cache, conversation_history)
+        or _cache_has_crime_data(retrieval_cache or {})
+    )
+    referential_period = any(
+        re.search(pat, ql)
+        for pat in (r"^what about\b", r"^how about\b", r"^and what about\b")
+    )
+    short_time_shift = (
+        any(h in ql for h in _TIME_SHIFT_HINTS)
+        and not any(h in ql for h in _CRIME_QUESTION_HINTS + ("911",))
+        and len(ql) <= 48
+    )
+    if crime_followup and (referential_period or short_time_shift):
+        period = _period_from_followup_message(q) or _period_from_conversation_context(
+            retrieval_cache, conversation_history,
+        )
+        rewritten = (
+            f"What crimes are most frequently reported in Dorchester {period}?"
+        )
+        return rewritten, True
 
     return q, False
 
@@ -792,6 +992,26 @@ def _fast_followup_needs_new_data(
     if not q:
         return None
 
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+
+        if _ps.is_311_advisory_question(question) and (
+            has_history or _cache_has_311_data(cache)
+        ):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: 311 advisory follow-up answerable from cache/history",
+            }
+        if _ps.is_crime_data_clarification_question(question) and (
+            has_history or _cache_has_crime_data(cache)
+        ):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: crime data clarification answerable from cache/history",
+            }
+    except Exception:
+        pass
+
     # Named event detail always needs a fresh weekly_events lookup (not cache/history).
     try:
         from sql_chat import prepared_sql as _ps  # noqa: WPS433
@@ -801,18 +1021,37 @@ def _fast_followup_needs_new_data(
                 "needs_new_data": True,
                 "reason": "rule: named event detail requires SQL lookup",
             }
+        if _ps.match_prepared_sql(question):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: prepared civic SQL lookup",
+            }
     except Exception:
         pass
 
     if any(hint in q for hint in _TIME_SHIFT_HINTS):
-        return {
-            "needs_new_data": True,
-            "reason": "rule: question requests a different time period or comparison",
-        }
+        if not _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: question requests a different time period or comparison",
+            }
 
     topic_mismatch = _followup_topic_requires_fresh_data(question, cache)
     if topic_mismatch:
         return {"needs_new_data": True, "reason": topic_mismatch}
+
+    if _is_self_contained_civic_lookup(question):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: self-contained civic lookup",
+        }
+
+    if not _history_mode_allowed(question, cache):
+        if intent_router.detect_civic_topic(question):
+            return {
+                "needs_new_data": True,
+                "reason": "rule: factual or new-topic question requires fresh lookup",
+            }
 
     cache_has_data = bool(
         cache.get("sql_result")
@@ -836,24 +1075,28 @@ def _fast_followup_needs_new_data(
         }
 
     if any(re.search(pat, q) for pat in (r"^tell me more\b", r"^more (about|on|info)\b")):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: referential follow-up answerable from cache",
-        }
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: referential follow-up answerable from cache",
+            }
+        return None
 
     if any(re.search(pat, q) for pat in _REFERENTIAL_PATTERNS):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: referential follow-up answerable from cache",
-        }
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: referential follow-up answerable from cache",
+            }
+        return None
 
-    if len(q) <= 80 and any(
-        word in q.split() for word in ("that", "those", "it", "them", "this", "there")
-    ):
-        return {
-            "needs_new_data": False,
-            "reason": "rule: short clarification follow-up answerable from cache",
-        }
+    if _question_looks_referential(question):
+        if _can_answer_from_cache_without_fresh_lookup(question, cache):
+            return {
+                "needs_new_data": False,
+                "reason": "rule: short clarification follow-up answerable from cache",
+            }
+        return None
 
     return None
 
@@ -870,6 +1113,26 @@ def _check_if_needs_new_data(
     fast = _fast_followup_needs_new_data(question, conversation_history, retrieval_cache)
     if fast is not None:
         return fast
+
+    cache = retrieval_cache or {}
+    if intent_router.topics_conflict(question, cache):
+        q_topic = intent_router.detect_civic_topic(question)
+        c_topic = intent_router.detect_cache_topic(cache)
+        return {
+            "needs_new_data": True,
+            "reason": f"rule: topic switch ({c_topic} -> {q_topic})",
+        }
+    if _is_self_contained_civic_lookup(question):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: self-contained civic lookup",
+        }
+
+    if cache.get("mode") and not _history_mode_allowed(question, cache):
+        return {
+            "needs_new_data": True,
+            "reason": "rule: history mode not safe for this follow-up",
+        }
 
     # If no history and no cache, always need new data
     has_history = conversation_history and len(conversation_history) > 0
@@ -944,7 +1207,14 @@ def _check_if_needs_new_data(
         if isinstance(needs_new, str):
             needs_new = needs_new.lower() in ("true", "yes", "1")
         result["needs_new_data"] = bool(needs_new)
-        
+
+        if not result["needs_new_data"] and cache.get("mode"):
+            if not _history_mode_allowed(question, cache):
+                return {
+                    "needs_new_data": True,
+                    "reason": "rule: LLM history gate overridden for factual safety",
+                }
+
         return result
     except Exception:
         return default_result
@@ -1124,58 +1394,56 @@ def run_execution_pipeline(
     if not is_execution_pipeline_enabled():
         return None
 
-    routing = routing_plan or _route_question(question)
-    plan_started = time.perf_counter()
-    plan = build_execution_plan(question, routing)
-    plan_ms = int((time.perf_counter() - plan_started) * 1000)
-    if plan is None:
+    try:
+        routing = routing_plan or _route_question(question)
+        plan_started = time.perf_counter()
+        plan = build_execution_plan(question, routing)
+        plan_ms = int((time.perf_counter() - plan_started) * 1000)
+        if plan is None:
+            return None
+
+        facts = execute_plan(
+            plan,
+            question,
+            execute_sql=app4._execute_sql,
+            retrieve_rag=_retrieve_rag,
+        )
+
+        synth_started = time.perf_counter()
+        answer = synthesize_and_validate(
+            question,
+            facts,
+            conversation_history=conversation_history,
+            display_question=question,
+        )
+        synth_ms = int((time.perf_counter() - synth_started) * 1000)
+
+        mode = plan.legacy_mode()
+        if mode == "sql":
+            answer = _apply_sql_fallback_if_needed(question, answer)
+        elif mode in {"rag", "hybrid"}:
+            answer = _apply_default_fallback_if_needed(question, answer)
+
+        result = facts.to_legacy_result(answer)
+        if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
+            result["answer"] = answer
+
+        metrics: Dict[str, Any] = {
+            "pipeline_tier": plan.tier,
+            "plan_ms": plan_ms,
+            "execute_ms": facts.execute_ms,
+            "synthesize_ms": synth_ms,
+            "prepared_intent": facts.prepared_intent,
+            "intent": routing.get("intent"),
+            "router": routing.get("router"),
+            "period_days": (routing.get("query_plan") or {}).get("period_days"),
+            "period_label": (routing.get("query_plan") or {}).get("period_label"),
+            "metric": (routing.get("query_plan") or {}).get("metric"),
+        }
+        return mode, result, metrics
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Execution pipeline failed: {exc.__class__.__name__}: {exc}")
         return None
-
-    facts = execute_plan(
-        plan,
-        question,
-        execute_sql=app4._execute_sql,
-        retrieve_rag=_retrieve_rag,
-    )
-
-    synth_started = time.perf_counter()
-    display_q = question
-    if conversation_history:
-        for msg in reversed(conversation_history):
-            if msg.get("role") == "user" and (msg.get("content") or "").strip():
-                display_q = msg["content"].strip()
-                break
-    answer = synthesize_and_validate(
-        question,
-        facts,
-        conversation_history=conversation_history,
-        display_question=display_q,
-    )
-    synth_ms = int((time.perf_counter() - synth_started) * 1000)
-
-    mode = plan.legacy_mode()
-    if mode == "sql":
-        answer = _apply_sql_fallback_if_needed(question, answer)
-    elif mode in {"rag", "hybrid"}:
-        answer = _apply_default_fallback_if_needed(question, answer)
-
-    result = facts.to_legacy_result(answer)
-    if isinstance(result, dict) and "answer" not in result and mode == "hybrid":
-        result["answer"] = answer
-
-    metrics: Dict[str, Any] = {
-        "pipeline_tier": plan.tier,
-        "plan_ms": plan_ms,
-        "execute_ms": facts.execute_ms,
-        "synthesize_ms": synth_ms,
-        "prepared_intent": facts.prepared_intent,
-        "intent": routing.get("intent"),
-        "router": routing.get("router"),
-        "period_days": (routing.get("query_plan") or {}).get("period_days"),
-        "period_label": (routing.get("query_plan") or {}).get("period_label"),
-        "metric": (routing.get("query_plan") or {}).get("metric"),
-    }
-    return mode, result, metrics
 
 
 def build_retrieval_cache_from_result(
@@ -1292,6 +1560,132 @@ def _compose_rag_answer(question: str, chunks: List[str], metadatas: List[Dict[s
         return "\n\n".join(context_parts[:10])  # fallback: show a sample of context
 
 
+_311_ADVISORY_CATEGORIES = (
+    ("Streets & sidewalks", "potholes, broken sidewalks, missed street cleaning, abandoned vehicles"),
+    ("Trash & sanitation", "missed pickup, illegal dumping, rodents, bulky item pickup"),
+    ("Parking", "enforcement issues, signage, resident permit zones"),
+    ("Property", "graffiti, vacant lots, housing code concerns"),
+    ("Trees & parks", "fallen branches, pruning, park maintenance"),
+    ("Street lights", "outages, damaged poles"),
+    ("Animals", "lost/found pets, wildlife concerns"),
+)
+
+
+def _compose_311_advisory_answer(
+    question: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Fast resident guidance for when/how to use 311 (no LLM round-trip)."""
+    lines = [
+        "311 is Boston's **non-emergency** line for city services — call **911** for emergencies.",
+        "",
+        "**Good things to report via 311 in Dorchester:**",
+    ]
+    for title, examples in _311_ADVISORY_CATEGORIES:
+        lines.append(f"- **{title}:** {examples}")
+
+    cache = retrieval_cache or {}
+    rows = (cache.get("sql_result") or {}).get("rows") or []
+    top_from_cache: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = row.get("issue_type") or row.get("service_name") or row.get("case_topic")
+        if label and str(label).strip():
+            top_from_cache.append(str(label).strip())
+        if len(top_from_cache) >= 5:
+            break
+
+    if top_from_cache:
+        lines.append("")
+        lines.append(
+            "From the data we just looked at, common Dorchester categories include "
+            + ", ".join(f"**{name}**" for name in top_from_cache[:5])
+            + "."
+        )
+    elif conversation_history:
+        for msg in reversed(conversation_history):
+            if msg.get("role") != "assistant":
+                continue
+            text = (msg.get("content") or "").lower()
+            if "parking" in text or "trash" in text or "tree" in text or "animal" in text:
+                lines.append("")
+                lines.append(
+                    "Based on our last answer, those monthly totals mix parking, trash, "
+                    "potholes, trees, animals, and similar non-emergency city issues — "
+                    "all valid 311 topics depending on what you're seeing."
+                )
+                break
+
+    lines.extend([
+        "",
+        "You can call **311**, use the **BOS:311** app, or report online at boston.gov/311.",
+    ])
+    return "\n".join(lines)
+
+
+def _try_crime_clarification_response(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return a complete agent payload for BPD data clarification follow-ups."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+    except Exception:
+        return None
+    if not _ps.is_crime_data_clarification_question(message):
+        return None
+    cache = retrieval_cache or create_empty_cache()
+    has_history = bool(conversation_history)
+    if not has_history and not _cache_has_crime_data(cache):
+        return None
+    answer = _ps.crime_data_clarification_answer()
+    try:
+        from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+        answer = polish_conversational_answer(answer, conversation_history)
+    except Exception:
+        pass
+    return {
+        "answer": answer,
+        "mode": "advisory",
+        "sources": [],
+        "result": {"answer": answer, "advisory": True},
+        "retrieval_cache": cache,
+    }
+
+
+def _try_311_advisory_response(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    retrieval_cache: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Return a complete agent payload for 311 advisory questions, or None."""
+    try:
+        from sql_chat import prepared_sql as _ps  # noqa: WPS433
+    except Exception:
+        return None
+    if not _ps.is_311_advisory_question(message):
+        return None
+    cache = retrieval_cache or create_empty_cache()
+    answer = _compose_311_advisory_answer(message, conversation_history, cache)
+    try:
+        from answer_voice import polish_conversational_answer  # noqa: WPS433
+
+        answer = polish_conversational_answer(answer, conversation_history)
+    except Exception:
+        pass
+    return {
+        "answer": answer,
+        "mode": "advisory",
+        "sources": [],
+        "result": {"answer": answer, "advisory": True},
+        "retrieval_cache": cache,
+    }
+
+
 def _answer_from_history(
     question: str,
     conversation_history: Optional[List[Dict[str, str]]] = None,
@@ -1354,7 +1748,12 @@ def _build_history_prompt(
     if cache_context:
         user_prompt += "Available Data (from recent retrieval):\n" + cache_context + "\n\n"
     user_prompt += resident_question_block(question)
-    user_prompt += "\nPlease answer using the available information:"
+    user_prompt += (
+        "\nPlease answer using ONLY the available information above.\n"
+        "Do not invent counts, dates, names, or sources. "
+        "If the question needs data that is not shown above, say you would need "
+        "to look that up fresh rather than guessing."
+    )
 
     return system_prompt_text + "\n\n" + user_prompt
 
@@ -1805,6 +2204,18 @@ def _run_hybrid(question: str, plan: Dict[str, Any], conversation_history: Optio
     return {"answer": answer, "sql": sql_part, "rag": rag_part, "prepared_intent": sql_part.get("prepared_intent")}
 
 
+def _generate_text_non_stream(model_name: str, prompt: str, temperature: float) -> str:
+    """Single non-streaming Gemini call (fallback when streaming deadlines are tight)."""
+    client = _get_llm_client()
+    model = client.GenerativeModel(model_name)
+    resp = _generate_content(
+        model,
+        prompt,
+        generation_config={"temperature": temperature},
+    )
+    return (resp.text or "").strip()
+
+
 def _stream_model_text(model_name: str, prompt: str, temperature: float):
     """Yield text deltas from a streaming Gemini generation with retries."""
     last_exc: Optional[Exception] = None
@@ -1826,7 +2237,17 @@ def _stream_model_text(model_name: str, prompt: str, temperature: float):
                 )
                 time.sleep(backoff)
                 continue
-            raise
+            break
+    if last_exc is not None and _is_timeout_error(last_exc):
+        try:
+            text = _generate_text_non_stream(model_name, prompt, temperature)
+            if text:
+                print("  ↪ Stream deadline hit; using non-streaming Gemini fallback")
+                for piece in _pseudo_stream(text):
+                    yield piece
+                return
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ Non-streaming fallback failed: {exc.__class__.__name__}")
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("Gemini stream returned no content")
@@ -1843,7 +2264,7 @@ def _stream_model_text_once(model_name: str, prompt: str, temperature: float):
                 prompt,
                 generation_config={"temperature": temperature},
                 stream=True,
-                request_options={"timeout": GEMINI_REQUEST_TIMEOUT},
+                request_options={"timeout": GEMINI_STREAM_TIMEOUT},
             )
         except TypeError:
             stream = model.generate_content(
@@ -1890,6 +2311,34 @@ def stream_agent_response(
     """
     cache = retrieval_cache or create_empty_cache()
 
+    advisory = _try_311_advisory_response(message, conversation_history, cache)
+    if advisory is not None:
+        answer = advisory["answer"]
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+        yield ("final", {
+            "answer": answer,
+            "mode": "advisory",
+            "result": advisory["result"],
+            "retrieval_cache": cache,
+        })
+        return
+
+    crime_clarify = _try_crime_clarification_response(
+        message, conversation_history, cache,
+    )
+    if crime_clarify is not None:
+        answer = crime_clarify["answer"]
+        for piece in _pseudo_stream(answer):
+            yield ("delta", piece)
+        yield ("final", {
+            "answer": answer,
+            "mode": "advisory",
+            "result": crime_clarify["result"],
+            "retrieval_cache": cache,
+        })
+        return
+
     if is_small_talk(message):
         from answer_voice import contextual_chitchat_reply  # noqa: WPS433
 
@@ -1928,9 +2377,17 @@ def stream_agent_response(
             yield ("delta", answer)
         else:
             acc: List[str] = []
-            for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
-                acc.append(piece)
-                yield ("delta", piece)
+            try:
+                for piece in _stream_model_text(GEMINI_MODEL, prompt, 0.3):
+                    acc.append(piece)
+                    yield ("delta", piece)
+            except Exception as exc:  # noqa: BLE001
+                if not acc:
+                    print(f"  ⚠️ History stream failed: {exc.__class__.__name__}")
+                    answer = _answer_from_history(message, conversation_history, cache)
+                    if answer:
+                        yield ("delta", answer)
+                        acc = [answer]
             answer = "".join(acc).strip()
             if not answer:
                 answer = "I encountered an error answering from the available information. Could you rephrase your question?"
@@ -1945,9 +2402,13 @@ def stream_agent_response(
     plan = _route_question(effective_message)
     mode = plan.get("mode", "hybrid")
 
-    pipeline_out = run_execution_pipeline(
-        effective_message, conversation_history, routing_plan=plan,
-    )
+    try:
+        pipeline_out = run_execution_pipeline(
+            effective_message, conversation_history, routing_plan=plan,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Execution pipeline raised: {exc.__class__.__name__}")
+        pipeline_out = None
     if pipeline_out is not None:
         mode, out, pipeline_metrics = pipeline_out
         answer = out.get("answer", "")
@@ -2089,7 +2550,9 @@ def apply_post_stream_fallback(
                 _schedule_boston_gov_enrichment(question, answer)
             return answer
         return _apply_sql_fallback_if_needed(question, answer)
-    if mode in {"rag", "hybrid", "history"}:
+    if mode in {"rag", "hybrid", "history", "advisory"}:
+        if mode == "advisory":
+            return answer
         if _boston_gov_async_enabled() and not _boston_gov_blocking_enabled():
             if _should_trigger_boston_gov_fallback(answer):
                 _schedule_boston_gov_enrichment(question, answer)

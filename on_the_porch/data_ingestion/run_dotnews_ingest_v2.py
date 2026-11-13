@@ -940,6 +940,11 @@ def process_pdf(pdf_path: Path, issue_date=None, page_workers: int = 5):
 
 def main():
     args = sys.argv[1:]
+    if "--force" not in args:
+        print("DotNews/inprint ingestion is disabled. Pass --force to run manually.")
+        return 0
+    args = [arg for arg in args if arg != "--force"]
+
     first_time = "--first-time" in args
     args = [arg for arg in args if arg != "--first-time"]
 

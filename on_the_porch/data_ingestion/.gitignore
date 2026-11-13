@@ -20,9 +20,10 @@ temp_downloads/*
 *.log
 ingestion_log.jsonl
 
-# Google credentials
+# Google credentials (allow tracked Boston sync config)
 *.json
 !.env.example
+!boston_data_sync/boston_datasets_config.json
 
 # IDE
 .vscode/

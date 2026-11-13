@@ -14,7 +14,7 @@ Usage:
     python ingest_311_911_to_rag.py --aggregate      # aggregate summaries only
     python ingest_311_911_to_rag.py --batch-size 200 # records per embedding batch
 
-Can also be imported and called from main_daily_ingestion.py:
+Can also be imported and called from cron_ingest.sh / directly:
     from ingest_311_911_to_rag import run_ingestion
     stats = run_ingestion(days=30)
 """
@@ -766,7 +766,7 @@ def run_ingestion(
 ) -> Dict[str, Any]:
     """
     Orchestrate 311 and/or crime ingestion into the RAG vector store.
-    Intended to be called from main_daily_ingestion.py or directly.
+    Intended to be called from cron_ingest.sh or directly.
 
     Args:
         days:               How many days back to look for new records.

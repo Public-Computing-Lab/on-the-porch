@@ -48,11 +48,12 @@ DEFAULT_VECTORDB_DIR = resolve_vectordb_dir()
 DOT_REPORTER_SOURCE = "Dorchester Reporter"
 
 RSS_FEEDS: list[dict] = [
-    {
-        "url":    "https://www.dotnews.com/feed/",
-        "source": DOT_REPORTER_SOURCE,
-        "tag":    "dorchester,news",
-    },
+    # Dorchester Reporter (dotnews.com) — disabled until feed/inprint issues are resolved.
+    # {
+    #     "url":    "https://www.dotnews.com/feed/",
+    #     "source": DOT_REPORTER_SOURCE,
+    #     "tag":    "dorchester,news",
+    # },
     {
         "url":    "https://www.csndc.com/feed/",
         "source": "Codman Square Neighborhood Development Corporation",
@@ -72,23 +73,10 @@ RSS_FEEDS: list[dict] = [
  
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _dot_reporter_rss_enabled() -> bool:
-    """Temporarily off by default while dotnews.com feed issues are resolved."""
-    raw = os.getenv("RSS_DOT_REPORTER_ENABLED", "false").strip().lower()
-    return raw in ("1", "true", "yes", "on")
-
-
 def active_rss_feeds(feeds: list[dict] | None = None) -> list[dict]:
-    """Return feeds that should run this ingest cycle (logic kept; feed may be skipped)."""
+    """Return feeds that should run this ingest cycle."""
     feeds = feeds if feeds is not None else RSS_FEEDS
-    active: list[dict] = []
-    for feed_meta in feeds:
-        if feed_meta.get("source") == DOT_REPORTER_SOURCE and not _dot_reporter_rss_enabled():
-            continue
-        if feed_meta.get("enabled", True) is False:
-            continue
-        active.append(feed_meta)
-    return active
+    return [f for f in feeds if f.get("enabled", True) is not False]
 
 
 def _strip_html(text: str) -> str:
@@ -192,13 +180,6 @@ def ingest_rss(
     print("=" * 70)
 
     feeds = active_rss_feeds(feeds)
-    if not _dot_reporter_rss_enabled() and any(
-        f.get("source") == DOT_REPORTER_SOURCE for f in RSS_FEEDS
-    ):
-        print(
-            "Skipping Dorchester Reporter RSS "
-            "(set RSS_DOT_REPORTER_ENABLED=true to re-enable)"
-        )
     if not feeds:
         print("\nNo RSS feeds enabled.  Nothing to do.")
         return

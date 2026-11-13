@@ -31,6 +31,9 @@ def _display_question(
     question: str,
     conversation_history: Optional[List[Dict[str, str]]],
 ) -> str:
+    current = (question or "").strip()
+    if current:
+        return current
     if conversation_history:
         for msg in reversed(conversation_history):
             if msg.get("role") == "user":
@@ -61,6 +64,12 @@ def _blocks_from_bundle(
         if part.result and part.result.get("rows"):
             limit = 8 if part.intent in prepared_sql.DETAIL_CIVIC_INTENTS else 5
             block["sample_rows"] = (part.result.get("rows") or [])[:limit]
+        if part.intent == "crime_by_offense":
+            block["notes"] = (
+                "Criminal offense categories only (service calls excluded). Use these categories "
+                "to answer what crimes are reported. Supplement with RAG for street safety, "
+                "community programs, and neighborhood context — not as a substitute for these facts."
+            )
         if for_validation and part.result:
             block["result"] = part.result
         if part.rag_chunks:
@@ -115,9 +124,10 @@ def synthesize_answer(
     )
 
     model = os.getenv("GEMINI_SUMMARY_MODEL", app4.GEMINI_SUMMARY_MODEL)
+    temp = 0.2 if kind == "crime" else 0.35
     try:
         return app4._call_gemini_with_logging(
-            model, full_prompt, temperature=0.35,
+            model, full_prompt, temperature=temp,
         ).strip()
     except Exception as exc:  # noqa: BLE001
         print(f"  ⚠️ Answer synthesis failed: {exc}")
@@ -129,6 +139,7 @@ def validate_answer(
     bundle: FactBundle,
     *,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    question: Optional[str] = None,
 ) -> str:
     """Ensure DB-backed numbers match query results across all SQL parts."""
     out = (answer or "").strip()
@@ -148,12 +159,14 @@ def validate_answer(
                 out,
                 part.result,
                 prepared_intent=part.intent,
+                question=question or part.sub_question,
             )
     return polish_conversational_answer(
         out,
         conversation_history,
         synthesis_blocks=blocks,
         prepared_intent=bundle.prepared_intent,
+        question=question,
     )
 
 
@@ -172,8 +185,13 @@ def synthesize_and_validate(
     )
     if not answer.strip():
         answer = _fallback_answer(bundle)
-    return validate_answer(
-        answer,
-        bundle,
-        conversation_history=conversation_history,
-    )
+    try:
+        return validate_answer(
+            answer,
+            bundle,
+            conversation_history=conversation_history,
+            question=question,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ⚠️ Answer validation failed: {exc}")
+        return answer.strip() or _fallback_answer(bundle)

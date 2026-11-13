@@ -46,11 +46,11 @@ GEMINI_SUMMARY_MODEL = os.getenv("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 SQL_MAX_RETRIES = int(os.getenv("SQL_MAX_RETRIES", "2"))  # Reduced default to 2 for faster execution
 # How many times to attempt a Gemini call / MySQL connection before giving up.
 # Transient upstream errors (rate limits, 5xx, timeouts) are retried with backoff.
-GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "2")))
+GEMINI_MAX_ATTEMPTS = max(1, int(os.getenv("GEMINI_MAX_ATTEMPTS", "3")))
 DB_MAX_ATTEMPTS = max(1, int(os.getenv("DB_MAX_ATTEMPTS", "3")))
 # Per-call wall-clock timeout (seconds) for a single Gemini request, so a stuck
 # upstream call cannot hang a worker thread indefinitely.
-GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "20"))
+GEMINI_REQUEST_TIMEOUT = int(os.getenv("GEMINI_REQUEST_TIMEOUT", "60"))
 # Cheaper/faster model for classification (table selection). Defaults to the
 # main model so behavior is unchanged until you point it at a lighter model.
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", GEMINI_MODEL)

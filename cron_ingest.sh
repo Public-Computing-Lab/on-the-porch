@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Daily ingestion: civic data, events, RSS (current), Google Drive.
 # Wayback RSS backfill runs monthly via cron_ingest_monthly.sh (slow + embed-heavy).
+#
+# DotNews / inprint disabled in this cron:
+#   - run_dotnews_ingest_v2.py step (commented below)
+#   - Dorchester Reporter RSS feed (commented in ingest_rss.py)
+#   - Google Drive newsletter PDFs (PROCESS_NEWSLETTER_PDFS=false in google_drive_to_vectordb.py)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -104,11 +109,12 @@ run_step \
   true \
   "$PYTHON" "scripts/refresh_materialized_views.py"
 
-run_step \
-  "DotNews newsletter ingestion" \
-  dotnews \
-  true \
-  "$PYTHON" "on_the_porch/data_ingestion/run_dotnews_ingest_v2.py"
+# DotNews / inprint PDF ingestion — disabled until dotnews.com feed is stable.
+# run_step \
+#   "DotNews newsletter ingestion" \
+#   dotnews \
+#   true \
+#   "$PYTHON" "on_the_porch/data_ingestion/run_dotnews_ingest_v2.py"
 
 run_step \
   "Tribe events ingestion" \

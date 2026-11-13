@@ -486,14 +486,28 @@ function normalizeSources(sources) {
   return sources.map(normalizeSourceEntry).filter(Boolean);
 }
 
+function isPublicSourcePath(path) {
+  if (!path) return false;
+  const value = String(path).trim();
+  return /^https?:\/\//i.test(value) || value.startsWith('/');
+}
+
 function formatSource(rawSource) {
   const source = normalizeSourceEntry(rawSource);
   if (!source) {
     return { label: 'Community data', path: null };
   }
 
+  if (source.doc_type === 'transcript' || source.source === 'Community Transcripts') {
+    return { label: 'Community Transcripts', path: null };
+  }
+
   const label = (source.source || source.label || source.name || '').trim();
-  const path = source.path || source.link || source.url || null;
+  let path = source.path || source.link || source.url || null;
+
+  if (path && !isPublicSourcePath(path)) {
+    path = null;
+  }
 
   if (source.type === 'event' && label) {
     return { label, path };
@@ -1406,6 +1420,34 @@ async function sendChatMessage(event) {
         if (await handleAuthFailure(streamResult)) return;
         if (streamResult.status === 429) {
           showToast(streamResult.error, 'warning');
+        }
+        // HTTP/2 proxies (e.g. DreamHost) often kill long SSE streams around ~45s.
+        // Retry once via the JSON endpoint, which completes without a live stream.
+        const retryResult = await ApiClient.sendMessage(threadId, { message });
+        if (retryResult.success) {
+          const threadIndex = state.threads.findIndex((entry) => entry.id === retryResult.data.thread.id);
+          if (threadIndex >= 0) {
+            state.threads[threadIndex] = retryResult.data.thread;
+          }
+          if (!isStale()) {
+            state.messages = normalizeMessages([
+              ...state.messages.filter((item) => item.id !== optimisticMessageId),
+              retryResult.data.user_message,
+              {
+                ...retryResult.data.assistant_message,
+                sources: normalizeSources(
+                  (retryResult.data.assistant_message && retryResult.data.assistant_message.sources
+                    && retryResult.data.assistant_message.sources.length)
+                    ? retryResult.data.assistant_message.sources
+                    : retryResult.data.sources,
+                ),
+              },
+            ]);
+          }
+          renderThreads();
+          updateThreadHeader();
+          renderMessages();
+          return;
         }
         // The streaming bubble lives only in the DOM; re-rendering from state
         // (which never held it) removes it cleanly.

@@ -1,26 +1,41 @@
-flask
-argon2-cffi
-pymysql
-pocketflow 
-mysql-connector-python
-google-generativeai
-dotenv
-flask-cors 
-google.generativeai 
-langchain-community 
-bs4
-requests
-feedparser
-pandas
-config 
-urllib3
-pypdf
-python-docx
-langchain-text-splitters
-langchain-core
-google 
-google_auth_oauthlib
+# Canonical Python dependencies for ml-misi-community-sentiment.
+# Install: pip install -r requirements.txt
+
+# API server
+flask>=3.0
+flask-cors>=5.0
+gunicorn>=23.0
+argon2-cffi>=23.1
+mysql-connector-python>=9.3
+pymysql>=1.1
+redis>=5.0
+python-dotenv>=1.0
+
+# Gemini (chat, SQL synthesis, ingestion LLM)
+google-generativeai>=0.8
+
+# RAG / vector stores
 chromadb
+langchain-chroma
+langchain-community
+langchain-core
+langchain-text-splitters
 sentence-transformers
 qdrant-client
 rank-bm25
+
+# SQL agent (pocketflow graph in sql_chat/app4.py)
+pocketflow
+
+# Ingestion & document parsing
+requests
+feedparser
+pandas
+beautifulsoup4
+pypdf
+python-docx
+
+# Google Drive / Gmail (ingestion + config preflight)
+google-auth
+google-auth-oauthlib
+google-api-python-client

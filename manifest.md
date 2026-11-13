@@ -69,6 +69,6 @@
 
 ## Assorted Notes
 - Frontend default API key `'banana'` must match `.env` `RETHINKAI_API_KEYS`.
-- `api/api.py` and `/data/query` legacy endpoints are deprecated; prefer `api_v2.py`.
+- Legacy `api/api.py` removed; use `api/api_v2.py` only.
 - LLM defaults to `gemini-2.5-flash-lite`; override via env `GEMINI_MODEL`.
 

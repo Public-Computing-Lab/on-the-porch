@@ -233,7 +233,9 @@ async function sendMessageStream(threadId, payload, { onDelta, onCorrection, tim
       data = null;
     }
     let errorMessage = (data && (data.error || data.message)) || `Request failed with status ${response.status}`;
-    if (response.status === 429) {
+    if (response.status === 502 || response.status === 504) {
+      errorMessage = 'The server timed out while generating a response. Please try again.';
+    } else if (response.status === 429) {
       const retryAfter = data?.retry_after;
       errorMessage = retryAfter
         ? `Too many requests. Please wait ${retryAfter} seconds and try again.`

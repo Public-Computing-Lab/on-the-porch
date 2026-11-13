@@ -181,7 +181,10 @@ CACHE_MAX_SESSIONS = _int("CACHE_MAX_SESSIONS", 100)
 CACHE_KEY_PREFIX = _env("CACHE_KEY_PREFIX", "rethinkai:chatcache:")
 
 SEMANTIC_CACHE_ENABLED = _truthy("SEMANTIC_CACHE_ENABLED", "false")
-_semantic_default_backend = "redis" if CACHE_BACKEND == "redis" else "memory"
+_semantic_default_backend = {
+    "redis": "redis",
+    "mysql": "mysql",
+}.get(CACHE_BACKEND, "memory")
 SEMANTIC_CACHE_BACKEND = _env("SEMANTIC_CACHE_BACKEND", _semantic_default_backend).strip().lower()
 SEMANTIC_CACHE_KEY = _env("SEMANTIC_CACHE_KEY", "rethinkai:semantic_cache:entries")
 SEMANTIC_CACHE_THRESHOLD = _float("SEMANTIC_CACHE_THRESHOLD", 0.95)
@@ -224,7 +227,9 @@ GEMINI_SUMMARY_MODEL = _env("GEMINI_SUMMARY_MODEL", GEMINI_MODEL)
 GEMINI_FAST_MODEL = _env("GEMINI_FAST_MODEL", GEMINI_MODEL)
 GEMINI_FALLBACK_MODEL = _env("GEMINI_FALLBACK_MODEL", "gemini-2.5-pro")
 GEMINI_EMBED_MODEL = _env("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
-GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 20)
+GEMINI_REQUEST_TIMEOUT = _int("GEMINI_REQUEST_TIMEOUT", 60)
+# Streaming calls may wait longer for the first token on slow hosts / large prompts.
+GEMINI_STREAM_TIMEOUT = _int("GEMINI_STREAM_TIMEOUT", 90)
 GEMINI_MAX_ATTEMPTS = _int("GEMINI_MAX_ATTEMPTS", 3)
 
 # ============================================================================
@@ -313,7 +318,6 @@ DOTNEWS_SYNC_STATE_FILE = DATA_INGESTION_DIR / ".sync_state_dotnews.json"
 SUPPORTED_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".txt", ".md"})
 
 BOSTON_CKAN_API = _env("BOSTON_CKAN_API", "https://data.boston.gov/api/3/action")
-RSS_DOT_REPORTER_ENABLED = _truthy("RSS_DOT_REPORTER_ENABLED", "false")
 
 # ============================================================================
 # Gunicorn (read by api/gunicorn_conf.py)
@@ -321,7 +325,7 @@ RSS_DOT_REPORTER_ENABLED = _truthy("RSS_DOT_REPORTER_ENABLED", "false")
 GUNICORN_BIND = _env("GUNICORN_BIND", f"{HOST}:{PORT}")
 GUNICORN_WORKERS = _int("GUNICORN_WORKERS", 3)
 GUNICORN_THREADS = _int("GUNICORN_THREADS", 8)
-GUNICORN_TIMEOUT = _int("GUNICORN_TIMEOUT", 120)
+GUNICORN_TIMEOUT = _int("GUNICORN_TIMEOUT", 180)
 GUNICORN_WORKER_CLASS = _env("GUNICORN_WORKER_CLASS", "gthread")
 
 # ============================================================================
@@ -449,21 +453,24 @@ def _test_gemini_connection() -> Optional[str]:
     if not GEMINI_API_KEY:
         return "API key not configured"
     try:
-        from google import genai
-        from google.genai import types
+        import google.generativeai as genai
 
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents="Reply with only: All Good!",
-            config=types.GenerateContentConfig(temperature=0, max_output_tokens=10),
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            "Reply with only: All Good!",
+            generation_config=genai.types.GenerationConfig(
+                temperature=0,
+                max_output_tokens=10,
+            ),
         )
-        if response and getattr(response, "candidates", None):
+        text = (response.text or "").strip()
+        if text:
             log_success(f"Gemini API: model '{GEMINI_MODEL}' responded")
             return None
-        return "API responded but returned no candidates"
+        return "API responded but returned empty content"
     except ImportError:
-        return "google-genai not installed"
+        return "google-generativeai not installed"
     except Exception as exc:
         msg = str(exc)
         if "API_KEY_INVALID" in msg or "401" in msg or "API key not valid" in msg:

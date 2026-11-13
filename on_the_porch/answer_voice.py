@@ -59,6 +59,9 @@ CRIME_INTENTS = frozenset({
 CORE_VOICE = (
     "Voice and format (always):\n"
     "- Sound like a knowledgeable neighbor in Dorchester — warm, clear, human\n"
+    "- Every answer must include the verified facts from canonical_facts and "
+    "sample_rows (time period, categories, counts) — woven into natural sentences, "
+    "never omitted or replaced with vague generalities\n"
     "- If canonical_facts mark data as unavailable, say so plainly — never report 0 as a real count\n"
     "- Use natural paragraphs; avoid report headings and database jargon\n"
     "- NEVER paste a long bulleted or line-by-line list of records unless the user "
@@ -66,7 +69,10 @@ CORE_VOICE = (
     "- Put key totals in **bold**; do not bold every number\n"
     "- Explain what facts mean for residents (what was reported, what's still open, "
     "why it might matter)\n"
-    "- Weave at most 2–3 specific examples into sentences — not a dump of rows\n"
+    "- Weave specific examples into sentences — warm tone, concrete facts\n"
+    "- For crime or gun-violence stats: be factual and humane — never rank "
+    "offenses like a scoreboard or portray Dorchester as defined by crime; "
+    "name the real categories from the data and weave counts in when helpful\n"
     "- Do not mention SQL, queries, RAG, templates, Boston Open Data sync, or "
     "internal tools\n"
     "- Dorchester only; ignore data from other neighborhoods\n"
@@ -124,9 +130,9 @@ def _kind_instructions(kind: AnswerKind) -> str:
             "- Gently invite a civic question if appropriate — don't be pushy\n"
         ),
         "civic_count": (
-            "Answer with the count and brief context (what was counted, time period).\n"
-            "- 2–4 sentences\n"
-            "- If issue_type_breakdown is present, summarize top categories in prose\n"
+            "Answer with the verified count and brief context (what was counted, time period).\n"
+            "- 2–4 warm sentences — the number and period must appear clearly\n"
+            "- If issue_type_breakdown is present, name the leading categories in prose\n"
             "- Jump straight into the answer — no greeting line unless this is the first message\n"
         ),
         "civic_breakdown": (
@@ -154,9 +160,13 @@ def _kind_instructions(kind: AnswerKind) -> str:
             "- Jump straight into the answer — no greeting line unless this is the first message\n"
         ),
         "crime": (
-            "Be factual and calm about safety statistics.\n"
-            "- State counts clearly; note the time period and what is being counted\n"
-            "- Avoid sensational language\n"
+            "Share BPD safety statistics with care — residents love this neighborhood.\n"
+            "- Factual crime lookups from SQL: name offense categories, periods, and counts "
+            "the resident asked for\n"
+            "- Warm conversational prose in 1–3 paragraphs grounded in verified SQL only\n"
+            "- Answer the specific factual question directly — do not pivot to neighborhood "
+            "safety judgment or unrelated health statistics\n"
+            "- No scoreboard lists; frame as context, not proof Dorchester is dangerous\n"
         ),
         "guardrail": (
             "Explain clearly what data is not available and what the user can ask instead.\n"
@@ -174,9 +184,14 @@ def _kind_instructions(kind: AnswerKind) -> str:
             "- Capture community voice and concerns in prose\n"
         ),
         "hybrid": (
-            "Blend numeric facts with community context into one cohesive story.\n"
-            "- Lead with verified numbers, then add resident voice or policy context\n"
-            "- Explain why both matter for Dorchester\n"
+            "Blend SQL background with community sources for neighborhood-safety judgment questions.\n"
+            "- Use for 'is it safe?' style questions — NOT for factual crime-category lookups\n"
+            "- Write 2–4 flowing paragraphs — concerned but dignified, never sensational\n"
+            "- Answer the human safety question with nuance; do NOT lead with a raw incident total\n"
+            "- Lead with community context, street-safety programs, and resident voice from RAG\n"
+            "- Use SQL counts only as supporting background, not the headline\n"
+            "- Balance challenges with neighborhood strength; close with dignity\n"
+            "- No 'Hey there' greetings; no scoreboard lists\n"
         ),
         "multi_part": (
             "Answer EVERY part of the question — do not skip a topic.\n"
@@ -189,6 +204,9 @@ def _kind_instructions(kind: AnswerKind) -> str:
             "Continue the conversation using prior messages and cached data.\n"
             "- Expand or clarify — do not copy-paste the previous answer\n"
             "- If the new question is a different topic, do not reuse unrelated stats\n"
+            "- State ONLY facts visible in the cached data or prior assistant message\n"
+            "- Never invent numbers, dates, event names, or policy details\n"
+            "- If the resident asks for specifics missing from the cache, say a fresh lookup is needed\n"
             "- Do NOT greet again — continue naturally from context\n"
         ),
     }
@@ -227,6 +245,15 @@ _REPETITIVE_OPENERS = (
     re.compile(r"^glad you stopped by[.!]?\s*", re.IGNORECASE),
     re.compile(r"^good to see you[.!]?\s*", re.IGNORECASE),
     re.compile(r"^hi there[.!]?\s*", re.IGNORECASE),
+    re.compile(
+        r"^hey there!\s*it['']s good to connect[.!]?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^it['']s good to connect[.!]?\s*", re.IGNORECASE),
+    re.compile(
+        r"^looking at the bpd safety statistics[^,]*,\s*",
+        re.IGNORECASE,
+    ),
 )
 
 _FALSE_ZERO_PATTERNS = (
@@ -240,6 +267,54 @@ _FALSE_ZERO_PATTERNS = (
         r"(?i)[^.!?]*(?:fortunately|thankfully)[^.!?]*\b0\b[^.!?]*emergency[^.!?]*[.!?]\s*",
     ),
 )
+
+
+def _is_crime_synthesis(
+    prepared_intent: Optional[str],
+    blocks: Optional[Sequence[Dict[str, Any]]],
+) -> bool:
+    if prepared_intent:
+        if prepared_intent.startswith("crime") or "crime" in prepared_intent:
+            return True
+    for block in blocks or ():
+        intent = str(block.get("intent") or "")
+        if intent.startswith("crime"):
+            return True
+    return False
+
+
+def polish_crime_answer(answer: str, question: str = "") -> str:
+    """Strip scoreboard formatting and canned openers from crime replies."""
+    try:
+        from sql_chat.prepared_sql import wants_crime_counts  # noqa: WPS433
+    except Exception:
+        def wants_crime_counts(_q: str) -> bool:
+            return False
+
+    out = (answer or "").strip()
+    if not out:
+        return out
+
+    for pattern in _REPETITIVE_OPENERS:
+        updated = pattern.sub("", out, count=1).strip()
+        if updated != out:
+            out = updated
+
+    if wants_crime_counts(question):
+        return out
+
+    bold_counts = re.findall(r"\*\*(\d[\d,]*)\*\*", out)
+    if len(bold_counts) >= 2:
+        out = re.sub(r"\*\*(\d[\d,]*)\*\*\s*reports?", "", out, flags=re.I)
+        out = re.sub(r":\s*\*\*(\d[\d,]*)\*\*", "", out)
+        out = re.sub(r"\*\*(\d[\d,]*)\*\*", r"\1", out)
+
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if len(lines) >= 4 and sum(1 for ln in lines if re.search(r"\d", ln)) >= 3:
+        prose = " ".join(re.sub(r"^[-*•]\s*", "", ln) for ln in lines)
+        out = re.sub(r"\s+", " ", prose).strip()
+
+    return out
 
 
 def trim_repetitive_opener(
@@ -333,15 +408,27 @@ def fix_unavailable_data_claims(
     return out.strip()
 
 
+def _prepared_intent_mentions_911(prepared_intent: Optional[str]) -> bool:
+    if not prepared_intent:
+        return False
+    if prepared_intent == "911_unavailable":
+        return True
+    if prepared_intent.startswith("compound:"):
+        topics = prepared_intent.split(":", 1)[-1]
+        return any(topic.strip() == "911" for topic in topics.split(","))
+    return False
+
+
 def polish_conversational_answer(
     answer: str,
     conversation_history: Optional[List[Dict[str, str]]] = None,
     *,
     synthesis_blocks: Optional[Sequence[Dict[str, Any]]] = None,
     prepared_intent: Optional[str] = None,
+    question: Optional[str] = None,
 ) -> str:
     blocks: List[Dict[str, Any]] = list(synthesis_blocks or [])
-    if prepared_intent and "911" in str(prepared_intent):
+    if _prepared_intent_mentions_911(prepared_intent):
         if not any(b.get("intent") == "911_unavailable" for b in blocks):
             blocks.append({
                 "intent": "911_unavailable",
@@ -354,6 +441,10 @@ def polish_conversational_answer(
                 ),
             })
     out = trim_repetitive_opener(answer, conversation_history)
+    if _is_crime_synthesis(prepared_intent, blocks):
+        is_hybrid = any(str(b.get("path") or "") == "rag" for b in blocks)
+        if not is_hybrid:
+            out = polish_crime_answer(out, question or "")
     out = fix_unavailable_data_claims(out, blocks)
     return out.strip()
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import queue
 import re
 import sys
 import threading
@@ -25,7 +26,8 @@ import mysql.connector
 from mysql.connector.pooling import MySQLConnectionPool
 
 from db_migrations import run_migrations
-from ops_health import check_ingestion_lag, validate_production_config
+from mysql_cache import MySQLCacheStore
+from ops_health import check_ingestion_lag, check_311_feed_balance, validate_production_config
 from request_metrics import log_chat_metrics, reset_request_metrics, get_request_id
 from rate_limit import RateLimiter
 from security import (
@@ -85,6 +87,8 @@ from unified_chatbot import (  # noqa: E402
     should_apply_boston_gov_fallback,
     stream_agent_response,
     try_boston_gov_enrichment,
+    _try_311_advisory_response,
+    _try_crime_clarification_response,
 )
 from semantic_cache import (  # noqa: E402
     SemanticResponseCache,
@@ -161,6 +165,52 @@ DOC_TYPE_DIRS = {
     "boston_gov_answer": "https://www.boston.gov",
 }
 
+_BOSTON_GOV_HOME = "https://www.boston.gov"
+_COMMUNITY_TRANSCRIPTS_LABEL = "Community Transcripts"
+
+
+def _stream_generation_error(exc: Exception) -> str:
+    """User-facing message for streamed chat failures."""
+    message = f"{exc.__class__.__name__} {exc}".lower()
+    if any(marker in message for marker in ("deadline", "timeout", "timed out")):
+        return "The answer took too long to generate. Please try again."
+    return "Generation failed."
+
+
+_SSE_KEEPALIVE_INTERVAL = float(os.getenv("SSE_KEEPALIVE_INTERVAL", "5"))
+
+
+def _iter_stream_agent_with_keepalive(
+    message: str,
+    conversation_history: List[Dict[str, str]],
+    thread_state: Dict[str, Any],
+):
+    """Run stream_agent_response in a worker thread; emit None while waiting."""
+    done = object()
+    event_queue: queue.Queue = queue.Queue()
+
+    def _worker() -> None:
+        try:
+            for item in stream_agent_response(message, conversation_history, thread_state):
+                event_queue.put(item)
+        except Exception as exc:  # noqa: BLE001
+            event_queue.put(exc)
+        finally:
+            event_queue.put(done)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        try:
+            item = event_queue.get(timeout=_SSE_KEEPALIVE_INTERVAL)
+        except queue.Empty:
+            yield None
+            continue
+        if item is done:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
 
 def _log_exception(prefix: str, exc: Exception) -> None:
     """
@@ -233,6 +283,16 @@ def get_db_connection():
         conn = db_pool.get_connection()
         conn.ping(reconnect=True, attempts=2, delay=1)
         return conn
+
+
+_mysql_cache_store: Optional[MySQLCacheStore] = None
+
+
+def _get_mysql_cache_store() -> MySQLCacheStore:
+    global _mysql_cache_store
+    if _mysql_cache_store is None:
+        _mysql_cache_store = MySQLCacheStore(get_db_connection)
+    return _mysql_cache_store
 
 
 def initialize_database() -> None:
@@ -428,8 +488,49 @@ class _RedisSessionCache(_BaseSessionCache):
             _log_exception("Redis cache set failed", exc)
 
 
+class _MySQLSessionCache(_BaseSessionCache):
+    """Cross-worker cache backed by MySQL (DreamHost / no-Redis production)."""
+
+    def __init__(self, store: MySQLCacheStore, ttl_minutes: int, key_prefix: str) -> None:
+        self._store = store
+        self._ttl_seconds = max(60, ttl_minutes * 60)
+        self._key_prefix = key_prefix
+
+    def _key(self, session_id: str) -> str:
+        return f"{self._key_prefix}{session_id}"
+
+    def get(self, session_id: str) -> Dict[str, Any]:
+        try:
+            raw = self._store.get(self._key(session_id))
+            if raw:
+                return json_loads(raw, create_empty_cache())
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("MySQL cache get failed", exc)
+        return create_empty_cache()
+
+    def set(self, session_id: str, cache: Dict[str, Any]) -> None:
+        try:
+            self._store.set(self._key(session_id), json_dumps(cache), self._ttl_seconds)
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("MySQL cache set failed", exc)
+
+
 def _build_session_cache() -> _BaseSessionCache:
     """Construct the configured cache backend, falling back to memory on error."""
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if store.ping():
+                print("Session cache backend: mysql")
+                return _MySQLSessionCache(
+                    store, Config.CACHE_TTL_MINUTES, Config.CACHE_KEY_PREFIX,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"WARNING: mysql cache backend unavailable ({exc.__class__.__name__}); "
+                "falling back to in-memory cache.",
+                file=sys.stderr,
+            )
     if Config.CACHE_BACKEND == "redis":
         try:
             import redis  # type: ignore
@@ -456,7 +557,17 @@ _session_cache = _build_session_cache()
 
 def _build_rate_limiter() -> RateLimiter:
     redis_client = None
-    if Config.CACHE_BACKEND == "redis":
+    mysql_store = None
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if store.ping():
+                mysql_store = store
+            else:
+                _log_exception("Rate limiter mysql unavailable; using in-memory fallback", RuntimeError("ping failed"))
+        except Exception as exc:  # noqa: BLE001
+            _log_exception("Rate limiter mysql unavailable; using in-memory fallback", exc)
+    elif Config.CACHE_BACKEND == "redis":
         try:
             import redis  # type: ignore
 
@@ -468,7 +579,11 @@ def _build_rate_limiter() -> RateLimiter:
             redis_client.ping()
         except Exception as exc:  # noqa: BLE001
             _log_exception("Rate limiter redis unavailable; using in-memory fallback", exc)
-    return RateLimiter(redis_client, key_prefix=Config.RATE_LIMIT_KEY_PREFIX)
+    return RateLimiter(
+        redis_client,
+        mysql_store=mysql_store,
+        key_prefix=Config.RATE_LIMIT_KEY_PREFIX,
+    )
 
 
 _rate_limiter = _build_rate_limiter()
@@ -484,7 +599,21 @@ def _semantic_embed(text: str):
 def _build_semantic_cache() -> SemanticResponseCache:
     backend_name = Config.SEMANTIC_CACHE_BACKEND
     redis_client = None
-    if backend_name == "redis":
+    mysql_store = None
+    if backend_name == "mysql":
+        try:
+            store = _get_mysql_cache_store()
+            if not store.ping():
+                raise RuntimeError("mysql cache ping failed")
+        except Exception as exc:  # noqa: BLE001
+            _log_exception(
+                "Semantic cache mysql unavailable; using in-memory backend",
+                exc,
+            )
+            backend_name = "memory"
+        else:
+            mysql_store = store
+    elif backend_name == "redis":
         try:
             import redis  # type: ignore
 
@@ -505,6 +634,7 @@ def _build_semantic_cache() -> SemanticResponseCache:
         backend_name=backend_name,
         redis_client=redis_client,
         redis_key=Config.SEMANTIC_CACHE_KEY,
+        mysql_store=mysql_store,
     )
     return SemanticResponseCache(
         enabled=Config.SEMANTIC_CACHE_ENABLED,
@@ -1261,6 +1391,17 @@ def _check_redis_health() -> str:
         return "disconnected"
 
 
+def _check_shared_cache_health() -> str:
+    if Config.CACHE_BACKEND == "mysql":
+        try:
+            return "connected" if _get_mysql_cache_store().ping() else "disconnected"
+        except Exception:
+            return "disconnected"
+    if Config.CACHE_BACKEND == "redis":
+        return _check_redis_health()
+    return "in_process"
+
+
 def _check_chroma_health() -> str:
     if Config.VECTOR_DB_PROVIDER == "qdrant":
         return "bypassed"
@@ -1564,18 +1705,116 @@ def _update_message_meta(conn, message_id: str, message_meta: Dict[str, Any]) ->
 
 
 
+def _canonicalize_source_label(raw: str) -> tuple[str, str]:
+    value = (raw or "").strip()
+    lowered = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    lowered = re.sub(r"\s+", " ", lowered)
+    if lowered in {"dorchester reporter", "dot reporter"} or "dotnews" in lowered:
+        return ("dorchester reporter", "Dorchester Reporter")
+    if lowered in {"admin knowledge", "community note", "community notes"}:
+        return ("community notes", "Community Notes")
+    if lowered in {"boston gov", "boston.gov", "bostongov"} or (
+        "boston" in lowered and "gov" in lowered
+    ):
+        return ("boston.gov", "Boston.gov")
+    return (lowered or value.lower() or "unknown", value or "Unknown")
+
+
+def _friendly_policy_label(source_label: str) -> str:
+    label = (source_label or "").strip()
+    if label.lower().endswith(".txt"):
+        return label[:-4]
+    return label or "Policy document"
+
+
+def _policy_public_url(source_label: str) -> str:
+    base_dir = DOC_TYPE_DIRS["policy"]
+    name = (source_label or "").strip()
+    if name.lower().endswith(".txt"):
+        name = name[:-4]
+    if not name.lower().endswith(".html"):
+        name = f"{name.replace(' ', '-')}.html"
+    return urljoin(base_dir, name)
+
+
+def _build_rag_source_path(meta: Dict[str, Any], source_label: str) -> Optional[str]:
+    doc_type = meta.get("doc_type", "unknown")
+    link = (meta.get("link") or "").strip()
+
+    if doc_type == "transcript":
+        return None
+    if doc_type == "boston_gov_answer":
+        return link or _BOSTON_GOV_HOME
+    if doc_type == "policy":
+        return _policy_public_url(source_label)
+    if link.startswith(("http://", "https://")):
+        return link
+
+    base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
+    if isinstance(base_dir, str) and base_dir.startswith(("http://", "https://")):
+        normalized_source = source_label.replace(" ", "-")
+        if normalized_source.endswith(".txt"):
+            normalized_source = normalized_source[:-4] + ".html"
+        return urljoin(base_dir, normalized_source)
+    return None
+
+
+def _append_rag_sources_from_metadata(
+    metadata: List[Dict[str, Any]],
+    sources: List[Dict[str, str]],
+    *,
+    seen: set[str],
+    limit: int = 5,
+) -> None:
+    boston_entries = [m for m in metadata if m.get("doc_type") == "boston_gov_answer"]
+    other_entries = [m for m in metadata if m.get("doc_type") != "boston_gov_answer"]
+    prioritized = boston_entries + other_entries
+
+    has_transcripts = False
+    for meta in prioritized:
+        doc_type = meta.get("doc_type", "unknown")
+        if doc_type == "transcript":
+            has_transcripts = True
+
+    added = 0
+    for meta in prioritized:
+        if added >= limit:
+            break
+        doc_type = meta.get("doc_type", "unknown")
+        if doc_type == "transcript":
+            continue
+
+        source = meta.get("source", "Unknown")
+        dedupe_key, source_label = _canonicalize_source_label(source)
+        if doc_type == "policy":
+            source_label = _friendly_policy_label(source_label)
+            dedupe_key = re.sub(r"[^a-z0-9]+", " ", source_label.lower()).strip()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        path = _build_rag_source_path(meta, source)
+        entry: Dict[str, str] = {
+            "type": "rag",
+            "source": source_label,
+            "doc_type": doc_type,
+        }
+        if path:
+            entry["path"] = path
+        sources.append(entry)
+        added += 1
+
+    if has_transcripts and _COMMUNITY_TRANSCRIPTS_LABEL not in seen:
+        seen.add(_COMMUNITY_TRANSCRIPTS_LABEL)
+        sources.append({
+            "type": "rag",
+            "source": _COMMUNITY_TRANSCRIPTS_LABEL,
+            "doc_type": "transcript",
+        })
+
+
 def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
     sources: List[Dict[str, str]] = []
-
-    def _canonicalize_source_label(raw: str) -> tuple[str, str]:
-        value = (raw or "").strip()
-        lowered = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-        lowered = re.sub(r"\s+", " ", lowered)
-        if lowered in {"dorchester reporter", "dot reporter"} or "dotnews" in lowered:
-            return ("dorchester reporter", "Dorchester Reporter")
-        if lowered in {"admin knowledge", "community note", "community notes"}:
-            return ("community notes", "Community Notes")
-        return (lowered or value.lower() or "unknown", value or "Unknown")
 
     def _weekly_events_sql(sql_query: str) -> bool:
         return bool(re.search(r"FROM\s+`?weekly_events`?", sql_query or "", re.IGNORECASE))
@@ -1608,39 +1847,8 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
 
     elif mode == "rag":
         metadata = result.get("metadata", [])
-        seen = set()
-        boston_entries = [m for m in metadata if m.get("doc_type") == "boston_gov_answer"]
-        other_entries = [m for m in metadata if m.get("doc_type") != "boston_gov_answer"]
-        prioritized = boston_entries + other_entries
-        
-        for meta in prioritized[:5]:
-            source = meta.get("source", "Unknown")
-            doc_type = meta.get("doc_type", "unknown")
-            # Dedup by source alone — the same publication ingested via
-            # multiple paths (RSS + PDF, etc.) shouldn't show up as
-            # separate citations to the user.
-            dedupe_key, source_label = _canonicalize_source_label(source)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-
-            link = meta.get("link", "")
-            base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
-            if link:
-                path = link
-            elif base_dir.startswith(("http://", "https://")):
-                normalized_source = source_label.replace(" ", "-")
-                if normalized_source.endswith(".txt"):
-                    normalized_source = normalized_source[:-4] + ".html"
-                path = urljoin(base_dir, normalized_source)
-            else:
-                path = str(Path(base_dir) / source_label)
-            sources.append({
-                "type": "rag",
-                "source": source_label,
-                "doc_type": doc_type,
-                "path": path,
-            })
+        seen: set[str] = set()
+        _append_rag_sources_from_metadata(metadata, sources, seen=seen, limit=5)
 
     elif mode == "hybrid":
         sql_part = result.get("sql", {}) if isinstance(result.get("sql"), dict) else result.get("sql")
@@ -1653,21 +1861,7 @@ def extract_sources(mode: str, result: Dict[str, Any]) -> List[Dict[str, str]]:
                     sources.append({"type": "sql", "table": match.group(1)})
         rag_metadata = rag_part.get("metadata", []) if isinstance(rag_part, dict) else []
         seen = set()
-        for meta in rag_metadata[:3]:
-            source = meta.get("source", "Unknown")
-            doc_type = meta.get("doc_type", "unknown")
-            dedupe_key, source_label = _canonicalize_source_label(source)
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            link = meta.get("link", "")
-            base_dir = DOC_TYPE_DIRS.get(doc_type, "Data")
-            sources.append({
-                "type": "rag",
-                "source": source_label,
-                "doc_type": doc_type,
-                "path": link or str(Path(base_dir) / source_label),
-            })
+        _append_rag_sources_from_metadata(rag_metadata, sources, seen=seen, limit=5)
 
     return sources
 
@@ -1797,6 +1991,28 @@ def _execute_agent_response(
             streaming=streaming,
         )
         return result
+
+    advisory = _try_311_advisory_response(message, conversation_history, cache)
+    if advisory is not None:
+        _log_agent_metrics(
+            mode="advisory",
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return advisory
+
+    crime_clarify = _try_crime_clarification_response(
+        message, conversation_history, cache,
+    )
+    if crime_clarify is not None:
+        _log_agent_metrics(
+            mode="advisory",
+            cache_hit=False,
+            thread_id=thread_id,
+            streaming=streaming,
+        )
+        return crime_clarify
 
     # Semantic response cache: short-circuit near-duplicate first-turn questions.
     semantic_eligible = _semantic_cache_eligible(message, conversation_history)
@@ -2656,6 +2872,7 @@ def post_conversation_message_stream(thread_id: str):
         cached_sources: List[Dict[str, str]] = []
 
         try:
+            yield ": keepalive\n\n"
             cached = _semantic_cache.get(message) if semantic_eligible else None
             if cached and _is_cacheable_semantic_answer(cached.get("answer", "")):
                 cache_hit = True
@@ -2667,7 +2884,13 @@ def post_conversation_message_stream(thread_id: str):
                     yield _sse({"type": "delta", "text": word if i == 0 else f" {word}"})
             else:
                 streamed_text = ""
-                for kind, data in stream_agent_response(message, conversation_history, thread_state):
+                for item in _iter_stream_agent_with_keepalive(
+                    message, conversation_history, thread_state,
+                ):
+                    if item is None:
+                        yield ": keepalive\n\n"
+                        continue
+                    kind, data = item
                     if kind == "delta":
                         streamed_text += data
                         yield _sse({"type": "delta", "text": data})
@@ -2686,7 +2909,7 @@ def post_conversation_message_stream(thread_id: str):
                 _log_exception("Stream ended with partial answer after error", exc)
             else:
                 _log_exception("Error during streamed generation", exc)
-                yield _sse({"type": "error", "error": "Generation failed."})
+                yield _sse({"type": "error", "error": _stream_generation_error(exc)})
                 return
 
         if full_answer:
@@ -2804,7 +3027,11 @@ def post_conversation_message_stream(thread_id: str):
     return Response(
         stream_with_context(_generate()),
         mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -3040,11 +3267,22 @@ def health():
         degrade(f"database: {type(e).__name__}: {e}")
     
     status["redis"] = _check_redis_health()
+<<<<<<< HEAD
     if status["redis"] == "disconnected" and Config.CACHE_BACKEND == "redis":
         degrade("redis disconnected and CACHE_BACKEND=redis")
     if Config.PRODUCTION_MODE and status["redis"] != "connected":
         degrade(f"PRODUCTION_MODE requires redis, got {status['redis']!r}")
     
+=======
+    status["shared_cache"] = _check_shared_cache_health()
+    if Config.CACHE_BACKEND == "redis" and status["redis"] == "disconnected":
+        status["status"] = "degraded"
+    elif Config.CACHE_BACKEND == "mysql" and status["shared_cache"] == "disconnected":
+        status["status"] = "degraded"
+    elif Config.PRODUCTION_MODE and Config.CACHE_BACKEND == "memory":
+        status["status"] = "degraded"
+
+>>>>>>> main
     status["chroma"] = _check_chroma_health()
     status["qdrant"] = _check_qdrant_health()
     if Config.VECTOR_DB_PROVIDER == "qdrant":
@@ -3058,6 +3296,14 @@ def health():
     if ingest.get("status") in {"stale", "degraded"}:
         degrade(f"ingestion: {ingest.get('status')}")
     
+    try:
+        feed_311 = check_311_feed_balance(get_db_connection)
+        status["boston_311_feeds"] = feed_311
+        if feed_311.get("status") == "degraded":
+            status["status"] = "degraded"
+    except Exception:
+        pass
+
     try:
         from ingest_queue import check_311_freshness, get_ingest_job_status
         status["ingest_jobs"] = get_ingest_job_status()

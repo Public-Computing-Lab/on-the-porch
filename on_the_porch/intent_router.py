@@ -152,14 +152,15 @@ def _mentions_opinion(q: str) -> bool:
 
 def _looks_like_safety_overview(q: str) -> bool:
     """Broad safety questions — recent crime stats plus community/transcript context."""
-    if "safety" not in q:
+    if "safety" not in q and "safe" not in q:
         return False
     return any(
         h in q
         for h in (
             "concern", "concerns", "issue", "issues", "problem", "problems",
             "how safe", "is it safe", "main concern", "biggest concern",
-            "public safety",
+            "public safety", "safe neighborhood", "safe neighbourhood",
+            "neighborhood", "neighbourhood",
         )
     )
 
@@ -203,11 +204,35 @@ def _looks_like_transcript_query(q: str) -> bool:
 
 def _is_911_call_question(q: str) -> bool:
     """True for 911 dispatch/call volume questions (we have no 911 call dataset)."""
-    if "911" not in q:
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "dispatch_unavailable"
+    except Exception:
+        if "911" not in q:
+            return False
+        if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+            return False
+        return any(h in q for h in ("call", "calls", "dispatch", "emergency"))
+
+
+def _is_911_crime_question(q: str) -> bool:
+    """Colloquial 911 language that should route to BPD crime stats."""
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "crime_redirect"
+    except Exception:
         return False
-    if any(h in q for h in ("police report", "crime report", "incident report", "bpd")):
+
+
+def _is_911_advisory_question(q: str) -> bool:
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        return classify_911_question(q) == "advisory"
+    except Exception:
         return False
-    return any(h in q for h in ("call", "calls", "dispatch", "emergency"))
 
 
 def match_rules(question: str) -> Optional[Dict[str, Any]]:
@@ -219,13 +244,42 @@ def match_rules(question: str) -> Optional[Dict[str, Any]]:
     if _is_911_call_question(q):
         return _base_plan(mode="sql", intent="911_unavailable", confidence=0.95, k=5)
 
+    if _is_911_advisory_question(q):
+        return _base_plan(mode="sql", intent="911_advisory", confidence=0.95, k=5)
+
+    if _is_911_crime_question(q):
+        return _base_plan(mode="sql", intent="crime_stats", confidence=0.92, k=5)
+
     # 311 stats → sql (before events — "this week" appears in both)
     if any(h in q for h in _311_HINTS) or any(h in q for h in _311_ISSUE_HINTS):
         if _mentions_opinion(q) and _mentions_stats(q):
             return _base_plan(mode="hybrid", intent="311_hybrid", confidence=0.85, k=5)
         return _base_plan(mode="sql", intent="311_stats", confidence=0.92, k=5)
 
-    # Crime routing (before generic schedule hints)
+    # Crime / safety — factual BPD lookups → SQL; neighborhood-safety judgment → hybrid
+    try:
+        from sql_chat.prepared_sql import crime_routing_mode  # noqa: WPS433
+
+        crime_mode = crime_routing_mode(question)
+        if crime_mode == "hybrid":
+            return _base_plan(
+                mode="hybrid",
+                intent="crime_safety_context",
+                confidence=0.92,
+                k=8,
+                transcript_tags=["safety", "violence", "community"],
+            )
+        if crime_mode == "sql":
+            return _base_plan(
+                mode="sql",
+                intent="crime_stats",
+                confidence=0.95,
+                k=5,
+            )
+    except Exception:
+        pass
+
+    # Crime routing fallback (before generic schedule hints)
     if any(h in q for h in _CRIME_HINTS):
         if _mentions_stats(q) and not _mentions_opinion(q):
             return _base_plan(mode="sql", intent="crime_stats", confidence=0.92, k=5)
@@ -349,3 +403,119 @@ def route_with_rules(question: str) -> Optional[Dict[str, Any]]:
     mode = str(plan.get("mode", "sql"))
     plan["query_plan"] = build_query_plan(question, mode=mode).to_dict()
     return plan
+
+
+_COMMUNITY_NOTE_HINTS = (
+    "community note", "community notes", "admin knowledge",
+)
+
+
+def detect_civic_topic(question: str) -> Optional[str]:
+    """Broad topic label for follow-up routing and cache mismatch checks."""
+    q = _q(question)
+    if not q:
+        return None
+
+    if any(h in q for h in _COMMUNITY_NOTE_HINTS):
+        return "community_note"
+
+    if _mentions_opinion(q) and not any(h in q for h in _STATS_HINTS):
+        if _looks_like_transcript_query(q):
+            return "transcript"
+        return "opinion"
+
+    if any(h in q for h in _311_HINTS + _311_ISSUE_HINTS):
+        return "311"
+
+    try:
+        from sql_chat.prepared_sql import classify_911_question  # noqa: WPS433
+
+        kind = classify_911_question(question)
+        if kind == "crime_redirect":
+            return "crime"
+        if kind in {"dispatch_unavailable", "advisory"}:
+            return "911"
+    except Exception:
+        pass
+
+    if _looks_like_safety_overview(q):
+        return "safety"
+
+    try:
+        from sql_chat.prepared_sql import crime_routing_mode  # noqa: WPS433
+
+        if crime_routing_mode(question) == "sql":
+            return "crime"
+        if crime_routing_mode(question) == "hybrid":
+            return "safety"
+    except Exception:
+        pass
+
+    if any(h in q for h in _CRIME_HINTS):
+        return "crime"
+
+    if any(h in q for h in _EVENT_HINTS):
+        return "events"
+    if any(h in q for h in _SCHEDULE_HINTS) and any(
+        h in q for h in ("happening", "going on", "what's on", "whats on", "event", "on")
+    ):
+        return "events"
+
+    if _looks_like_transcript_query(q):
+        return "transcript"
+
+    if any(h in q for h in _POLICY_HINTS):
+        return "policy"
+
+    if _looks_like_rss_news(q) or _mentions_rss_source(q):
+        return "news"
+
+    return None
+
+
+def detect_cache_topic(cache: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Infer the dominant topic of cached retrieval data."""
+    if not cache or not cache.get("mode"):
+        return None
+
+    mode = str(cache.get("mode") or "").lower()
+    prior_topic = detect_civic_topic(str(cache.get("question") or ""))
+    if mode in {"hybrid", "rag", "history"} and prior_topic:
+        return prior_topic
+
+    sql = str(cache.get("sql_query") or "").lower()
+    if "service_requests_311" in sql or "mv_311" in sql:
+        return "311"
+    if "crime_incident" in sql or "mv_crime" in sql:
+        return "crime"
+    if "weekly_events" in sql or "events_materialized" in sql:
+        return "events"
+
+    meta = cache.get("rag_metadata") or []
+    if isinstance(meta, list):
+        doc_types = {
+            str(m.get("doc_type") or "")
+            for m in meta
+            if isinstance(m, dict) and m.get("doc_type")
+        }
+        if "policy" in doc_types:
+            return "policy"
+        if "transcript" in doc_types:
+            return "transcript"
+        if "community_note" in doc_types:
+            return "community_note"
+        if doc_types & {"calendar_event", "boston_gov_answer", "client_upload"}:
+            return "news"
+
+    if prior_topic:
+        return prior_topic
+    return None
+
+
+def topics_conflict(question: str, cache: Optional[Dict[str, Any]]) -> bool:
+    """True when the new question is clearly about a different civic topic than the cache."""
+    q_topic = detect_civic_topic(question)
+    c_topic = detect_cache_topic(cache)
+    if not q_topic or not c_topic:
+        return False
+    return q_topic != c_topic

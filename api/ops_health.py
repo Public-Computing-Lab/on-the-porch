@@ -155,8 +155,11 @@ def validate_production_config(
                 f"{env_key} is still the default value; set a strong secret in production"
             )
 
-    if cache_backend != "redis":
-        issues.append("CACHE_BACKEND must be 'redis' when PRODUCTION_MODE=true")
+    if cache_backend not in {"redis", "mysql"}:
+        issues.append(
+            "CACHE_BACKEND must be 'redis' or 'mysql' when PRODUCTION_MODE=true "
+            "(use mysql when Redis is unavailable)"
+        )
 
     if not semantic_cache_enabled:
         issues.append(
@@ -204,3 +207,79 @@ def validate_production_config(
 
     ok = not any("must be" in msg or "missing" in msg for msg in issues)
     return ok, issues
+
+
+def check_311_feed_balance(get_db_connection) -> Dict[str, Any]:
+    """Warn when only the Creatio 311 feed is present (prod undercount ~85%)."""
+    dorchester = (
+        "(`neighborhood` = 'Dorchester' OR `police_district` = 'C11')"
+    )
+    month_filter = (
+        "open_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') "
+        "AND open_date < DATE_FORMAT(CURDATE(), '%Y-%m-01')"
+    )
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT COUNT(*) AS c FROM service_requests_311")
+        total = int(cur.fetchone()["c"])
+        cur.execute(
+            """
+            SELECT
+              CASE WHEN case_id REGEXP '^[0-9]+$' THEN 'legacy_2026' ELSE 'creatio_bcs' END AS feed,
+              COUNT(*) AS n
+            FROM service_requests_311
+            GROUP BY feed
+            """
+        )
+        split = {row["feed"]: int(row["n"]) for row in cur.fetchall()}
+        cur.execute(
+            f"SELECT COUNT(*) AS c FROM service_requests_311 "
+            f"WHERE {dorchester} AND {month_filter}"
+        )
+        last_month = int(cur.fetchone()["c"])
+        cur.execute(
+            f"""
+            SELECT
+              CASE WHEN case_id REGEXP '^[0-9]+$' THEN 'legacy_2026' ELSE 'creatio_bcs' END AS feed,
+              COUNT(*) AS n
+            FROM service_requests_311
+            WHERE {dorchester} AND {month_filter}
+            GROUP BY feed
+            """
+        )
+        last_month_split = {row["feed"]: int(row["n"]) for row in cur.fetchall()}
+        cur.close()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "unknown", "error": str(exc)}
+
+    legacy = split.get("legacy_2026", 0)
+    creatio = split.get("creatio_bcs", 0)
+    lm_legacy = last_month_split.get("legacy_2026", 0)
+    lm_creatio = last_month_split.get("creatio_bcs", 0)
+
+    status = "ok"
+    warnings: list[str] = []
+    if total > 500 and legacy == 0:
+        status = "degraded"
+        warnings.append(
+            "service_requests_311 has Creatio rows but zero legacy_2026 rows; "
+            "add 311_service_requests_2026_legacy to boston_datasets_config.json "
+            "and run: boston_data_sync.py --dataset 311_service_requests_2026_legacy --full"
+        )
+    elif last_month > 0 and lm_legacy == 0 and lm_creatio > 0:
+        status = "degraded"
+        warnings.append(
+            f"Last month's Dorchester 311 count is Creatio-only ({lm_creatio}); "
+            "expect ~3,100/month when legacy_2026 is synced."
+        )
+
+    return {
+        "status": status,
+        "total_rows": total,
+        "by_feed": split,
+        "dorchester_last_month": last_month,
+        "dorchester_last_month_by_feed": last_month_split,
+        "warnings": warnings,
+    }

@@ -120,7 +120,24 @@ class BostonDataSyncer:
                     "table_name": "service_requests_311",
                     "primary_key": "CASE_ID",
                     "date_field": "OPEN_DATE",
-                    "description": "311 service requests (2024)",
+                    "description": "311 service requests — Creatio (trees, animals, parks)",
+                    "enabled": True
+                },
+                {
+                    "name": "311_service_requests_2026_legacy",
+                    "resource_id": "1a0b420d-99f1-4887-9851-990b2a5a6e17",
+                    "table_name": "service_requests_311",
+                    "primary_key": "CASE_ID",
+                    "date_field": "OPEN_DT",
+                    "description": "311 service requests — 2026 legacy (parking, trash, potholes)",
+                    "field_mapping": {
+                        "case_enquiry_id": "case_id",
+                        "open_dt": "open_date",
+                        "closed_dt": "close_date",
+                        "type": "service_name",
+                        "reason": "case_topic"
+                    },
+                    "force_backfill_days": 90,
                     "enabled": True
                 }
             ],
@@ -435,7 +452,13 @@ class BostonDataSyncer:
             table_exists = cursor.fetchone() is not None
 
             force_backfill_days = dataset_config.get("force_backfill_days")
-            if force_backfill_days:
+            if not incremental:
+                date_from = None
+                print(
+                    f"   📅 Full sync: fetching all available records "
+                    f"(through {date_to})"
+                )
+            elif force_backfill_days:
                 sync_from = datetime.now() - timedelta(days=int(force_backfill_days))
                 date_from = sync_from.strftime('%Y-%m-%d')
                 print(
@@ -1169,7 +1192,7 @@ class BostonDataSyncer:
             import traceback
             traceback.print_exc()
     
-    def sync_all(self) -> Dict:
+    def sync_all(self, incremental: Optional[bool] = None) -> Dict:
         """Sync all enabled datasets."""
         print("="*60)
         print("🚀 Boston Open Data Portal → MySQL Sync")
@@ -1183,7 +1206,8 @@ class BostonDataSyncer:
             'datasets': []
         }
         
-        incremental = self.datasets_config['sync_settings'].get('incremental_sync', True)
+        if incremental is None:
+            incremental = self.datasets_config['sync_settings'].get('incremental_sync', True)
         
         for dataset in self.datasets_config['datasets']:
             if not dataset.get('enabled', True):
@@ -1292,7 +1316,7 @@ def main():
             syncer.sync_dataset(dataset, incremental=not args.full)
         else:
             # Sync all enabled datasets
-            syncer.sync_all()
+            syncer.sync_all(incremental=not args.full)
 
 
 if __name__ == "__main__":
